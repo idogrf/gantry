@@ -7,7 +7,7 @@ that runs Claude shows its status, so you can run as many sessions as you like a
 
 Independent project, not affiliated with or endorsed by Anthropic.
 
-https://github.com/user-attachments/assets/c8f1c7a0-12ba-4c0c-a482-666c805bba7f
+https://github.com/user-attachments/assets/9a0f61cd-c2bd-46a1-966f-f141ee1364b0
 
 
 ![Gantry: a sidebar of sessions colored by status, and the focused Claude session](docs/images/ui-overview.png)

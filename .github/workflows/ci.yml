@@ -1,8 +1,7 @@
 name: CI
 on:
-  push:
-    # A release tag points at a commit CI has already checked.
-    tags-ignore: ['v*']
+  # Pull requests only, no run on a plain push. Whether a pull request from a fork runs by itself or waits for the
+  # maintainer's approval is a repository setting (Settings → Actions → General → Fork pull request workflows).
   pull_request:
   # macOS and Windows run only from here (Actions → CI → Run workflow): their minutes cost 10× and 2×.
   workflow_dispatch:

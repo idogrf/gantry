@@ -976,6 +976,7 @@ dependencies = [
  "notify",
  "serde",
  "serde_json",
+ "sysinfo 0.39.6",
  "tempfile",
  "tracing",
 ]
@@ -2213,6 +2214,7 @@ dependencies = [
  "app-core",
  "async-channel",
  "daemon",
+ "embed-resource",
  "protocol",
  "tempfile",
  "tokio",
@@ -4237,6 +4239,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-io-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33fafba39597d6dc1fb709123dfa8289d39406734be322956a69f0931c73bb15"
+dependencies = [
+ "libc",
+ "objc2-core-foundation",
+]
+
+[[package]]
 name = "objc2-io-surface"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6136,6 +6148,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysinfo"
+version = "0.39.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
+dependencies = [
+ "libc",
+ "memchr",
+ "ntapi",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "taffy"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6324,7 +6350,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -6751,6 +6777,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "ureq",
+ "winreg 0.56.0",
 ]
 
 [[package]]
@@ -8037,6 +8064,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "winreg"
+version = "0.56.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
+dependencies = [
+ "cfg-if",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "wio"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8350,7 +8387,7 @@ dependencies = [
  "rand 0.8.8",
  "screencapturekit",
  "screencapturekit-sys",
- "sysinfo",
+ "sysinfo 0.31.4",
  "tao-core-video-sys",
  "windows 0.61.3",
  "windows-capture",

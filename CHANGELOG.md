@@ -5,6 +5,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Windows** - Gantry runs on Windows 10 and 11 (x86_64): a per-user `.msi` installer and a portable `.zip` on the releases page. Sessions outside Gantry show as running and can be taken over, SSH sign-in dialogs work, notifications show as Gantry and focus their pane when clicked, and new terminals open PowerShell. See the README for what is not on Windows yet.
+
 ## [0.10.0] - 2026-10-22
 
 ### Added

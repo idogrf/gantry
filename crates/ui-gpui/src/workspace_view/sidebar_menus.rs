@@ -100,12 +100,14 @@ impl WorkspaceView {
 
     /// Start VS Code (`code <args>`), detached; say so if it cannot start.
     fn open_in_vscode(&mut self, args: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let started = std::process::Command::new("code")
-            .args(&args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let started = claude_index::process::hide_window(&mut std::process::Command::new(
+            claude_index::process::resolve_program("code"),
+        ))
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
         match started {
             // `code` hands off to VS Code and exits; reap it so it does not linger as a zombie.
             Ok(mut child) => {

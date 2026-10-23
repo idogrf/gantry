@@ -44,7 +44,9 @@ use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::ssh_wizard::SshWizard;
 use crate::terminal_view::TerminalView;
 use crate::theme::Theme;
-use crate::update_watch::{self, DaemonBuild};
+#[cfg(target_os = "linux")]
+use crate::update_watch;
+use crate::update_watch::DaemonBuild;
 
 /// Space between split panes (and around them).
 const PANE_GAP: f32 = 8.0;
@@ -342,6 +344,7 @@ pub struct WorkspaceView {
     /// The daemon's version, if it sent one.
     daemon_version: Option<Version>,
     /// Watches `start_path`'s directory (Linux).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     update_watch: Option<(RecommendedWatcher, Task<()>)>,
     /// The open update card; its focus handle takes Esc.
     update_card: Option<FocusHandle>,

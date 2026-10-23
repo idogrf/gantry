@@ -1,5 +1,5 @@
 //! Two daemons side by side: the GUI's multi-host case, with one client attached to each.
-#![cfg(unix)]
+// On Windows `sh` comes from Git for Windows (on PATH on CI runners).
 
 use std::time::{Duration, Instant};
 

@@ -1,5 +1,5 @@
-//! End-to-end tests of the daemon server over a real local socket.
-#![cfg(unix)]
+//! End-to-end tests of the daemon server over a real local socket. On Windows `sh` and `yes` come from Git for Windows
+//! (on PATH on CI runners).
 
 use std::time::Duration;
 
@@ -37,8 +37,8 @@ async fn start_server(idle_timeout: Duration) -> Harness {
 }
 
 struct TestClient {
-    recv: RecvHalf,
-    send: SendHalf,
+    recv: Option<RecvHalf>,
+    send: Option<SendHalf>,
     instance: String,
 }
 
@@ -46,7 +46,7 @@ impl TestClient {
     async fn connect(paths: &Paths) -> TestClient {
         let stream = Stream::connect(paths.socket_name().unwrap()).await.unwrap();
         let (recv, send) = stream.split();
-        let mut client = TestClient { recv, send, instance: String::new() };
+        let mut client = TestClient { recv: Some(recv), send: Some(send), instance: String::new() };
         client.send(&ClientMessage::Hello { protocol: PROTOCOL_VERSION }).await;
         match client.control().await {
             DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance, .. } => client.instance = instance,
@@ -56,15 +56,15 @@ impl TestClient {
     }
 
     async fn send(&mut self, message: &ClientMessage) {
-        write_frame(&mut self.send, &Frame::control(message)).await.unwrap();
+        write_frame(self.send.as_mut().unwrap(), &Frame::control(message)).await.unwrap();
     }
 
     async fn input(&mut self, pane: PaneId, bytes: &[u8]) {
-        write_frame(&mut self.send, &Frame::Data { pane, bytes: bytes.to_vec() }).await.unwrap();
+        write_frame(self.send.as_mut().unwrap(), &Frame::Data { pane, bytes: bytes.to_vec() }).await.unwrap();
     }
 
     async fn frame(&mut self) -> Option<Frame> {
-        timeout(Duration::from_secs(5), read_frame(&mut self.recv))
+        timeout(Duration::from_secs(5), read_frame(self.recv.as_mut().unwrap()))
             .await
             .expect("timed out waiting for a frame")
             .unwrap()
@@ -105,6 +105,20 @@ impl TestClient {
 
     async fn spawn(&mut self, script: &str) -> PaneId {
         self.spawn_request(sh(script, None)).await.0
+    }
+}
+
+/// Close without waiting for the server to read what is unread. On Windows a dropped pipe with unread data waits in
+/// interprocess's process-wide linger queue until its peer reads it; when a test ends, its server is dropped too, both
+/// ends wait for each other, and every later close in this test process waits behind them.
+impl Drop for TestClient {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let (Some(recv), Some(send)) = (self.recv.take(), self.send.take())
+            && let Ok(Stream::NamedPipe(stream)) = Stream::reunite(recv, send)
+        {
+            stream.inner().assume_flushed();
+        }
     }
 }
 
@@ -215,6 +229,8 @@ async fn a_second_client_takes_over() {
 }
 
 #[tokio::test]
+// Through ConPTY `yes` cannot fill the pipe and the outbox within 2 s while the other tests run; it passes alone.
+#[cfg_attr(windows, ignore = "too slow to flood beside the other tests on Windows; run alone with --ignored")]
 async fn lagging_client_gets_a_resync_instead_of_unbounded_buffering() {
     let h = start_server(Duration::from_secs(10)).await;
     let mut c = TestClient::connect(&h.paths).await;

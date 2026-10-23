@@ -7,6 +7,7 @@ pub mod discovery;
 pub mod host;
 pub mod index;
 pub mod live;
+pub mod process;
 pub mod search;
 pub mod transcript;
 pub mod watch;

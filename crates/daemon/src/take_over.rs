@@ -57,9 +57,9 @@ fn kill(pid: u32, force: bool) -> Result<(), String> {
         .map_err(|err| format!("could not signal it: {err}"))
 }
 
-#[cfg(not(unix))]
-fn kill(_pid: u32, _force: bool) -> Result<(), String> {
-    Err("not supported on this OS yet".into())
+#[cfg(windows)]
+fn kill(pid: u32, _force: bool) -> Result<(), String> {
+    claude_index::host::terminate(pid).map_err(|err| format!("could not stop it: {err}"))
 }
 
 /// Wait until `target` is gone (exited, or its pid reused by another process); false if it still runs after `timeout`.

@@ -183,7 +183,8 @@ fn headless_binary() -> Result<std::path::PathBuf, String> {
     if !path.is_file() {
         return Err(format!("{} is missing: install Gantry again.", path.display()));
     }
-    let output = std::process::Command::new(&path).arg("--version").output().ok();
+    let output =
+        claude_index::process::hide_window(&mut std::process::Command::new(&path)).arg("--version").output().ok();
     let found = output
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .and_then(|text| parse_version_output(text.trim()))

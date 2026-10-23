@@ -45,7 +45,7 @@ pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The version `path --version` prints, or `None` (not runnable, no answer within `timeout`, not a version).
 pub(crate) fn probe(path: &Path, timeout: Duration) -> Option<Version> {
-    let mut child = Command::new(path)
+    let mut child = claude_index::process::hide_window(&mut Command::new(path))
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -73,8 +73,13 @@ pub(crate) fn probe(path: &Path, timeout: Duration) -> Option<Version> {
 pub(crate) fn wait_for_lock_free(path: &Path, timeout: Duration) -> bool {
     let started = Instant::now();
     loop {
-        let free =
-            std::fs::OpenOptions::new().create(true).append(true).open(path).is_ok_and(|file| file.try_lock().is_ok());
+        // Read access too: Windows locks only through a handle that may read or write, which append alone is not.
+        let free = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(path)
+            .is_ok_and(|file| file.try_lock().is_ok());
         if free {
             return true;
         }
@@ -170,6 +175,13 @@ pub(crate) fn restart_command(path: &Path, resume_sessions: bool) -> Command {
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
     command
 }

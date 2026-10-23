@@ -1,4 +1,7 @@
 //! Gantry — a terminal for Claude Code sessions.
+// Release builds open no console window on Windows (and closing one would end Gantry); `gantryd` keeps the console
+// for `--version` in a terminal.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod args;
 

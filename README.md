@@ -92,7 +92,7 @@ in a hand-editable `settings.json` that applies live.
 
 ## Requirements and limits
 
-- Linux x86_64 (glibc 2.35 or newer: Ubuntu 22.04+, Fedora) and macOS on Apple Silicon. Windows is not available yet.
+- Linux x86_64 (glibc 2.35 or newer: Ubuntu 22.04+, Fedora), macOS on Apple Silicon, and Windows 10 or 11 (x86_64).
 - Gantry is GPU-rendered, so it needs working graphics drivers.
 - Claude Code must be installed. Gantry runs your own `claude` and does not replace it.
 - SSH hosts must be Linux x86_64.
@@ -160,7 +160,20 @@ Files and Folders. Granting Full Disk Access is not needed.
 
 ### Windows
 
-Planned for the future.
+Windows 10 or 11, x86_64. Download `gantry-<version>-x86_64-windows.msi` from the
+[releases page](https://github.com/idogrf/gantry/releases) and run it. It installs for your user only (no administrator
+rights) into `%LOCALAPPDATA%\Programs\Gantry`, adds Gantry to the Start menu and its folder to your `PATH`. The installer
+is not signed, so SmartScreen may warn the first time: choose More info, then Run anyway. Remove it from Settings > Apps.
+
+For a portable copy, unpack `gantry-<version>-x86_64-windows.zip` anywhere and run `gantry.exe`.
+
+New terminals open PowerShell (`pwsh` if installed, else Windows PowerShell); pick another shell in Settings. Not yet
+on Windows:
+
+- New panes start in the folder their tab was opened in, not the one the shell has since `cd`-ed to.
+- The SSH wizard cannot upload `gantryd` to a host; install it there by hand.
+- Gantry does not notice when it is reinstalled while running; restart it after an update.
+- Take over ends the outside Claude at once (Windows has no polite stop for a program in another console window).
 
 ## Usage
 

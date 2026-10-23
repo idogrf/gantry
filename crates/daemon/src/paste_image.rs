@@ -82,7 +82,7 @@ pub fn save_in_container(
 ) -> Result<String, String> {
     let name = file_name(format);
     let (program, args) = container_command(docker, container_id, remote_user, &name);
-    let mut child = Command::new(program)
+    let mut child = claude_index::process::hide_window(&mut Command::new(program))
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

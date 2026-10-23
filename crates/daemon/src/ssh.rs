@@ -65,7 +65,7 @@ impl Share {
     /// are ignored, and it gives up on ssh after 5 s. Blocks.
     pub fn close(&self, program: &str, target: &str, keep_sessions: bool) {
         let action = if keep_sessions { "stop" } else { "exit" };
-        let child = std::process::Command::new(program)
+        let child = claude_index::process::hide_window(&mut std::process::Command::new(program))
             .args(["-O", action, "-o"])
             .arg(format!("ControlPath={}", self.path.display()))
             .args(["--", target])
@@ -225,7 +225,7 @@ pub(crate) async fn prepare(
                     background = true;
                 }
             }
-            // No sign-in dialogs here (Windows): keys and the agent only.
+            // No sign-in dialogs without a local socket: keys and the agent only.
             Err(_) => background = true,
         }
     }
@@ -270,6 +270,7 @@ async fn run(
     };
     let interactive = matches!(attempt, Attempt::Interactive { .. });
     let mut command = tokio::process::Command::new(&program);
+    claude_index::process::hide_window(command.as_std_mut());
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     // Dropping the server removes the sign-in socket: it goes right after the handshake.
     let (askpass, state, background) = prepare(&mut command, &spec, &attempt).await;

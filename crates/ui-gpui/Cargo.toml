@@ -23,5 +23,8 @@ notify-rust.workspace = true
 rodio.workspace = true
 ureq = "3.4.2"
 
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+
 [dev-dependencies]
 tempfile.workspace = true

@@ -28,9 +28,17 @@ pub fn deliver(notice: Notice, channels: Channels, volume: f32, clicked: async_c
 
 fn show(notice: Notice, clicked: async_channel::Sender<NodeId>) {
     let mut notification = notify_rust::Notification::new();
-    notification.appname("Gantry").summary(&notice.summary).body(&notice.body).action("default", "Show");
-    if let Some(path) = logo_file() {
-        notification.image_path(&path);
+    notification.appname("Gantry").summary(&notice.summary).body(&notice.body);
+    // On Windows an action becomes a button; a click on the toast itself is the default response there.
+    #[cfg(not(windows))]
+    notification.action("default", "Show");
+    let logo = logo_file();
+    if let Some(path) = &logo {
+        notification.image_path(path);
+    }
+    #[cfg(windows)]
+    if windows_app_id::registered(logo.as_deref()) {
+        notification.app_id(crate::APP_ID);
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     notification.hint(notify_rust::Hint::DesktopEntry(crate::APP_ID.into()));
@@ -42,7 +50,13 @@ fn show(notice: Notice, clicked: async_channel::Sender<NodeId>) {
             return;
         }
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    let _ = handle.wait_for_response(|response: &notify_rust::NotificationResponse| {
+        if matches!(response, notify_rust::NotificationResponse::Default) {
+            let _ = clicked.send_blocking(notice.leaf);
+        }
+    });
+    #[cfg(all(unix, not(target_os = "macos")))]
     handle.wait_for_action(|action| {
         if action == "default" {
             let _ = clicked.send_blocking(notice.leaf);
@@ -50,6 +64,33 @@ fn show(notice: Notice, clicked: async_channel::Sender<NodeId>) {
     });
     #[cfg(target_os = "macos")]
     let _ = (handle, clicked, notice.leaf);
+}
+
+/// Windows shows a toast under the app id it names once that id has a display name (and icon) in the registry;
+/// without it the toast would be attributed to PowerShell.
+#[cfg(windows)]
+mod windows_app_id {
+    use std::sync::OnceLock;
+
+    /// Register Gantry's app id for this user (once per run, `icon` from the first call); whether that worked.
+    pub fn registered(icon: Option<&str>) -> bool {
+        static REGISTERED: OnceLock<bool> = OnceLock::new();
+        *REGISTERED.get_or_init(|| {
+            let key = format!(r"Software\Classes\AppUserModelId\{}", crate::APP_ID);
+            let result =
+                winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).create_subkey(key).and_then(|(key, _)| {
+                    key.set_value("DisplayName", &"Gantry")?;
+                    match icon {
+                        Some(icon) => key.set_value("IconUri", &icon),
+                        None => Ok(()),
+                    }
+                });
+            if let Err(err) = &result {
+                tracing::warn!("registering the notification app id failed: {err}");
+            }
+            result.is_ok()
+        })
+    }
 }
 
 /// The app logo as a file in the temp dir (notifications take a path), written again when it is gone.

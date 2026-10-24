@@ -41,6 +41,23 @@ impl TranscriptSummary {
     }
 }
 
+/// Name session `session` the way Claude's `/rename` does: a `custom-title` record appended to its transcript under
+/// `claude_dir`. `Ok(false)` when there is no such transcript.
+pub fn set_name(claude_dir: &Path, session: &str, name: &str) -> io::Result<bool> {
+    let file_name = format!("{session}.jsonl");
+    let Some(path) = std::fs::read_dir(claude_dir.join("projects"))?
+        .flatten()
+        .map(|folder| folder.path().join(&file_name))
+        .find(|path| path.is_file())
+    else {
+        return Ok(false);
+    };
+    let record = serde_json::json!({"type": "custom-title", "customTitle": name, "sessionId": session});
+    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    std::io::Write::write_all(&mut file, format!("{record}\n").as_bytes())?;
+    Ok(true)
+}
+
 /// Summarize the transcript at `path`. `Ok(None)` for transcripts without a directory or with nothing to
 /// show (no prompt and no title) — sessions that never started.
 pub fn summarize(path: &Path) -> io::Result<Option<TranscriptSummary>> {
@@ -211,6 +228,18 @@ mod tests {
         assert_eq!(summary.title(), "ai");
         summary.ai_title = None;
         assert_eq!(summary.title(), "prompt");
+    }
+
+    #[test]
+    fn set_name_appends_a_custom_title_that_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("projects").join("-repo");
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = write(&folder, &[user("hello"), record("custom-title", "customTitle", "Old")]);
+        let id = path.file_stem().unwrap().to_string_lossy().into_owned();
+        assert!(set_name(dir.path(), &id, "New name").unwrap());
+        assert_eq!(summarize(&path).unwrap().unwrap().name.as_deref(), Some("New name"));
+        assert!(!set_name(dir.path(), "missing", "x").unwrap());
     }
 
     #[test]

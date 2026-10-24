@@ -1,14 +1,19 @@
 use super::{FindSession, OpenRecents, OpenSettings, TakeOverTarget, ToggleSidebar, WorkspaceView};
 
 use app_core::attention::AlertKind;
-use gpui::{ClipboardItem, Context, Focusable, MouseButton, MouseMoveEvent, Pixels, Point, PromptLevel, Window};
+use app_core::text_field::TextField;
+use gpui::{
+    ClipboardItem, Context, Focusable, KeyDownEvent, MouseButton, MouseMoveEvent, Pixels, Point, PromptLevel, Window,
+};
 use protocol::host::HostId;
 use protocol::message::SessionState;
 
 use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortcut};
 use app_core::session_tree::{Activation, Tone, Unseen, status_tone};
+use app_core::split_tree::NodeId;
 
 use crate::context_menu::OpenMenu;
+use crate::field;
 use crate::settings_store::SettingsStore;
 use crate::sidebar_view::{RenameTarget, SidebarEvent};
 use crate::ssh_wizard::WizardStart;
@@ -53,7 +58,12 @@ impl WorkspaceView {
             }
             MenuAction::RenamePane(leaf) => {
                 let name = self.workspace.leaf_name(leaf).unwrap_or_default().to_string();
-                self.start_rename(RenameTarget::Pane(leaf), name, window, cx);
+                let tab = &self.workspace.tabs[self.workspace.active];
+                if tab.root.leaves().len() > 1 && tab.root.leaves().contains(&leaf) {
+                    self.start_header_rename(leaf, &name, window, cx);
+                } else {
+                    self.start_rename(RenameTarget::Pane(leaf), name, window, cx);
+                }
             }
             MenuAction::RenameTab(index) => {
                 let name = self.workspace.tab_name(index).unwrap_or_default().to_string();
@@ -125,6 +135,63 @@ impl WorkspaceView {
     }
 
     /// Open tab `index`'s right-click menu at `position` (it acts on that tab, not the visible one).
+    /// Edit a pane's name in place on its header (a pane of the visible split tab).
+    fn start_header_rename(&mut self, leaf: NodeId, current: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let mut field = TextField::default();
+        field.insert(current);
+        field.select_all();
+        self.header_rename_focus.focus(window, cx);
+        let blur = cx.on_blur(&self.header_rename_focus, window, |this, _, cx| {
+            this.header_rename = None;
+            cx.notify();
+        });
+        self.header_rename = Some((leaf, field, blur));
+        cx.notify();
+    }
+
+    pub(super) fn header_rename_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((leaf, field, _)) = &mut self.header_rename else { return };
+        match event.keystroke.key.as_str() {
+            "enter" => {
+                let (leaf, name) = (*leaf, field.text().to_string());
+                self.header_rename = None;
+                self.on_sidebar_event(SidebarEvent::Rename { target: RenameTarget::Pane(leaf), name }, window, cx);
+                self.focus_leaf(leaf, window, cx);
+            }
+            "escape" => {
+                let leaf = *leaf;
+                self.header_rename = None;
+                self.focus_leaf(leaf, window, cx);
+            }
+            _ => {
+                field::edit(field, &event.keystroke, cx);
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Give a local Claude pane's session the name too, as `/rename` would, so Claude and `claude --resume` show it.
+    fn name_claude_session(&self, leaf: NodeId, name: &str, cx: &Context<Self>) {
+        let Some(entry) = self.workspace.leaves.get(&leaf) else { return };
+        let Some(session) = entry.session.as_deref() else { return };
+        if name.is_empty() || !entry.host.is_local() || entry.launch.container.is_some() {
+            return;
+        }
+        let claude_dir = self
+            .sidebar
+            .read(cx)
+            .sessions()
+            .get(&entry.host, session)
+            .and_then(|info| info.claude_dir.clone())
+            .or_else(|| claude_index::config::config_dir(&std::env::vars().collect::<Vec<_>>()));
+        if let Some(dir) = claude_dir
+            && let Err(err) = claude_index::transcript::set_name(&dir, session, name)
+        {
+            tracing::warn!("naming Claude session {session}: {err}");
+        }
+    }
+
     pub(super) fn open_tab_menu(
         &mut self,
         index: usize,
@@ -203,7 +270,10 @@ impl WorkspaceView {
             SidebarEvent::Menu(action) => self.run_menu_action(action, window, cx),
             SidebarEvent::Rename { target, name } => {
                 let renamed = match target {
-                    RenameTarget::Pane(leaf) => self.workspace.rename_leaf(leaf, &name),
+                    RenameTarget::Pane(leaf) => {
+                        self.name_claude_session(leaf, &name, cx);
+                        self.workspace.rename_leaf(leaf, &name)
+                    }
                     RenameTarget::Tab(index) => self.workspace.rename_tab(index, &name),
                 };
                 if renamed {

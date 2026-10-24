@@ -885,8 +885,12 @@ impl SidebarView {
                         ),
                 )
             }
-            RowKind::Session { session, tone, note, .. } => {
+            RowKind::Session { session, tone, note, leaf, .. } => {
                 let colors = theme.tone(*tone);
+                let name = leaf
+                    .and_then(|leaf| self.panes.iter().find(|pane| pane.leaf == leaf))
+                    .and_then(|pane| pane.name.clone())
+                    .unwrap_or_else(|| session_title(session).to_string());
                 let card = HoverCard {
                     title: session_title(session).to_string(),
                     status: Some(note.clone()),
@@ -907,7 +911,8 @@ impl SidebarView {
                         .text_color(rgb(colors.ink))
                         .children(lead_mark(*tone, &colors, &theme))
                         .child(
-                            title(session_title(session).to_string())
+                            leaf.and_then(|leaf| self.rename_field(RenameTarget::Pane(leaf), &theme, cx))
+                                .unwrap_or_else(|| title(name))
                                 .when(*tone == Tone::NeedsInput, |title| title.font_weight(FontWeight::SEMIBOLD)),
                         )
                         .when(session.container.is_some(), |pill| pill.child(container_icon(colors.ink, &theme)))
@@ -1040,6 +1045,7 @@ impl UniformListDecoration for SelectionRing {
 fn renames(kind: &RowKind, target: RenameTarget) -> bool {
     match (kind, target) {
         (RowKind::Pane { entry, .. }, RenameTarget::Pane(leaf)) => entry.leaf == leaf,
+        (RowKind::Session { leaf: Some(row_leaf), .. }, RenameTarget::Pane(leaf)) => *row_leaf == leaf,
         (RowKind::Tab { index, .. }, RenameTarget::Tab(tab)) => *index == tab,
         _ => false,
     }

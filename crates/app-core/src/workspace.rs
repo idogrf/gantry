@@ -679,13 +679,9 @@ impl Workspace {
 
     /// Name a shell pane (trimmed; empty clears it). False, changing nothing, for a missing or Claude leaf.
     pub fn rename_leaf(&mut self, leaf: NodeId, name: &str) -> bool {
-        match self.leaves.get_mut(&leaf) {
-            Some(found) if !found.launch.is_claude() => {
-                found.name = Some(name.trim().to_string()).filter(|name| !name.is_empty());
-                true
-            }
-            _ => false,
-        }
+        let Some(found) = self.leaves.get_mut(&leaf) else { return false };
+        found.name = Some(name.trim().to_string()).filter(|name| !name.is_empty());
+        true
     }
 
     /// Name a tab (trimmed; empty clears it). False, changing nothing, for a missing tab or the Settings tab.
@@ -701,7 +697,7 @@ impl Workspace {
 
     /// The name the user gave a shell pane, if any (a Claude pane never shows one, even from a hand-edited layout).
     pub fn leaf_name(&self, leaf: NodeId) -> Option<&str> {
-        self.leaves.get(&leaf).filter(|leaf| !leaf.launch.is_claude())?.name.as_deref()
+        self.leaves.get(&leaf)?.name.as_deref()
     }
 
     /// The name the user gave a tab, if any.
@@ -2052,7 +2048,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_leaf_trims_clears_and_refuses_claude() {
+    fn rename_leaf_trims_and_clears_shell_and_claude_panes() {
         let mut ws = Workspace::default();
         let shell_leaf = ws.new_tab(shell("/repo"));
         let claude = ws.split(Axis::Vertical, PaneLaunch::claude("/repo".into())).unwrap();
@@ -2060,11 +2056,9 @@ mod tests {
         assert_eq!(ws.leaf_name(shell_leaf), Some("build box"));
         assert!(ws.rename_leaf(shell_leaf, "   "));
         assert_eq!(ws.leaf_name(shell_leaf), None);
-        assert!(!ws.rename_leaf(claude, "nope"));
-        assert_eq!(ws.leaf_name(claude), None);
+        assert!(ws.rename_leaf(claude, "review bot"));
+        assert_eq!(ws.leaf_name(claude), Some("review bot"));
         assert!(!ws.rename_leaf(999, "x"));
-        ws.leaves.get_mut(&claude).unwrap().name = Some("hand edited".into());
-        assert_eq!(ws.leaf_name(claude), None);
     }
 
     #[test]

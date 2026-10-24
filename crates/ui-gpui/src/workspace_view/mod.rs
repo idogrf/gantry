@@ -12,6 +12,7 @@ use app_core::release::Release;
 use app_core::search_merge::HostSearch;
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Divider, NodeId, Rect};
+use app_core::text_field::TextField;
 use app_core::theme_colors::Preset;
 use app_core::version::Version;
 use app_core::workspace::{ClaudeDirs, KilledOffline, Restored, Workspace};
@@ -335,6 +336,9 @@ pub struct WorkspaceView {
     tab_menu: Option<OpenMenu>,
     /// The open popup of a pane's split button (Claude or Terminal).
     pane_menu: Option<OpenMenu>,
+    /// A pane being renamed in place on its header, with its field; losing focus cancels it.
+    header_rename: Option<(NodeId, TextField, Subscription)>,
+    header_rename_focus: FocusHandle,
     /// The binary this window started from (resolved at start, before an install can replace it).
     start_path: Option<PathBuf>,
     /// The version found at `start_path` after a change; `None` until one was probed.
@@ -572,6 +576,8 @@ impl WorkspaceView {
             before_settings: None,
             tab_menu: None,
             pane_menu: None,
+            header_rename: None,
+            header_rename_focus: cx.focus_handle(),
             start_path: None,
             installed: None,
             daemon_version: None,

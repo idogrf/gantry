@@ -5,6 +5,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Rename Claude panes** - Rename now works on Claude panes, not only terminals: from the sidebar, or in place on a split pane's header. On this machine the name also becomes the Claude session's name, as `/rename` would, so Claude and `claude --resume` show it too.
+
 ## [0.10.0] - 2026-10-22
 
 ### Added

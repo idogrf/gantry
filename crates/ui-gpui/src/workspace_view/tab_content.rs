@@ -19,6 +19,7 @@ use app_core::shortcuts::{self, Platform};
 
 use crate::assets::{CLOSE_ICON, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
 use crate::context_menu::OpenMenu;
+use crate::field;
 use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{FolderRow, star};
 use crate::pane_drag::DraggedPane;
@@ -379,6 +380,23 @@ impl WorkspaceView {
                 } else {
                     None
                 };
+                // The pane's name being edited in place of its title.
+                let title_field =
+                    self.header_rename.as_ref().filter(|(editing, ..)| *editing == leaf).map(|(_, field, _)| {
+                        let press = field::on_press(cx, |this: &mut Self, offset, clicks, _, cx| {
+                            if let Some((_, field, _)) = &mut this.header_rename {
+                                field.press(offset, clicks);
+                            }
+                            cx.notify();
+                        });
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .track_focus(&self.header_rename_focus)
+                            .on_key_down(cx.listener(Self::header_rename_key))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(field::render(field, "Name", true, &theme, press))
+                    });
                 // While a pane is being dragged, an overlay takes the pointer from the terminal and tracks the drop.
                 let overlay = dragging_pane.then(|| {
                     div()
@@ -433,8 +451,21 @@ impl WorkspaceView {
                                     content
                                         .when(multiple, |pane| {
                                             pane.child(pane_header(
-                                                index, leaf, title, status, unseen, offline, animate, container, host,
-                                                dir, folder, project, git_chip, &theme,
+                                                index,
+                                                leaf,
+                                                title,
+                                                status,
+                                                unseen,
+                                                offline,
+                                                animate,
+                                                container,
+                                                host,
+                                                dir,
+                                                folder,
+                                                project,
+                                                git_chip,
+                                                title_field,
+                                                &theme,
                                             ))
                                         })
                                         .when_some(last_prompt, |pane, text| {
@@ -553,6 +584,7 @@ fn pane_header(
     folder: Option<String>,
     project: Option<u32>,
     git_chip: Option<gpui::Stateful<Div>>,
+    title_field: Option<Div>,
     theme: &Theme,
 ) -> impl IntoElement {
     let tone = leaf_tone(status.as_ref(), unseen, offline);
@@ -592,7 +624,7 @@ fn pane_header(
         .when(sweep, |header| header.child(working_sweep(("sweep-pane", index), px(RADIUS_SMALL), theme)))
         .when_some(project, |header, color| header.child(side_line(color, theme)))
         .children(pin)
-        .child(div().flex_1().min_w_0().truncate().child(title))
+        .child(title_field.unwrap_or_else(|| div().flex_1().min_w_0().truncate().child(title)))
         .children(git_chip)
         .when(container, |header| {
             header.child(container_icon(colors.map_or(theme.tokens.text, |colors| colors.ink), theme))

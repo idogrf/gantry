@@ -436,6 +436,7 @@ impl WorkspaceView {
                         .name
                         .clone()
                         .unwrap_or_else(|| view.map_or_else(|| leaf.launch.label(), |view| view.title())),
+                    name: leaf.name.clone(),
                     session: leaf.session.clone(),
                     claude: leaf.launch.is_claude(),
                     ended: view.is_some_and(|view| view.has_ended()),

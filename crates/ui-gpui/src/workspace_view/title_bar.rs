@@ -387,8 +387,10 @@ impl WorkspaceView {
         let leaf = tab.focused;
         let animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
         let tab_name = tab.name.clone().filter(|_| tab.root.leaves().len() > 1);
-        let title =
-            tab_name.or_else(|| self.sidebar.read(cx).leaf_title(leaf)).unwrap_or_else(|| self.tab_title(index, cx));
+        let title = tab_name
+            .or_else(|| self.workspace.leaf_name(leaf).map(String::from))
+            .or_else(|| self.sidebar.read(cx).leaf_title(leaf))
+            .unwrap_or_else(|| self.tab_title(index, cx));
         let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
         let unseen = self.unseen_of(leaf);
         let container = self.workspace.leaves.get(&leaf).is_some_and(|leaf| leaf.launch.container.is_some());

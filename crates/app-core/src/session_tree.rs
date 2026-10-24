@@ -40,6 +40,8 @@ pub struct PaneEntry {
     pub cwd: PathBuf,
     /// Pane title.
     pub title: String,
+    /// Name the user gave it; a Claude pane's row shows it instead of the session's title.
+    pub name: Option<String>,
     /// Claude session it runs (or last ran); `None` for other programs.
     pub session: Option<String>,
     /// It runs Claude Code.
@@ -952,6 +954,7 @@ mod tests {
             host: HostId::local(),
             cwd: cwd.into(),
             title: format!("pane {leaf}"),
+            name: None,
             session: session.map(String::from),
             claude: session.is_some(),
             ended: false,

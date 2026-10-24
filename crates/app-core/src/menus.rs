@@ -429,6 +429,7 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
             items.extend(folder_items(&session.cwd, vscode, &session.host));
             if let Some(leaf) = leaf {
                 items.push(MenuItem::Separator);
+                items.push(entry("Rename…", MenuAction::RenamePane(*leaf)));
                 items.push(close_item(*leaf, alone));
             }
         }
@@ -451,9 +452,7 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
                             MenuAction::NewHere { dir: pane.cwd.clone(), claude: false, host: pane.host.clone() },
                         ));
                     }
-                    if !claude {
-                        items.push(entry("Rename…", MenuAction::RenamePane(pane.leaf)));
-                    }
+                    items.push(entry("Rename…", MenuAction::RenamePane(pane.leaf)));
                 }
             }
             items.push(MenuItem::Separator);
@@ -559,6 +558,7 @@ mod tests {
             host: protocol::host::HostId::local(),
             cwd: "/r/app".into(),
             title: "p".into(),
+            name: None,
             session: claude.then(|| "new".to_string()),
             claude,
             ended,
@@ -645,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn only_shell_panes_and_tabs_offer_rename() {
+    fn panes_and_tabs_offer_rename() {
         let rename = |items: &[MenuItem]| {
             items.iter().find_map(|item| match item {
                 MenuItem::Entry(entry) if entry.label == "Rename…" => Some(entry.action.clone()),
@@ -655,10 +655,14 @@ mod tests {
         let menus_row_menu = |row: &Row| row_menu(row, ALONE, &MenuContext::default()).unwrap();
         let shell = menus_row_menu(&pane_row(false, false));
         assert_eq!(rename(&shell), Some(MenuAction::RenamePane(7)));
-        assert_eq!(rename(&menus_row_menu(&pane_row(true, false))), None);
-        assert_eq!(rename(&menus_row_menu(&pane_row(true, true))), None);
+        assert_eq!(rename(&menus_row_menu(&pane_row(true, false))), Some(MenuAction::RenamePane(7)));
+        assert_eq!(rename(&menus_row_menu(&pane_row(true, true))), None, "an exited Claude offers Continue instead");
         let running = SessionState::Managed { pane: 1 };
-        assert_eq!(rename(&menus_row_menu(&session_row(running, Tone::Idle, Some(4)))), None);
+        assert_eq!(
+            rename(&menus_row_menu(&session_row(running, Tone::Idle, Some(4)))),
+            Some(MenuAction::RenamePane(4))
+        );
+        assert_eq!(rename(&menus_row_menu(&session_row(running, Tone::Idle, None))), None);
         let items = tab_menu(3, &HostId::local(), Path::new("/r/app"), vec![], &MenuContext::default(), None, 2);
         assert_eq!(rename(&items), Some(MenuAction::RenameTab(3)));
         let single = tab_menu(3, &HostId::local(), Path::new("/r/app"), vec![], &MenuContext::default(), None, 1);
@@ -729,6 +733,7 @@ mod tests {
                 "Open folder",
                 "Open in VS Code",
                 "│",
+                "Rename…",
                 "Close tab"
             ]
         );
@@ -777,6 +782,7 @@ mod tests {
                 "Open folder",
                 "Open in VS Code",
                 "│",
+                "Rename…",
                 "Close tab"
             ]
         );
@@ -793,6 +799,7 @@ mod tests {
             [
                 "New Claude here",
                 "New terminal here",
+                "Rename…",
                 "│",
                 "Copy session id",
                 "Copy folder path",
@@ -830,7 +837,7 @@ mod tests {
         let items = row_menu(&live, ALONE, &two_dirs(None)).unwrap();
         assert_eq!(labels(&items)[..4], ["New Claude here", "New Claude here with ▸", "New terminal here", "│"]);
         let pane = row_menu(&pane_row(true, false), ALONE, &two_dirs(None)).unwrap();
-        assert_eq!(labels(&pane)[..4], ["New Claude here", "New Claude here with ▸", "New terminal here", "│"]);
+        assert_eq!(labels(&pane)[..4], ["New Claude here", "New Claude here with ▸", "New terminal here", "Rename…"]);
     }
 
     #[test]

@@ -16,6 +16,8 @@ pub enum Group {
     Overlays,
     /// The terminal itself: clipboard and zoom.
     Terminal,
+    /// Text-field editing of the prompt line.
+    Editing,
 }
 
 impl Group {
@@ -27,6 +29,7 @@ impl Group {
             Group::Focus => "Focus",
             Group::Overlays => "Overlays and window",
             Group::Terminal => "Terminal",
+            Group::Editing => "Text editing",
         }
     }
 }
@@ -56,6 +59,11 @@ const fn action(
     Action { id, group, label, linux: Some(linux), macos: Some(macos) }
 }
 
+/// An action bound by default only on macOS, where these keys are the text-field standard.
+const fn mac(id: &'static str, label: &'static str, macos: &'static str) -> Action {
+    Action { id, group: Group::Editing, label, linux: None, macos: Some(macos) }
+}
+
 /// Every action, in page order.
 pub const ACTIONS: &[Action] = &[
     action("newClaudeTab", Group::Tabs, "New Claude session (same folder)", "ctrl-shift-t", "cmd-t"),
@@ -69,10 +77,10 @@ pub const ACTIONS: &[Action] = &[
     action("splitDownClaude", Group::Panes, "Split down (Claude)", "ctrl-shift-e", "cmd-e"),
     action("splitDownShell", Group::Panes, "Split down (terminal)", "ctrl-shift-alt-e", "cmd-alt-e"),
     action("closePane", Group::Panes, "Close pane", "ctrl-shift-w", "cmd-w"),
-    action("focusLeft", Group::Focus, "Focus left", "ctrl-shift-left", "cmd-left"),
-    action("focusRight", Group::Focus, "Focus right", "ctrl-shift-right", "cmd-right"),
-    action("focusUp", Group::Focus, "Focus up", "ctrl-shift-up", "cmd-up"),
-    action("focusDown", Group::Focus, "Focus down", "ctrl-shift-down", "cmd-down"),
+    action("focusLeft", Group::Focus, "Focus left", "ctrl-shift-left", "cmd-alt-left"),
+    action("focusRight", Group::Focus, "Focus right", "ctrl-shift-right", "cmd-alt-right"),
+    action("focusUp", Group::Focus, "Focus up", "ctrl-shift-up", "cmd-alt-up"),
+    action("focusDown", Group::Focus, "Focus down", "ctrl-shift-down", "cmd-alt-down"),
     action("openLauncher", Group::Overlays, "New Claude session…", "ctrl-shift-o", "cmd-o"),
     action("findSession", Group::Overlays, "Find session", "ctrl-shift-f", "cmd-f"),
     action("openRecents", Group::Overlays, "Recent sessions", "ctrl-shift-r", "cmd-r"),
@@ -84,6 +92,21 @@ pub const ACTIONS: &[Action] = &[
     action("zoomIn", Group::Terminal, "Zoom in", "ctrl-=", "cmd-="),
     action("zoomOut", Group::Terminal, "Zoom out", "ctrl--", "cmd--"),
     action("zoomReset", Group::Terminal, "Reset zoom", "ctrl-0", "cmd-0"),
+    mac("lineStart", "Move to line start", "cmd-left"),
+    mac("lineEnd", "Move to line end", "cmd-right"),
+    mac("wordLeft", "Move a word left", "alt-left"),
+    mac("wordRight", "Move a word right", "alt-right"),
+    mac("deleteToLineStart", "Delete to line start", "cmd-backspace"),
+    mac("deleteToLineEnd", "Delete to line end", "cmd-delete"),
+    mac("deleteWordRight", "Delete the next word", "alt-delete"),
+    mac("undoEdit", "Undo", "cmd-z"),
+    mac("selectLeft", "Select a character left", "shift-left"),
+    mac("selectRight", "Select a character right", "shift-right"),
+    mac("selectWordLeft", "Select a word left", "alt-shift-left"),
+    mac("selectWordRight", "Select a word right", "alt-shift-right"),
+    mac("selectToLineStart", "Select to line start", "cmd-shift-left"),
+    mac("selectToLineEnd", "Select to line end", "cmd-shift-right"),
+    mac("selectLine", "Select the line", "cmd-a"),
 ];
 
 /// Which defaults and labels apply. Windows uses `Linux`.
@@ -269,7 +292,10 @@ pub fn check(keystroke: &str, action: &str, current: &[(&'static str, String)]) 
     if matches!(keystroke, "escape" | "tab" | "shift-tab" | "enter" | "backspace") {
         return Check::Reserved("belongs to the terminal");
     }
-    if !(parsed.ctrl || parsed.alt || parsed.cmd) {
+    // Text editing may also use Shift with a navigation key, as text fields do.
+    let editing = ACTIONS.iter().any(|entry| entry.id == action && entry.group == Group::Editing);
+    let shift_navigation = parsed.shift && matches!(parsed.key, "left" | "right" | "up" | "down" | "home" | "end");
+    if !(parsed.ctrl || parsed.alt || parsed.cmd || editing && shift_navigation) {
         return Check::Reserved("needs Ctrl, Alt or Cmd");
     }
     let letter = parsed.key.len() == 1 && parsed.key.as_bytes()[0].is_ascii_alphabetic();
@@ -516,11 +542,21 @@ mod tests {
     }
 
     #[test]
+    fn only_text_editing_may_use_shift_with_an_arrow() {
+        assert_eq!(check("shift-left", "selectLeft", &[]), Check::Ok);
+        assert_eq!(check("shift-left", "copy", &[]), Check::Reserved("needs Ctrl, Alt or Cmd"));
+        assert_eq!(check("shift-a", "selectLine", &[]), Check::Reserved("needs Ctrl, Alt or Cmd"));
+    }
+
+    #[test]
     fn every_action_has_defaults_that_pass_the_checks() {
         for platform in [Platform::Linux, Platform::MacOs] {
             let list = bindings(&none(), platform);
             for entry in ACTIONS {
-                let key = current(entry.id, &none(), platform).unwrap();
+                let Some(key) = current(entry.id, &none(), platform) else {
+                    assert_eq!((entry.group, platform), (Group::Editing, Platform::Linux), "{} unbound", entry.id);
+                    continue;
+                };
                 assert_eq!(check(&key, entry.id, &list), Check::Ok, "{} {key}", entry.id);
             }
             let unique: std::collections::BTreeSet<_> = list.iter().map(|(_, key)| key.clone()).collect();

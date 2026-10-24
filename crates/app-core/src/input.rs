@@ -117,6 +117,27 @@ fn csi_u(code: u32, m: u8) -> Vec<u8> {
     if m > 1 { format!("\x1b[{code};{m}u") } else { format!("\x1b[{code}u") }.into_bytes()
 }
 
+/// The readline/Emacs bytes shells and Claude read for a Text editing action (`id` in `shortcuts::ACTIONS`), like
+/// iTerm's "Natural Text Editing". `None` for the selection actions and anything else.
+pub fn edit_bytes(id: &str) -> Option<&'static [u8]> {
+    Some(match id {
+        "lineStart" => b"\x01",
+        "lineEnd" => b"\x05",
+        "wordLeft" => b"\x1bb",
+        "wordRight" => b"\x1bf",
+        "deleteToLineStart" => b"\x15",
+        "deleteToLineEnd" => b"\x0b",
+        "deleteWordRight" => b"\x1bd",
+        "undoEdit" => b"\x1f",
+        _ => return None,
+    })
+}
+
+/// `count` presses of → (← for a negative count).
+pub fn arrow_presses(count: i32, app_cursor: bool) -> Vec<u8> {
+    cursor_key(if count > 0 { 'C' } else { 'D' }, 1, app_cursor).repeat(count.unsigned_abs() as usize)
+}
+
 fn cursor_key(letter: char, m: u8, app_cursor: bool) -> Vec<u8> {
     if m > 1 {
         format!("\x1b[1;{m}{letter}")
@@ -194,6 +215,22 @@ mod tests {
         assert_eq!(enc("f1", "", LEGACY), Some(b"\x1bOP".to_vec()));
         assert_eq!(enc("f5", "", LEGACY), Some(b"\x1b[15~".to_vec()));
         assert_eq!(enc("f12", "s", LEGACY), Some(b"\x1b[24;2~".to_vec()));
+    }
+
+    #[test]
+    fn editing_actions_become_readline_bytes() {
+        assert_eq!(edit_bytes("lineStart"), Some(&b"\x01"[..]));
+        assert_eq!(edit_bytes("wordRight"), Some(&b"\x1bf"[..]));
+        assert_eq!(edit_bytes("undoEdit"), Some(&b"\x1f"[..]));
+        assert_eq!(edit_bytes("selectLine"), None, "selection is drawn here, not sent");
+        let editing = crate::shortcuts::ACTIONS.iter().filter(|a| a.group == crate::shortcuts::Group::Editing);
+        assert!(editing.clone().all(|a| edit_bytes(a.id).is_some() || a.id.starts_with("select")));
+    }
+
+    #[test]
+    fn arrow_presses_repeat_the_cursor_key() {
+        assert_eq!(arrow_presses(2, false), b"\x1b[C\x1b[C".to_vec());
+        assert_eq!(arrow_presses(-1, true), b"\x1bOD".to_vec());
     }
 
     #[test]

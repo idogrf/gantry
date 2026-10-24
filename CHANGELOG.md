@@ -5,6 +5,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Text editing at the prompt** - Click on the prompt line to move the cursor there. On macOS, Cmd/Option+arrows move by line and word, Cmd/Option+Delete delete, Shift (with Option or Cmd) selects, Cmd+A selects the line and Cmd+Z undoes; Backspace or typing replaces a selection on the prompt line. All of them are on the Shortcuts page under Text editing. Pane focus moves to Cmd+Option+arrows on macOS.
+
 ## [0.10.0] - 2026-10-22
 
 ### Added

@@ -10,7 +10,7 @@ use crate::hover_card::{self, HoverCard};
 use crate::settings_store::SettingsStore;
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme};
 
-const GROUPS: [Group; 5] = [Group::Tabs, Group::Panes, Group::Focus, Group::Overlays, Group::Terminal];
+const GROUPS: [Group; 6] = [Group::Tabs, Group::Panes, Group::Focus, Group::Overlays, Group::Terminal, Group::Editing];
 
 /// A keystroke waiting for the user's yes: another action has it (`other` is that action), or programs in the
 /// terminal use it (`other` is why).

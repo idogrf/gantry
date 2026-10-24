@@ -15,6 +15,17 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, R
 use crate::palette::{DARK, Palette};
 use crate::snapshot::{CellStyle, CellView, CursorView, Rgb, ScreenSnapshot};
 
+/// How far a Shift+arrow moves the moving end of a prompt selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// One character (Shift+arrow).
+    Char,
+    /// To a word's edge (Shift+Option+arrow).
+    Word,
+    /// To the line's start or end (Shift+Cmd+arrow).
+    Line,
+}
+
 /// Keyboard-relevant terminal modes set by the running program.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct KeyModes {
@@ -306,6 +317,122 @@ impl TermState {
         (0..self.term.screen_lines() as i32).contains(&row).then_some((point.column.0, row as usize))
     }
 
+    /// How many characters the cursor must move to reach viewport cell `(col, row)`, negative for left. Only at a
+    /// prompt (main screen, not scrolled back) and on the cursor's line, soft-wrapped rows included; a cell past the
+    /// line's text means its end. `None` when it cannot or need not move.
+    pub fn cursor_moves_to(&self, col: u16, row: u16) -> Option<i32> {
+        let cursor = self.prompt_cursor()?;
+        let steps = self.steps(cursor, (row as usize, self.clamp_to_text(row as usize, col as usize)))?;
+        (steps != 0).then_some(steps)
+    }
+
+    /// A selection on the prompt's line, as an edit: the cursor moves this many characters to the selection's end,
+    /// then this many Backspaces delete it. `None` without a selection there.
+    pub fn prompt_selection_edit(&self) -> Option<(i32, usize)> {
+        let cursor = self.prompt_cursor()?;
+        let range = self.term.selection.as_ref()?.to_range(&self.term)?;
+        let (start, end) = (range.start, range.end);
+        if start.line.0 < 0 {
+            return None;
+        }
+        let start = (start.line.0 as usize, self.clamp_to_text(start.line.0 as usize, start.column.0));
+        let end = (end.line.0 as usize, self.clamp_to_text(end.line.0 as usize, end.column.0 + 1));
+        let (moves, length) = (self.steps(cursor, end)?, self.steps(start, end)?);
+        (length > 0).then_some((moves, length as usize))
+    }
+
+    /// The prompt line's cells (`(row, col)`): from the start of its first (soft-wrapped) row to the end of its text.
+    pub fn prompt_line(&self) -> Option<((usize, usize), (usize, usize))> {
+        let (row, _) = self.prompt_cursor()?;
+        let cols = self.term.columns();
+        let wraps = |row: usize| self.term.grid()[Line(row as i32)][Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+        let first = (0..row).rev().take_while(|&above| wraps(above)).last().unwrap_or(row);
+        let last = (row..self.term.screen_lines() - 1).find(|&below| !wraps(below)).unwrap_or(row);
+        Some(((first, 0), (last, self.clamp_to_text(last, cols))))
+    }
+
+    /// The cell one `reach` from `from` (`(row, col)`) on the prompt line, forward or back, kept within it.
+    pub fn prompt_step(&self, from: (usize, usize), reach: Reach, forward: bool) -> (usize, usize) {
+        let Some((start, end)) = self.prompt_line() else { return from };
+        let cols = self.term.columns();
+        let (start, end) = (start.0 * cols + start.1, end.0 * cols + end.1);
+        let cell = |index: usize| &self.term.grid()[Line((index / cols) as i32)][Column(index % cols)];
+        let word = |index: usize| cell(index).c.is_alphanumeric() || cell(index).c == '_';
+        let step = |index: usize| {
+            if forward { (index < end).then_some(index + 1) } else { (index > start).then(|| index - 1) }
+        };
+        let next = |index: usize| {
+            let mut index = step(index)?;
+            while index < end && cell(index).flags.contains(Flags::WIDE_CHAR_SPACER) {
+                index = step(index)?;
+            }
+            Some(index)
+        };
+        // The character a move crosses: the one at the index going forward, the one before it going back.
+        let crossed = |index: usize| if forward { index } else { index - 1 };
+        let at_edge = |index: usize| if forward { index >= end } else { index <= start };
+        let mut index = (from.0 * cols + from.1).clamp(start, end);
+        match reach {
+            Reach::Char => index = next(index).unwrap_or(index),
+            Reach::Line => index = if forward { end } else { start },
+            Reach::Word => {
+                while !at_edge(index) && !word(crossed(index)) {
+                    index = next(index).unwrap_or(index);
+                }
+                while !at_edge(index) && word(crossed(index)) {
+                    index = next(index).unwrap_or(index);
+                }
+            }
+        }
+        (index / cols, index % cols)
+    }
+
+    /// Select the cells between `a` and `b` (`(row, col)`, either order, the later one excluded); none when equal.
+    pub fn select_cells(&mut self, a: (usize, usize), b: (usize, usize)) {
+        if a == b {
+            self.clear_selection();
+            return;
+        }
+        let ((first_row, first_col), last) = if a < b { (a, b) } else { (b, a) };
+        let cols = self.term.columns();
+        let last = last.0 * cols + last.1 - 1;
+        self.start_selection(first_col as u16, first_row as u16, false);
+        self.update_selection((last % cols) as u16, (last / cols) as u16, true);
+    }
+
+    /// The cursor's viewport cell (`(row, col)`), when it sits at a prompt: main screen, not scrolled back.
+    pub fn prompt_cursor(&self) -> Option<(usize, usize)> {
+        if self.alt_screen() || self.term.grid().display_offset() != 0 {
+            return None;
+        }
+        self.cursor_cell().map(|(col, row)| (row, col))
+    }
+
+    /// `col` on viewport `row`, no further than the end of its text (or the cursor, on the cursor's row).
+    fn clamp_to_text(&self, row: usize, col: usize) -> usize {
+        let end = self.row_text(row as u16).chars().count();
+        let end = match self.cursor_cell() {
+            Some((cursor_col, cursor_row)) if cursor_row == row => end.max(cursor_col),
+            _ => end,
+        };
+        col.min(end)
+    }
+
+    /// Characters from viewport cell `from` to `to` (`(row, col)`), negative going left, when every row between
+    /// them wraps into the next (one line of input); wide characters count once.
+    fn steps(&self, from: (usize, usize), to: (usize, usize)) -> Option<i32> {
+        let (grid, cols) = (self.term.grid(), self.term.columns());
+        let (lo, hi) = if from <= to { (from, to) } else { (to, from) };
+        let cell = |index: usize| &grid[Line((index / cols) as i32)][Column(index % cols)];
+        if (lo.0..hi.0).any(|row| !cell(row * cols + cols - 1).flags.contains(Flags::WRAPLINE)) {
+            return None;
+        }
+        let steps = (lo.0 * cols + lo.1..hi.0 * cols + hi.1)
+            .filter(|&index| !cell(index).flags.contains(Flags::WIDE_CHAR_SPACER))
+            .count() as i32;
+        Some(if from <= to { steps } else { -steps })
+    }
+
     /// Resolve the visible screen into plain data for rendering.
     pub fn snapshot(&self) -> ScreenSnapshot {
         let content = self.term.renderable_content();
@@ -433,6 +560,91 @@ mod tests {
     use super::*;
     use crate::palette::DARK;
     use crate::snapshot::Rgb;
+
+    #[test]
+    fn a_click_on_the_prompt_line_moves_the_cursor_there() {
+        let mut t = TermState::new(10, 3);
+        t.feed(b"hello");
+        assert_eq!(t.cursor_moves_to(1, 0), Some(-4));
+        assert_eq!(t.cursor_moves_to(8, 0), None, "past the text is the end, where the cursor already is");
+        t.feed(b"\x1b[3D");
+        assert_eq!(t.cursor_moves_to(9, 0), Some(3), "clamped to the end of the text");
+    }
+
+    #[test]
+    fn a_click_follows_soft_wraps_but_not_other_lines() {
+        let mut t = TermState::new(10, 3);
+        t.feed(b"abcdefghijkl");
+        assert_eq!(t.cursor_moves_to(3, 0), Some(-9), "from the wrapped row back to the first");
+        let mut t = TermState::new(10, 3);
+        t.feed(b"ab\r\ncd");
+        assert_eq!(t.cursor_moves_to(0, 0), None, "a previous line is not the prompt");
+    }
+
+    #[test]
+    fn a_selection_on_the_prompt_line_becomes_moves_and_backspaces() {
+        let mut t = TermState::new(20, 3);
+        t.feed(b"$ hello world");
+        t.start_selection(8, 0, false);
+        t.update_selection(12, 0, true);
+        assert_eq!(t.prompt_selection_edit(), Some((0, 5)), "\"world\" ends at the cursor");
+        t.start_selection(2, 0, false);
+        t.update_selection(6, 0, true);
+        assert_eq!(t.prompt_selection_edit(), Some((-6, 5)), "\"hello\": back to its end, then delete it");
+        t.start_selection(10, 0, false);
+        t.update_selection(19, 0, true);
+        assert_eq!(t.prompt_selection_edit(), Some((0, 3)), "blank space past the text is not deleted");
+    }
+
+    #[test]
+    fn a_selection_off_the_prompt_line_is_not_an_edit() {
+        let mut t = TermState::new(20, 3);
+        t.feed(b"old output\r\n$ ls");
+        t.start_selection(0, 0, false);
+        t.update_selection(2, 0, true);
+        assert_eq!(t.prompt_selection_edit(), None);
+    }
+
+    #[test]
+    fn prompt_steps_move_by_character_word_and_line() {
+        let mut t = TermState::new(20, 3);
+        t.feed(b"$ hello big_world");
+        let cursor = t.prompt_cursor().unwrap();
+        assert_eq!(cursor, (0, 17));
+        assert_eq!(t.prompt_step(cursor, Reach::Char, false), (0, 16));
+        assert_eq!(t.prompt_step(cursor, Reach::Char, true), (0, 17), "the end of the text is as far as it goes");
+        assert_eq!(t.prompt_step(cursor, Reach::Word, false), (0, 8), "big_world is one word");
+        assert_eq!(t.prompt_step((0, 8), Reach::Word, false), (0, 2));
+        assert_eq!(t.prompt_step((0, 2), Reach::Word, true), (0, 7));
+        assert_eq!(t.prompt_step(cursor, Reach::Line, false), (0, 0));
+    }
+
+    #[test]
+    fn select_cells_then_delete_takes_exactly_those_characters() {
+        let mut t = TermState::new(20, 3);
+        t.feed(b"$ hello world");
+        let cursor = t.prompt_cursor().unwrap();
+        let word = t.prompt_step(cursor, Reach::Word, false);
+        t.select_cells(cursor, word);
+        assert_eq!(t.selection_text().as_deref(), Some("world"));
+        assert_eq!(t.prompt_selection_edit(), Some((0, 5)));
+        t.select_cells(cursor, cursor);
+        assert_eq!(t.selection_text(), None);
+    }
+
+    #[test]
+    fn the_prompt_line_spans_its_soft_wraps() {
+        let mut t = TermState::new(10, 3);
+        t.feed(b"x\r\n$ abcdefghij");
+        assert_eq!(t.prompt_line(), Some(((1, 0), (2, 2))));
+    }
+
+    #[test]
+    fn no_click_to_move_on_the_alternate_screen() {
+        let mut t = TermState::new(10, 3);
+        t.feed(b"\x1b[?1049hhello");
+        assert_eq!(t.cursor_moves_to(0, 0), None);
+    }
 
     #[test]
     fn plain_text_lands_in_grid_and_moves_cursor() {

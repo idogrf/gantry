@@ -5,6 +5,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Open sessions together** - Shift-click sessions in the sidebar, then Enter (or right-click, Open N together) lays them out 2×2, a new tab per four. Esc clears the picks.
+
 ## [0.10.0] - 2026-10-22
 
 ### Added

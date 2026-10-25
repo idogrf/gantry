@@ -312,6 +312,16 @@ pub enum RowKey {
     TakeOver(String),
 }
 
+/// Add `pick` to `picks` (in pick order), or take it out.
+pub fn toggle_pick(picks: &mut Vec<NodeId>, pick: NodeId) {
+    match picks.iter().position(|picked| *picked == pick) {
+        Some(at) => {
+            picks.remove(at);
+        }
+        None => picks.push(pick),
+    }
+}
+
 /// What activating (click / Enter) a row does.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Activation {
@@ -366,6 +376,15 @@ impl Row {
     /// Whether keyboard selection can land here (details are skipped).
     pub fn selectable(&self) -> bool {
         !matches!(self.kind, RowKind::Detail { .. })
+    }
+
+    /// The pane Shift-clicking this row picks to open together.
+    pub fn pick(&self) -> Option<NodeId> {
+        match &self.kind {
+            RowKind::Session { leaf, .. } => *leaf,
+            RowKind::Pane { entry, .. } => Some(entry.leaf),
+            _ => None,
+        }
     }
 
     /// What activating this row does.
@@ -1248,6 +1267,26 @@ mod tests {
         assert_eq!(by(RowKey::Session("e".into())), Activation::ToggleDetails("e".into()));
         assert_eq!(by(RowKey::Session("orphan".into())), Activation::FocusPane(PaneKey::local(1)));
         assert_eq!(by(RowKey::Project("/r/p".into())), Activation::ToggleProject("/r/p".into()));
+    }
+
+    #[test]
+    fn open_panes_can_be_picked() {
+        let mut fixture = Fixture::of(
+            vec![external("e", "/r/p", 3), managed("m", "/r/p", 2)],
+            vec![shell_pane(9, "/r/p"), pane(8, "/r/p", Some("m"))],
+        );
+        let rows = fixture.rows();
+        let pick = |key: RowKey| rows[find(&rows, &key).unwrap()].pick();
+        assert_eq!(pick(RowKey::Leaf(9)), Some(9));
+        assert_eq!(pick(RowKey::Session("m".into())), Some(8));
+        assert_eq!(pick(RowKey::Session("e".into())), None, "running outside Gantry");
+        assert_eq!(pick(RowKey::Project("/r/p".into())), None);
+
+        let mut picks = Vec::new();
+        toggle_pick(&mut picks, 9);
+        toggle_pick(&mut picks, 8);
+        toggle_pick(&mut picks, 9);
+        assert_eq!(picks, vec![8], "a second Shift-click takes it out");
     }
 
     // Unix-style paths: Windows joins them with `\`.

@@ -151,6 +151,8 @@ pub struct SidebarView {
     all_rows: Vec<Row>,
     rows: Vec<Row>,
     selected: Option<RowKey>,
+    /// Picked with Shift-click to open together, in pick order.
+    together: Vec<NodeId>,
     /// The workspace's focused leaf; its row is selected unless the user moved the ring.
     focused_leaf: Option<NodeId>,
     /// The open right-click menu of a row or heading.
@@ -214,6 +216,7 @@ impl SidebarView {
             all_rows: Vec::new(),
             rows: Vec::new(),
             selected: None,
+            together: Vec::new(),
             focused_leaf: None,
             menu: None,
             scroll: UniformListScrollHandle::new(),
@@ -234,6 +237,16 @@ impl SidebarView {
     /// The project a directory belongs to (its git repository, else the directory).
     pub(crate) fn project_of(&self, host: &HostId, cwd: &Path) -> PathBuf {
         self.roots.of(host, cwd)
+    }
+
+    /// The picks to open together, in pick order, clearing them.
+    pub fn take_together(&mut self, cx: &mut Context<Self>) -> Vec<NodeId> {
+        cx.notify();
+        std::mem::take(&mut self.together)
+    }
+
+    fn is_picked(&self, row: &Row) -> bool {
+        row.pick().is_some_and(|pick| self.together.contains(&pick))
     }
 
     /// Every Gantry leaf in sidebar order, whatever the filter or collapsed projects hide.
@@ -609,6 +622,11 @@ impl SidebarView {
         match keystroke.key.as_str() {
             "up" => self.move_selection(false),
             "down" => self.move_selection(true),
+            "enter" if !self.together.is_empty() => cx.emit(SidebarEvent::Menu(MenuAction::OpenTogether)),
+            "escape" if !self.together.is_empty() => {
+                self.together.clear();
+                cx.notify();
+            }
             "enter" => {
                 if let Some(index) = self.selected_index() {
                     self.activate(index, keystroke.modifiers.secondary(), cx);
@@ -668,6 +686,7 @@ impl SidebarView {
             folder.filter(|_| !remote).map(|folder| MenuContext::for_folder(settings, folder)).unwrap_or_default();
         let alone = |leaf: NodeId| self.panes.iter().find(|pane| pane.leaf == leaf).is_none_or(|pane| pane.alone);
         let items = match &row.kind {
+            _ if self.together.len() > 1 && self.is_picked(row) => Some(menus::together_menu(self.together.len())),
             RowKind::Project { path, .. } => {
                 // The dev container one of its listed sessions runs in.
                 let container = self.rows[index + 1..]
@@ -777,7 +796,13 @@ impl SidebarView {
                 // The list may have been rebuilt since it was drawn: act on the row that was
                 // clicked, by identity, or on nothing if it is gone.
                 if let Some(index) = session_tree::find(&this.rows, &key) {
-                    this.activate(index, event.modifiers().secondary(), cx);
+                    match this.rows[index].pick().filter(|_| event.modifiers().shift) {
+                        Some(pick) => {
+                            session_tree::toggle_pick(&mut this.together, pick);
+                            cx.notify();
+                        }
+                        None => this.activate(index, event.modifiers().secondary(), cx),
+                    }
                 }
             }))
             // A middle click closes the pane or tab the row stands for (press and release on the same row).
@@ -844,6 +869,8 @@ impl SidebarView {
             .in_tab
             .then(|| div().absolute().left(theme.ui(20.)).top_0().bottom_0().w(px(2.)).bg(rgb(theme.tokens.line)));
         let base = base.when(row.in_tab, |base| base.relative().pl(theme.ui(32.))).children(guide);
+        let base =
+            base.when(self.is_picked(row), |base| base.rounded(px(RADIUS)).bg(rgba((theme.tokens.accent << 8) | 0x2e)));
         // A row that stands for a pane of the layout can be picked up and dropped on a pane or on the sidebar.
         let dragged_pane = match &row.kind {
             RowKind::Session { session, leaf: Some(leaf), .. } => {

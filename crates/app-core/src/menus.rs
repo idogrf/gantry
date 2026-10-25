@@ -96,6 +96,8 @@ pub enum MenuAction {
         /// The color, or `None` for the automatic one.
         color: Option<ProjectColor>,
     },
+    /// Open the sessions picked with Shift-click side by side, four to a tab.
+    OpenTogether,
     /// Take over a session running outside Gantry.
     TakeOver {
         /// Session id.
@@ -175,6 +177,11 @@ impl MenuContext {
                 .then(|| settings.project_colors.folders.get(folder).copied()),
         }
     }
+}
+
+/// The menu of a row among several picked with Shift-click.
+pub fn together_menu(count: usize) -> Vec<MenuItem> {
+    vec![entry(&format!("Open {count} together"), MenuAction::OpenTogether)]
 }
 
 fn entry(label: &str, action: MenuAction) -> MenuItem {

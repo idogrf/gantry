@@ -518,6 +518,17 @@ impl Default for SidebarState {
 /// Most panes one tab may hold; further splits are refused.
 pub const MAX_PANES_PER_TAB: usize = 4;
 
+/// Where pane `index` of a group opened together goes, as a 2×2 grid: beside or below an earlier pane of the
+/// group (`None` for the first, which keeps its tab).
+pub fn grid_slot(index: usize) -> Option<(usize, Direction)> {
+    match index {
+        1 => Some((0, Direction::Right)),
+        2 => Some((0, Direction::Down)),
+        3 => Some((1, Direction::Down)),
+        _ => None,
+    }
+}
+
 /// What a drop of one pane on another would do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DropCheck {
@@ -842,6 +853,19 @@ impl Workspace {
         self.detach(leaf);
         self.push_tab(leaf);
         true
+    }
+
+    /// Lay `leaves` out as 2×2 grids, a tab per four, taking them out of their tabs; the last grid is visible.
+    pub fn open_together(&mut self, leaves: &[NodeId]) {
+        for group in leaves.chunks(MAX_PANES_PER_TAB) {
+            self.pull_out(group[0]);
+            self.focus(group[0]);
+            for (index, &leaf) in group.iter().enumerate() {
+                if let Some((anchor, side)) = grid_slot(index) {
+                    self.move_leaf(leaf, group[anchor], DropZone::Edge(side));
+                }
+            }
+        }
     }
 
     /// Drop leaf `src` on `zone` of leaf `target` (a pane of the visible tab): an edge splits `target` on that side
@@ -1497,6 +1521,33 @@ mod tests {
     }
 
     const LEFT: DropZone = DropZone::Edge(Direction::Left);
+
+    #[test]
+    fn panes_opened_together_fill_a_two_by_two_grid() {
+        assert_eq!(grid_slot(0), None);
+        assert_eq!(grid_slot(1), Some((0, Direction::Right)));
+        assert_eq!(grid_slot(2), Some((0, Direction::Down)));
+        assert_eq!(grid_slot(3), Some((1, Direction::Down)));
+        assert_eq!(grid_slot(MAX_PANES_PER_TAB), None);
+    }
+
+    #[test]
+    fn open_together_makes_a_tab_per_four() {
+        let mut ws = Workspace::default();
+        let split = tab_of_panes(&mut ws, 3);
+        let lone: Vec<NodeId> = (0..3).map(|index| ws.new_tab(shell(&format!("/t{index}")))).collect();
+        let picked = [split[1], lone[0], split[2], lone[1], lone[2]];
+        ws.open_together(&picked);
+        let sorted = |mut leaves: Vec<NodeId>| {
+            leaves.sort();
+            leaves
+        };
+        let first = ws.tab_of(picked[0]).unwrap();
+        assert_eq!(sorted(ws.tabs[first].root.leaves()), sorted(picked[..4].to_vec()));
+        assert_eq!(ws.tabs[ws.active].root.leaves(), vec![picked[4]], "the fifth starts a tab, shown last");
+        assert_eq!(ws.tabs[ws.tab_of(split[0]).unwrap()].root.leaves(), vec![split[0]], "the unpicked pane stays");
+        assert_eq!(ws.tabs.len(), 3, "emptied tabs are gone");
+    }
 
     #[test]
     fn drop_check_allows_edges_below_the_limit() {

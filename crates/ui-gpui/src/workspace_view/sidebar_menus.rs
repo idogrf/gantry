@@ -18,6 +18,17 @@ const SIDEBAR_MIN: f32 = 160.0;
 const SIDEBAR_MAX: f32 = 600.0;
 
 impl WorkspaceView {
+    /// Open the panes picked in the sidebar as 2×2 grids, a new tab per four.
+    fn open_together(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let leaves = self.sidebar.update(cx, |sidebar, cx| sidebar.take_together(cx));
+        self.workspace.open_together(&leaves);
+        if let Some(&first) = leaves.first() {
+            self.focus_leaf(first, window, cx);
+        }
+        self.save(cx);
+        cx.notify();
+    }
+
     /// Do what a right-click menu entry says.
     pub(super) fn run_menu_action(&mut self, action: MenuAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
@@ -90,6 +101,7 @@ impl WorkspaceView {
                 self.focus_leaf(leaf, window, cx);
                 self.rerun_leaf(leaf, window, cx);
             }
+            MenuAction::OpenTogether => self.open_together(window, cx),
             MenuAction::TakeOver { session, cwd, host } => self.on_sidebar_event(
                 SidebarEvent::Activate { activation: Activation::TakeOver { session, cwd, host }, split: false },
                 window,

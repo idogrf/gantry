@@ -5,6 +5,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Paste and drop files** - dropping files on a pane types their full paths (quoted like Terminal.app), on macOS and Linux. On macOS, Cmd+V with files copied in Finder does the same. Claude attaches images and reads other files from them. Local panes only; ignored on a pane whose process has ended.
+
 ## [0.10.0] - 2026-10-22
 
 ### Added

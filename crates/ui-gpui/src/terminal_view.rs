@@ -12,7 +12,7 @@ use app_core::image_paste;
 use app_core::input::{KeyInput, encode_key};
 use app_core::layout::grid_dims;
 use app_core::mouse::{self, MouseAction, MouseMods, encode_mouse};
-use app_core::paste::encode_paste;
+use app_core::paste::{encode_paste, quote_paths};
 use app_core::scroll::{
     ACTIVE_HOLD_MS, CHIP_FADE_MS, CHIP_HOLD_MS, JUMP_MS, ScrollAction, activity, chip_opacity, jump_offset,
     offset_for_thumb_top, scroll_action, thumb,
@@ -30,8 +30,9 @@ use gpui::{
     fill, font, outline, point, prelude::*, px, rgb, size, svg,
 };
 use gpui::{
-    ClipboardEntry, ClipboardItem, ElementInputHandler, EntityInputHandler, KeyBinding, KeyDownEvent, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, UTF16Selection,
+    ClipboardEntry, ClipboardItem, ElementInputHandler, EntityInputHandler, ExternalPaths, KeyBinding, KeyDownEvent,
+    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent,
+    UTF16Selection,
 };
 use protocol::message::PaneId;
 
@@ -528,9 +529,30 @@ impl TerminalView {
     }
 
     fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.paste_text(&text, cx);
+        let Some(item) = cx.read_from_clipboard() else { return };
+        let files = item.entries().iter().find_map(|entry| match entry {
+            ClipboardEntry::ExternalPaths(paths) => Some(paths.clone()),
+            _ => None,
+        });
+        match (files, item.text()) {
+            (Some(paths), _) if self.paths_are_local() => self.paste_paths(&paths, cx),
+            (_, Some(text)) => self.paste_text(&text, cx),
+            _ => {}
         }
+    }
+
+    /// Files copied in Finder or dropped on the pane arrive as their full paths, which Claude attaches (images) or reads.
+    fn paste_paths(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
+        if input_fate(&self.state) == InputFate::Drop {
+            return;
+        }
+        self.paste_text(&quote_paths(paths.paths().iter().filter_map(|path| path.to_str())), cx);
+    }
+
+    /// Whether the pane's program sees this machine's files: not on an SSH host or in a dev container.
+    /// Not on Windows yet: quoting is POSIX shell quoting.
+    fn paths_are_local(&self) -> bool {
+        !cfg!(windows) && !self.remote && self.launch.container.is_none()
     }
 
     fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -942,6 +964,9 @@ impl Render for TerminalView {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
+            .when(self.paths_are_local(), |el| {
+                el.on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.paste_paths(paths, cx)))
+            })
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))

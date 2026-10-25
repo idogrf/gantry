@@ -8,6 +8,24 @@ pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
     if bracketed { [b"\x1b[200~".as_slice(), cleaned.as_bytes(), b"\x1b[201~"].concat() } else { cleaned.into_bytes() }
 }
 
+/// Paths as shell words, space-separated with a trailing space, as Terminal.app pastes dropped files: anything outside a
+/// safe set gets a backslash, so both a shell and Claude's prompt read each path back whole.
+pub fn quote_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> String {
+    paths
+        .into_iter()
+        .map(|path| {
+            path.chars().fold(String::new(), |mut word, c| {
+                if !(c.is_alphanumeric() || "/._-+,:@%=^".contains(c)) {
+                    word.push('\\');
+                }
+                word.push(c);
+                word
+            })
+        })
+        .map(|word| word + " ")
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -26,5 +44,16 @@ mod tests {
     fn escape_cannot_break_out_of_bracketed_paste() {
         let pasted = encode_paste("x\x1b[201~rm -rf ~\n", true);
         assert_eq!(pasted, b"\x1b[200~x[201~rm -rf ~\r\x1b[201~".to_vec());
+    }
+
+    #[test]
+    fn paths_are_escaped_and_space_separated() {
+        assert_eq!(
+            quote_paths(["/tmp/a.png", "/Users/me/My Shot (2).png"]),
+            "/tmp/a.png /Users/me/My\\ Shot\\ \\(2\\).png "
+        );
+        assert_eq!(quote_paths(["/x/it's;$y"]), "/x/it\\'s\\;\\$y ");
+        assert_eq!(quote_paths(["/דוח/צילום.pdf"]), "/דוח/צילום.pdf ");
+        assert_eq!(quote_paths([]), "");
     }
 }

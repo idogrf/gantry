@@ -363,9 +363,11 @@ impl LauncherView {
         self.typed_changed(cx);
     }
 
-    /// A path of `host` as a launch uses it: `~` expanded on this machine, a remote path as typed.
+    /// A path of `host` as a launch uses it: `~` expanded on this machine (with Windows separators there), a remote path
+    /// as typed.
     fn launch_path(&self, host: &HostId, path: &str) -> PathBuf {
-        let path = PathBuf::from(path);
+        let path =
+            if cfg!(windows) && host.is_local() { PathBuf::from(path.replace('/', "\\")) } else { PathBuf::from(path) };
         if host.is_local() { expand_home(&path, self.home.as_deref()) } else { path }
     }
 

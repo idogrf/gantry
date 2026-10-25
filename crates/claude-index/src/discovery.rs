@@ -167,6 +167,8 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000_000;
     const DAY: u64 = 24 * 60 * 60 * 1000;
+    /// The variable the home dir is read from.
+    const HOME: &str = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
 
     fn env(pairs: &[(&str, &Path)]) -> Vec<(String, String)> {
         pairs.iter().map(|(key, value)| (key.to_string(), value.to_string_lossy().into_owned())).collect()
@@ -187,8 +189,6 @@ mod tests {
         found.iter().map(|candidate| candidate.name.as_str()).collect()
     }
 
-    // These tests set HOME; Windows reads USERPROFILE (the rule is the same, only the variable differs).
-    #[cfg(unix)]
     #[test]
     fn finds_the_default_siblings_and_config_siblings_and_ignores_the_rest() {
         let home = tempfile::tempdir().unwrap();
@@ -199,13 +199,12 @@ mod tests {
         std::fs::create_dir_all(h.join(".claude-empty")).unwrap(); // no projects/ or sessions/
         std::fs::write(h.join(".claude.json"), "{}").unwrap(); // a file, not a dir
         std::fs::create_dir_all(h.join(".config/gantry/projects")).unwrap(); // not named claude*
-        let found = discover(&env(&[("HOME", h)]), NOW);
+        let found = discover(&env(&[(HOME, h)]), NOW);
         assert_eq!(names(&found), ["Default", "Work", "Lab"]);
         assert_eq!(found[0].source, Source::HomeDefault);
         assert!(found[1..].iter().all(|candidate| candidate.source == Source::Sibling));
     }
 
-    #[cfg(unix)]
     #[test]
     fn counts_sessions_projects_and_last_use_and_skips_subagent_files() {
         let home = tempfile::tempdir().unwrap();
@@ -213,12 +212,11 @@ mod tests {
         claude_dir(&dir, &[("-a", "s1", 5 * DAY), ("-a", "s2", 2 * DAY), ("-b", "s3", 9 * DAY)]);
         std::fs::create_dir_all(dir.join("projects/-a/s1/subagents")).unwrap();
         std::fs::write(dir.join("projects/-a/s1/subagents/x.jsonl"), "{}").unwrap();
-        let found = discover(&env(&[("HOME", home.path())]), NOW);
+        let found = discover(&env(&[(HOME, home.path())]), NOW);
         assert_eq!((found[0].sessions, found[0].projects), (3, 2));
         assert_eq!(found[0].last_used_ms, Some(NOW - 2 * DAY));
     }
 
-    #[cfg(unix)]
     #[test]
     fn stale_means_no_sessions_or_older_than_thirty_days() {
         let home = tempfile::tempdir().unwrap();
@@ -226,22 +224,21 @@ mod tests {
         claude_dir(&h.join(".claude"), &[("-a", "s", STALE_AFTER_MS)]); // exactly 30 days: fresh
         claude_dir(&h.join(".claude-old"), &[("-a", "s", STALE_AFTER_MS + 1)]);
         std::fs::create_dir_all(h.join(".claude-none/sessions")).unwrap(); // no transcripts at all
-        let found = discover(&env(&[("HOME", h)]), NOW);
+        let found = discover(&env(&[(HOME, h)]), NOW);
         let stale: Vec<_> = found.iter().map(|candidate| (candidate.name.as_str(), candidate.stale)).collect();
         assert_eq!(stale, [("Default", false), ("Old", true), ("None", true)]);
     }
 
-    #[cfg(unix)]
     #[test]
     fn the_env_dir_is_first_and_not_listed_twice_when_it_is_the_home_default() {
         let home = tempfile::tempdir().unwrap();
         let h = home.path();
         claude_dir(&h.join(".claude"), &[("-a", "s", DAY)]);
         claude_dir(&h.join(".claude-work"), &[("-a", "s", DAY)]);
-        let found = discover(&env(&[("HOME", h), ("CLAUDE_CONFIG_DIR", &h.join(".claude-work"))]), NOW);
+        let found = discover(&env(&[(HOME, h), ("CLAUDE_CONFIG_DIR", &h.join(".claude-work"))]), NOW);
         assert_eq!(names(&found), ["Work", "Default"]);
         assert_eq!(found[0].source, Source::ConfigDirEnv);
-        let same = discover(&env(&[("HOME", h), ("CLAUDE_CONFIG_DIR", &h.join(".claude"))]), NOW);
+        let same = discover(&env(&[(HOME, h), ("CLAUDE_CONFIG_DIR", &h.join(".claude"))]), NOW);
         assert_eq!(same.iter().filter(|candidate| candidate.name == "Default").count(), 1);
         assert_eq!(same[0].source, Source::ConfigDirEnv);
     }
@@ -255,12 +252,11 @@ mod tests {
         claude_dir(&h.join("real"), &[("-a", "s", DAY)]);
         std::os::unix::fs::symlink(h.join("real"), h.join(".claude")).unwrap();
         std::os::unix::fs::symlink(h.join("real"), h.join(".claude-link")).unwrap();
-        let found = discover(&env(&[("HOME", h)]), NOW);
+        let found = discover(&env(&[(HOME, h)]), NOW);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].path, h.join(".claude"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_bad_env_dir_is_skipped() {
         let home = tempfile::tempdir().unwrap();
@@ -272,13 +268,12 @@ mod tests {
         let plain = h.join("plain");
         std::fs::create_dir_all(&plain).unwrap(); // exists, but holds no projects/ or sessions/
         for value in [&missing, &a_file, &plain, Path::new("")] {
-            let found = discover(&env(&[("HOME", h), ("CLAUDE_CONFIG_DIR", value)]), NOW);
+            let found = discover(&env(&[(HOME, h), ("CLAUDE_CONFIG_DIR", value)]), NOW);
             assert_eq!(names(&found), ["Default"], "{value:?}");
         }
         assert!(discover(&env(&[]), NOW).is_empty(), "no HOME, no candidates");
     }
 
-    #[cfg(unix)]
     #[test]
     fn siblings_come_newest_first_and_equal_names_get_a_number() {
         let home = tempfile::tempdir().unwrap();
@@ -286,7 +281,7 @@ mod tests {
         claude_dir(&h.join(".claude-a"), &[("-x", "s", 9 * DAY)]);
         claude_dir(&h.join(".claude-b"), &[("-x", "s", DAY)]);
         claude_dir(&h.join(".config/claude-b"), &[("-x", "s", 3 * DAY)]);
-        let found = discover(&env(&[("HOME", h)]), NOW);
+        let found = discover(&env(&[(HOME, h)]), NOW);
         assert_eq!(names(&found), ["B", "B 2", "A"]);
     }
 

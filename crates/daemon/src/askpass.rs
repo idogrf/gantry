@@ -1,5 +1,5 @@
 //! The sign-in side channel of an SSH attempt. ssh runs `gantry askpass "<prompt>"` when it needs input; that helper
-//! asks the GUI over a unix socket this module serves for the length of one attempt, and prints the answer.
+//! asks the GUI over a local socket (a unix socket, or a named pipe on Windows) this module serves for the length of one attempt, and prints the answer.
 //! Answers are never stored or logged.
 
 use std::io;
@@ -58,7 +58,7 @@ impl AskpassState {
         self.changed.notified().await;
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn set_waiting(&self, waiting: bool) {
         if waiting {
             self.pending.fetch_add(1, Ordering::SeqCst);
@@ -75,7 +75,7 @@ impl AskpassState {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
         self.wake.notify_one();
@@ -93,14 +93,14 @@ struct Reply {
     answer: Option<String>,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod imp {
     use std::io::{BufRead, BufReader, Write};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use interprocess::local_socket::tokio::{Stream as AsyncStream, prelude::*};
-    use interprocess::local_socket::{GenericFilePath, ListenerOptions, Stream, prelude::*};
+    use interprocess::local_socket::{ListenerOptions, Name, Stream, prelude::*};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     use super::*;
@@ -114,7 +114,8 @@ mod imp {
     }
 
     impl AskpassServer {
-        /// Listen on a fresh socket file in `dir` (the profile's 0700 runtime dir) and forward questions to `prompts`,
+        /// Listen on a fresh socket file in `dir` (the profile's 0700 runtime dir; on Windows an owner-only named pipe
+        /// with an unguessable name instead) and forward questions to `prompts`,
         /// on behalf of the host called `host`. After one question is cancelled, `state` makes every later one of this
         /// attempt answer Cancel at once, without asking.
         pub async fn start(
@@ -123,11 +124,27 @@ mod imp {
             prompts: async_channel::Sender<AskPrompt>,
             state: Arc<AskpassState>,
         ) -> io::Result<AskpassServer> {
-            std::fs::create_dir_all(dir)?;
-            let path =
-                dir.join(format!("askpass-{}-{}.sock", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-            let _ = std::fs::remove_file(&path);
-            let listener = ListenerOptions::new().name(path.clone().to_fs_name::<GenericFilePath>()?).create_tokio()?;
+            let id = format!("askpass-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+            #[cfg(unix)]
+            let (path, options) = {
+                std::fs::create_dir_all(dir)?;
+                let path = dir.join(format!("{id}.sock"));
+                let _ = std::fs::remove_file(&path);
+                (path, ListenerOptions::new())
+            };
+            #[cfg(windows)]
+            let (path, options) = {
+                use interprocess::os::windows::local_socket::ListenerOptionsExt;
+                use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+                let _ = dir;
+                // Only the current user may connect.
+                let owner_only = SecurityDescriptor::deserialize(widestring::u16cstr!("D:P(A;;GA;;;OW)"))?;
+                (
+                    PathBuf::from(format!("gantry-{id}-{}", uuid::Uuid::new_v4())),
+                    ListenerOptions::new().security_descriptor(owner_only),
+                )
+            };
+            let listener = options.name(socket_name(&path)?).create_tokio()?;
             let host = host.to_string();
             let task = tokio::spawn(async move {
                 while let Ok(stream) = listener.accept().await {
@@ -137,7 +154,7 @@ mod imp {
             Ok(AskpassServer { path, task })
         }
 
-        /// The socket file ssh's helper connects to.
+        /// The socket file (the pipe name on Windows) ssh's helper connects to.
         pub fn path(&self) -> &Path {
             &self.path
         }
@@ -146,6 +163,7 @@ mod imp {
     impl Drop for AskpassServer {
         fn drop(&mut self) {
             self.task.abort();
+            #[cfg(unix)]
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -187,9 +205,17 @@ mod imp {
         let _ = send.write_all(text.as_bytes()).await;
     }
 
+    /// The local socket `path` names: a socket file, or a named pipe's name on Windows.
+    fn socket_name(path: &Path) -> io::Result<Name<'static>> {
+        #[cfg(unix)]
+        return path.to_path_buf().to_fs_name::<interprocess::local_socket::GenericFilePath>();
+        #[cfg(windows)]
+        return path.to_string_lossy().into_owned().to_ns_name::<interprocess::local_socket::GenericNamespaced>();
+    }
+
     /// Ask the GUI's server at `socket`; blocks until the user answers. `None` = cancelled.
     pub fn run_helper(socket: &Path, prompt: &str) -> io::Result<Option<String>> {
-        let stream = Stream::connect(socket.to_path_buf().to_fs_name::<GenericFilePath>()?)?;
+        let stream = Stream::connect(socket_name(socket)?)?;
         let mut stream = BufReader::new(stream);
         let mut request = serde_json::to_string(&Request { prompt: prompt.to_string() }).map_err(io::Error::other)?;
         request.push('\n');
@@ -201,14 +227,14 @@ mod imp {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use imp::{AskpassServer, run_helper};
 
-/// Sign-in dialogs need a unix socket: this platform has none, so ssh attempts use keys and the agent only.
-#[cfg(not(unix))]
+/// Sign-in dialogs need a local socket: this platform has none, so ssh attempts use keys and the agent only.
+#[cfg(not(any(unix, windows)))]
 pub struct AskpassServer;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl AskpassServer {
     /// Always `Unsupported` here.
     pub async fn start(
@@ -227,12 +253,12 @@ impl AskpassServer {
 }
 
 /// Always `Unsupported` here.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub fn run_helper(_socket: &Path, _prompt: &str) -> io::Result<Option<String>> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use std::sync::Arc;
 
@@ -249,6 +275,7 @@ mod tests {
         let (prompts_tx, prompts_rx) = async_channel::unbounded::<AskPrompt>();
         let server = runtime.block_on(AskpassServer::start(dir.path(), "devbox", prompts_tx, Arc::default())).unwrap();
         let socket = server.path().to_path_buf();
+        #[cfg(unix)]
         assert!(socket.exists());
 
         let helper_socket = socket.clone();
@@ -266,7 +293,9 @@ mod tests {
 
         // The socket goes away with the server.
         drop(server);
+        #[cfg(unix)]
         assert!(!socket.exists());
+        assert!(run_helper(&socket, "Password: ").is_err());
     }
 
     #[test]

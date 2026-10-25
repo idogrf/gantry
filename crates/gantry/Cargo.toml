@@ -18,6 +18,9 @@ protocol.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.11"
+
 [dev-dependencies]
 tempfile.workspace = true
 async-channel.workspace = true

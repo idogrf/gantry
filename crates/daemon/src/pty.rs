@@ -25,12 +25,17 @@ pub struct SpawnSpec {
     pub rows: u16,
 }
 
-/// The user's default interactive shell: `$SHELL` (or `/bin/sh`) on Unix, `%COMSPEC%` (or `cmd.exe`) on Windows.
+/// The user's default interactive shell: `$SHELL` (or `/bin/sh`) on Unix. On Windows PowerShell (`pwsh`, else the
+/// built-in `powershell`), as Windows Terminal does, else `%COMSPEC%` (or `cmd.exe`).
 pub fn default_shell() -> String {
     #[cfg(unix)]
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     #[cfg(windows)]
-    let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+    let shell = ["pwsh", "powershell"]
+        .into_iter()
+        .find(|name| claude_index::process::find_program(name).is_some())
+        .map(|name| format!("{name}.exe"))
+        .unwrap_or_else(|| std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()));
     shell
 }
 
@@ -341,9 +346,7 @@ mod tests {
         assert!(out.contains("[from-login-shell][]"), "got: {out:?}");
     }
 
-    // No output arrives on the CI's Windows runner (not handled yet).
     #[cfg(windows)]
-    #[ignore]
     #[test]
     fn output_is_readable() {
         let dir = tempfile::tempdir().unwrap();
@@ -356,7 +359,10 @@ mod tests {
             cols: 80,
             rows: 24,
         };
-        let (_pty, reader) = PtyProcess::spawn(&spec).unwrap();
+        let (mut pty, reader) = PtyProcess::spawn(&spec).unwrap();
+        // ConPTY asks where the cursor is (`ESC[6n`) and holds all output until it is told; in a pane the terminal
+        // state answers.
+        pty.write(b"\x1b[1;1R").unwrap();
         assert!(read_until(reader, "hello-pty", Duration::from_secs(10)).contains("hello-pty"));
     }
 

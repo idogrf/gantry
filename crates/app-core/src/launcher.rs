@@ -185,10 +185,13 @@ pub enum Typed {
     },
 }
 
-/// `/…` and `~…` are paths on this machine; `<host>:<path>` is a path on that host when it is one of `hosts`
-/// (the `sshHosts` names, matched ignoring case; a path starting with neither `/` nor `~` is under `~/`, like scp);
-/// anything else filters.
+/// `/…` and `~…` (and on Windows `C:\…`) are paths on this machine; `<host>:<path>` is a path on that host when it is
+/// one of `hosts` (the `sshHosts` names, matched ignoring case; a path starting with neither `/` nor `~` is under `~/`,
+/// like scp); anything else filters. On Windows a local path's `\` become `/`, which completion splits on.
 pub fn typed(text: &str, hosts: &[HostId]) -> Typed {
+    if cfg!(windows) && (text.starts_with('~') || is_drive_path(text)) {
+        return Typed::Path { host: HostId::local(), path: text.replace('\\', "/") };
+    }
     if text.starts_with(['/', '~']) {
         return Typed::Path { host: HostId::local(), path: text.to_string() };
     }
@@ -200,6 +203,15 @@ pub fn typed(text: &str, hosts: &[HostId]) -> Typed {
         path => format!("~/{path}"),
     };
     Typed::Path { host: host.clone(), path }
+}
+
+/// Whether `text` starts with a Windows drive (`C:`, then nothing, `\` or `/`).
+fn is_drive_path(text: &str) -> bool {
+    match text.as_bytes() {
+        [drive, b':'] => drive.is_ascii_alphabetic(),
+        [drive, b':', b'\\' | b'/', ..] => drive.is_ascii_alphabetic(),
+        _ => false,
+    }
 }
 
 /// What a row is matched against: the displayed path on this machine, `<host>:<path>` on a host.
@@ -433,6 +445,22 @@ mod tests {
         assert_eq!(typed("devbox:~/x", &[]), Typed::Filter);
         assert_eq!(typed(":~/x", &hosts), Typed::Filter);
         assert_eq!(typed("notes", &hosts), Typed::Filter);
+    }
+
+    #[test]
+    fn drive_letters_start_a_windows_path() {
+        assert!(is_drive_path("C:") && is_drive_path("c:\\Users") && is_drive_path("D:/src"));
+        assert!(!is_drive_path("C") && !is_drive_path("devbox:~/x") && !is_drive_path("1:/x") && !is_drive_path("C:x"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_local_paths_complete_on_forward_slashes() {
+        let hosts = [HostId::named("c")];
+        let path = |path: &str| Typed::Path { host: local(), path: path.into() };
+        assert_eq!(typed("C:\\Users\\me", &hosts), path("C:/Users/me"));
+        assert_eq!(typed("~\\src", &hosts), path("~/src"));
+        assert_eq!(typed("c:", &hosts), path("c:"));
     }
 
     #[test]

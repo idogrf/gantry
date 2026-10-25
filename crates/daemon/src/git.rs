@@ -41,6 +41,7 @@ fn git(folder: &Path) -> Command {
 /// `git()` without the filter override.
 fn base(folder: &Path) -> Command {
     let mut command = Command::new("git");
+    claude_index::process::hide_window(&mut command);
     command.arg("-C").arg(folder).args(["--no-optional-locks", "--literal-pathspecs"]).args([
         "-c",
         "core.fsmonitor=false",
@@ -388,7 +389,7 @@ fn diff_once(
     }
     let mut top = git(&folder);
     top.args(["rev-parse", "--show-toplevel"]);
-    let root = PathBuf::from(text(&run(top)?).trim_end_matches('\n'));
+    let root = PathBuf::from(toplevel(&run(top)?));
 
     if let Some(hash) = commit {
         return commit_diff(&root, hash, path, old_path, full);
@@ -585,11 +586,18 @@ pub fn status(folder: &str, home: Option<&Path>, known_head: Option<&str>) -> Re
     Ok(state)
 }
 
+/// The repository root from `git rev-parse --show-toplevel` output, with Windows separators on Windows (git prints
+/// `C:/…`).
+fn toplevel(output: &[u8]) -> String {
+    let root = text(output).trim_end_matches('\n').to_string();
+    if cfg!(windows) { root.replace('/', "\\") } else { root }
+}
+
 fn status_once(folder: &Path, known_head: Option<&str>) -> Result<GitState, GitProblem> {
     let folder = folder.to_path_buf();
     let mut top = git(&folder);
     top.args(["rev-parse", "--show-toplevel"]);
-    let root = text(&run(top)?).trim_end_matches('\n').to_string();
+    let root = toplevel(&run(top)?);
 
     let mut command = git(&folder);
     command.args(["status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all"]);
@@ -863,7 +871,8 @@ mod tests {
         assert_eq!(state.head.as_ref().map(String::len), Some(7));
         assert!(state.files.is_empty());
         assert_eq!(state.more, 0);
-        assert_eq!(PathBuf::from(&state.root), tmp.path().canonicalize().unwrap());
+        assert_eq!(PathBuf::from(&state.root).canonicalize().unwrap(), tmp.path().canonicalize().unwrap());
+        assert!(!cfg!(windows) || !state.root.contains('/'), "{}", state.root);
         assert!(state.last_commit.is_some());
     }
 
@@ -896,11 +905,17 @@ mod tests {
     #[test]
     fn odd_file_names_survive() {
         let tmp = repo();
-        for name in ["a b.txt", "héllo wörld.txt", "line\nbreak.txt"] {
+        // Windows file names cannot hold a line break.
+        let names: &[&str] = if cfg!(windows) {
+            &["a b.txt", "héllo wörld.txt"]
+        } else {
+            &["a b.txt", "héllo wörld.txt", "line\nbreak.txt"]
+        };
+        for name in names {
             std::fs::write(tmp.path().join(name), "x\n").unwrap();
         }
         let state = state(tmp.path());
-        for name in ["a b.txt", "héllo wörld.txt", "line\nbreak.txt"] {
+        for name in names {
             assert_eq!(file(&state, name).status, GitFileStatus::Untracked);
         }
     }

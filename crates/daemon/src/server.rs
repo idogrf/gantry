@@ -12,7 +12,7 @@ use claude_index::containers::{Docker, DockerCli, to_container};
 use claude_index::host::LocalHost;
 use claude_index::host::{Marked, in_container, processes_with_env};
 use claude_index::index::{IndexState, SessionRecord};
-use interprocess::local_socket::tokio::{Listener, Stream, prelude::*};
+use interprocess::local_socket::tokio::{Listener, RecvHalf, SendHalf, Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
 use protocol::message::{
     ClientMessage, ContainerChoice, DaemonMessage, ImageFormat, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo,
@@ -33,6 +33,9 @@ const MAX_BATCH_BYTES: usize = 256 * 1024;
 const CLIENT_DATA_BUDGET: usize = 4 << 20;
 const RESYNC_TICK: Duration = Duration::from_millis(100);
 const EXIT_DRAIN: Duration = Duration::from_millis(300);
+/// How long a closing connection waits for its peer to read what was sent (Windows).
+#[cfg(windows)]
+const CLOSE_FLUSH: Duration = Duration::from_secs(2);
 /// After a failed Docker lookup, new panes skip Docker for this long (a hung Docker would delay every new pane).
 const DOCKER_RETRY: Duration = Duration::from_secs(30);
 /// Least time between Docker lookups caused by container ids the registry does not know.
@@ -217,7 +220,7 @@ impl State {
             registry: &self.registry,
             marked: &self.marked,
             dir_exists: &|dir: &Path| dir.is_dir(),
-            checks_processes: cfg!(target_os = "linux"),
+            checks_processes: cfg!(any(target_os = "linux", windows)),
         };
         let sessions = resolve(&records, &panes, &self.gone, &view);
         if full {
@@ -462,6 +465,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
                 break;
             }
         }
+        send
     });
     loop {
         let frame = tokio::select! {
@@ -493,7 +497,27 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
             shared.stop_if_idle(&state);
         }
     }
-    let _ = writer.await;
+    if let Ok(send) = writer.await {
+        close(recv, send).await;
+    }
+}
+
+/// Close a connection. On Windows interprocess hands a dropped pipe with unread data to one shared thread that waits
+/// for each peer in turn to read it, so a peer that stopped reading (a stuck window that was taken over) would keep
+/// every later closed connection open, and their peers would never see the close. Wait a little here instead, then
+/// close regardless.
+async fn close(recv: RecvHalf, send: SendHalf) {
+    #[cfg(windows)]
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut send = send;
+        let flushed = matches!(tokio::time::timeout(CLOSE_FLUSH, send.flush()).await, Ok(Ok(())));
+        if !flushed && let Ok(Stream::NamedPipe(stream)) = Stream::reunite(recv, send) {
+            stream.inner().assume_flushed();
+        }
+    }
+    #[cfg(not(windows))]
+    drop((recv, send));
 }
 
 fn stop_all(shared: &Shared) {

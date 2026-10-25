@@ -68,7 +68,12 @@ impl Host for LocalHost {
             }
             Some(start.is_none_or(|start| proc_start_time(&stat).as_deref() == Some(start)))
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        {
+            let Some(started) = windows::start_secs(pid) else { return Some(false) };
+            Some(start.is_none_or(|start| windows::filetime_secs(start) == Some(started)))
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = (pid, start);
             None
@@ -198,9 +203,84 @@ pub fn process_start(pid: u32) -> Option<String> {
     None
 }
 
+/// Process queries on Windows, where Claude's `procStart` is the process creation time as a FILETIME (100 ns steps
+/// since 1601). It is compared to the second, which is as precise as the safe process API gets.
+#[cfg(windows)]
+mod windows {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+    /// Seconds from 1601-01-01 (FILETIME's epoch) to 1970-01-01.
+    const UNIX_EPOCH_IN_FILETIME_SECS: u64 = 11_644_473_600;
+
+    /// A `procStart` FILETIME in Unix seconds.
+    pub fn filetime_secs(start: &str) -> Option<u64> {
+        (start.parse::<u64>().ok()? / 10_000_000).checked_sub(UNIX_EPOCH_IN_FILETIME_SECS)
+    }
+
+    fn with_process<T>(pid: u32, f: impl FnOnce(&sysinfo::Process) -> T) -> Option<T> {
+        let pid = Pid::from_u32(pid);
+        let mut system = System::new();
+        system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing());
+        system.process(pid).map(f)
+    }
+
+    /// When process `pid` started (Unix seconds); `None` when it is gone.
+    pub fn start_secs(pid: u32) -> Option<u64> {
+        with_process(pid, |process| process.start_time())
+    }
+
+    /// End process `pid` (`TerminateProcess`).
+    pub fn terminate(pid: u32) -> Result<(), String> {
+        match with_process(pid, |process| process.kill()) {
+            Some(true) => Ok(()),
+            Some(false) => Err("could not end it".into()),
+            None => Err("it is gone".into()),
+        }
+    }
+}
+
+/// End process `pid` at once. Windows has no polite stop for a console program in another console window, so a
+/// take over ends it as a force quit would.
+#[cfg(windows)]
+pub fn terminate(pid: u32) -> Result<(), String> {
+    windows::terminate(pid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_checks_a_process_by_pid_and_filetime_start() {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let filetime = |secs: u64| ((secs + 11_644_473_600) * 10_000_000 + 1234).to_string();
+        assert_eq!(windows::filetime_secs(&filetime(now)), Some(now));
+        assert_eq!(windows::filetime_secs("not a number"), None);
+        let host = LocalHost::new();
+        let me = std::process::id();
+        let started = windows::start_secs(me).unwrap();
+        assert!(started <= now && now - started < 600, "started {started}, now {now}");
+        assert_eq!(host.is_running(me, None), Some(true));
+        assert_eq!(host.is_running(me, Some(&filetime(started))), Some(true));
+        assert_eq!(host.is_running(me, Some(&filetime(started - 5))), Some(false));
+        let mut child = std::process::Command::new("cmd.exe").args(["/c", "exit"]).spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert_eq!(host.is_running(pid, None), Some(false));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_terminate_ends_a_process() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "pause"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        terminate(child.id()).unwrap();
+        assert!(!child.wait().unwrap().success());
+    }
 
     #[test]
     fn start_time_is_field_22_even_with_odd_command_names() {

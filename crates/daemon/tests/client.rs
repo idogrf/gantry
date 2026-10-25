@@ -1,5 +1,5 @@
 //! DaemonClient against a real daemon.
-#![cfg(unix)]
+// On Windows `sh` comes from Git for Windows (on PATH on CI runners).
 
 use std::time::Duration;
 

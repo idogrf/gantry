@@ -66,6 +66,7 @@ async fn start(
 ) -> Result<Started, FailKind> {
     let interactive = matches!(attempt, Attempt::Interactive { .. });
     let mut command = tokio::process::Command::new(program);
+    claude_index::process::hide_window(command.as_std_mut());
     command
         .stdin(if piped_stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())

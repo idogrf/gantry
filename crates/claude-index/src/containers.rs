@@ -142,7 +142,7 @@ impl Default for DockerCli {
 impl DockerCli {
     /// Run `docker args`, killing it after `timeout`; its output, or its error message.
     fn run(&self, args: &[&str], timeout: Duration) -> Result<String, String> {
-        let mut child = Command::new(&self.program)
+        let mut child = crate::process::hide_window(&mut Command::new(&self.program))
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

@@ -12,7 +12,7 @@ use app_core::dialogs::{BarState, BarTone, PaneBar, pane_bar};
 use app_core::host_state::HostCard;
 use app_core::image_paste;
 use app_core::input::{KeyInput, encode_key};
-use app_core::layout::grid_dims;
+use app_core::layout::{PaneSize, grid_dims};
 use app_core::mouse::{self, MouseAction, MouseMods, encode_mouse};
 use app_core::paste::encode_paste;
 use app_core::scroll::{
@@ -236,7 +236,7 @@ pub struct TerminalView {
     title: Option<String>,
     cell: (u16, u16),
     grid_origin: Point<Pixels>,
-    grid_size: (u16, u16),
+    size: PaneSize,
     metrics: CellMetrics,
     scroll_accum: f32,
     /// Where the scrollbar track was drawn last frame.
@@ -289,7 +289,7 @@ impl TerminalView {
             title: None,
             cell: (0, 0),
             grid_origin: Point::default(),
-            grid_size: (80, 24),
+            size: PaneSize::new((80, 24)),
             metrics: CellMetrics { width: px(8.), height: px(18.) },
             scroll_accum: 0.0,
             scrollbar_track: Bounds::default(),
@@ -333,12 +333,14 @@ impl TerminalView {
         self.host_card = None;
         self.launch = launch;
         self.state = PaneState::Live;
-        self.term = new_term(self.grid_size.0, self.grid_size.1, cx);
+        self.term = new_term(self.size.grid.0, self.size.grid.1, cx);
         self.title = None;
-        if let Some((cols, rows, width, height)) = resize_on_attach(self.grid_size, self.cell)
+        self.size.sent = None;
+        if let Some((cols, rows, width, height)) = resize_on_attach(self.size.grid, self.cell)
             && let Some(client) = &self.client
         {
             client.resize(pane, cols, rows, width, height);
+            self.size.sent = Some((cols, rows));
         }
         if !self.held_input.is_empty()
             && let Some(client) = &self.client
@@ -369,8 +371,9 @@ impl TerminalView {
             ClientEvent::PasteImageFailed { reason, .. } => tracing::warn!("pasted image not saved: {reason}"),
             ClientEvent::Resync { cols, rows, .. } => {
                 self.term = new_term(*cols, *rows, cx);
-                // The next layout pass resizes to the window if it differs.
-                self.grid_size = (*cols, *rows);
+                // The next layout pass resizes to the window if it differs. What was sent stays: the daemon may
+                // already have a newer size than this replay's.
+                self.size.grid = (*cols, *rows);
             }
             _ => return,
         }
@@ -429,7 +432,7 @@ impl TerminalView {
 
     /// Current grid size (columns, rows).
     pub fn grid_size(&self) -> (u16, u16) {
-        self.grid_size
+        self.size.grid
     }
 
     fn write_pty(&mut self, bytes: &[u8]) {
@@ -474,15 +477,17 @@ impl TerminalView {
             f32::from(metrics.width),
             f32::from(metrics.height),
         );
-        if dims != self.grid_size {
-            self.grid_size = dims;
+        if self.size.needs_resize(dims) {
+            self.size.grid = dims;
             self.term.resize(dims.0, dims.1);
-            if let Some(pane) = self.pane
-                && let Some(client) = &self.client
-            {
-                client.resize(pane, dims.0, dims.1, cell.0, cell.1);
-            }
             cx.notify();
+        }
+        if self.size.needs_send(dims)
+            && let Some(pane) = self.pane
+            && let Some(client) = &self.client
+        {
+            client.resize(pane, dims.0, dims.1, cell.0, cell.1);
+            self.size.sent = Some(dims);
         }
     }
 
@@ -600,7 +605,7 @@ impl TerminalView {
             return None;
         }
         let (col, row) = ((x / w).floor() as u16, (y / h).floor() as u16);
-        if col >= self.grid_size.0 || row >= self.grid_size.1 {
+        if col >= self.size.grid.0 || row >= self.size.grid.1 {
             return None;
         }
         Some((col, row, x - col as f32 * w > w / 2.0))
@@ -705,7 +710,7 @@ impl TerminalView {
         cx.emit(PaneEvent::Focused);
         let (history, offset) = self.term.scroll_extent();
         let track = f32::from(self.scrollbar_track.size.height);
-        let rows = self.grid_size.1 as usize;
+        let rows = self.size.grid.1 as usize;
         let Some(thumb) = thumb(track, rows, history, offset, min_thumb(cx)).filter(|_| !self.term.alt_screen()) else {
             return;
         };
@@ -720,7 +725,7 @@ impl TerminalView {
         let Some(grab) = self.scrollbar_grab else { return };
         let (history, _) = self.term.scroll_extent();
         let track = f32::from(self.scrollbar_track.size.height);
-        let Some(thumb) = thumb(track, self.grid_size.1 as usize, history, 0, min_thumb(cx)) else { return };
+        let Some(thumb) = thumb(track, self.size.grid.1 as usize, history, 0, min_thumb(cx)) else { return };
         let top = f32::from(y - self.scrollbar_track.origin.y) - grab;
         self.term.scroll_to_offset(offset_for_thumb_top(top, track, thumb.len, history));
         self.scrollbar_scrolled(cx);
@@ -922,7 +927,7 @@ impl Render for TerminalView {
         let (history, offset) = self.term.scroll_extent();
         let thumb = thumb(
             f32::from(self.scrollbar_track.size.height),
-            self.grid_size.1 as usize,
+            self.size.grid.1 as usize,
             history,
             offset,
             min_thumb(cx),

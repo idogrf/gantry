@@ -317,7 +317,7 @@ impl WorkspaceView {
 
     pub(super) fn render_active_tab(&self, animate: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx).clone();
-        let Some(tab) = self.workspace.active_tab().filter(|_| !self.active_tab_away()) else {
+        let Some(tab) = self.workspace.active_tab().filter(|_| !self.active_tab_off_screen()) else {
             return self.render_welcome(cx);
         };
         self.welcome_items.take(); // rebuilt when the screen shows again

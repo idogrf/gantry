@@ -278,8 +278,8 @@ impl WorkspaceView {
                     return;
                 }
                 match index {
-                    0 => self.leave_host(&host, false, window, cx),
-                    1 => self.leave_host(&host, true, window, cx),
+                    0 => self.leave_host(&host, false, cx),
+                    1 => self.leave_host(&host, true, cx),
                     _ => {}
                 }
             }

@@ -8,6 +8,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Fixed
 - **Project color on SSH hosts** - A remote project heading's right-click menu now has Color, so its color can be changed like a local project's. It is saved in `projectColors` under `ssh://<host>/<folder>`.
 - **Tab switching skips collapsed projects** - Ctrl+Tab, Ctrl+Shift+Tab and Back / Forward no longer land on a tab that a collapsed project heading hides in the sidebar.
+- **Claude's status line over the prompt** - A Claude pane could keep a different height than the program inside it thought it had, most often after reopening Gantry with the last prompt card shown, so Claude's status line and rule were drawn on the prompt row. The pane's size now always reaches the program.
 
 ## [0.12.0] - 2026-10-26
 

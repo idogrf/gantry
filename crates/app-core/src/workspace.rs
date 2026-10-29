@@ -994,6 +994,23 @@ impl Workspace {
         true
     }
 
+    /// Move off the visible tab when `away` hides it: to the last tab visited that is not hidden, else the first one
+    /// in `leaf_order` (the Settings tab first). False when every tab is hidden (nothing changes).
+    pub fn leave_hidden_tab(&mut self, leaf_order: &[NodeId], away: impl Fn(NodeId) -> bool + Copy) -> bool {
+        if self.tabs.get(self.active).is_none_or(|_| !self.tab_hidden(self.active, away)) {
+            return true;
+        }
+        if self.history_step(-1, away) {
+            return true;
+        }
+        let order = self.settings_tab().into_iter().chain(leaf_order.iter().filter_map(|leaf| self.tab_of(*leaf)));
+        let Some(index) = order.chain(0..self.tabs.len()).find(|index| !self.tab_hidden(*index, away)) else {
+            return false;
+        };
+        self.active = index;
+        true
+    }
+
     /// Show the tab `delta` places away in `leaf_order` (the sidebar's leaves, top to bottom), wrapping around. The
     /// Settings tab comes first (its row is at the top), each tab counts once (at its first listed leaf), and tabs
     /// with no listed leaf follow in workspace order. Tabs `away` hides are left out.
@@ -1910,6 +1927,44 @@ mod tests {
         assert_eq!(ws.focused(), Some(a));
         ws.cycle_tab_in(&[a, c], -1, away);
         assert_eq!(ws.focused(), Some(c));
+    }
+
+    #[test]
+    fn leave_hidden_tab_goes_back_in_history() {
+        let mut ws = Workspace::default();
+        let (a, b, gone) = (ws.new_tab(shell("/a")), ws.new_tab(shell("/b")), ws.new_tab(shell("/gone")));
+        for leaf in [b, a, gone] {
+            ws.active = ws.tab_of(leaf).unwrap();
+            ws.note_visit();
+        }
+        assert!(ws.leave_hidden_tab(&[b, a, gone], |leaf| leaf == gone));
+        assert_eq!(ws.focused(), Some(a));
+    }
+
+    #[test]
+    fn leave_hidden_tab_falls_back_to_sidebar_order() {
+        let mut ws = Workspace::default();
+        let (a, b, gone) = (ws.new_tab(shell("/a")), ws.new_tab(shell("/b")), ws.new_tab(shell("/gone")));
+        ws.active = ws.tab_of(gone).unwrap();
+        assert!(ws.leave_hidden_tab(&[b, a, gone], |leaf| leaf == gone));
+        assert_eq!(ws.focused(), Some(b));
+    }
+
+    #[test]
+    fn leave_hidden_tab_keeps_a_visible_tab() {
+        let mut ws = Workspace::default();
+        let (a, b) = (ws.new_tab(shell("/a")), ws.new_tab(shell("/b")));
+        let b2 = ws.split(Axis::Horizontal, shell("/b2")).unwrap();
+        assert!(ws.leave_hidden_tab(&[a, b, b2], |leaf| leaf == b2));
+        assert_eq!(ws.active, ws.tab_of(b).unwrap());
+    }
+
+    #[test]
+    fn leave_hidden_tab_with_every_tab_hidden_changes_nothing() {
+        let mut ws = Workspace::default();
+        let (a, b) = (ws.new_tab(shell("/a")), ws.new_tab(shell("/b")));
+        assert!(!ws.leave_hidden_tab(&[a, b], |_| true));
+        assert_eq!(ws.focused(), Some(b));
     }
 
     #[test]

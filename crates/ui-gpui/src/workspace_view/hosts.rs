@@ -560,6 +560,30 @@ impl WorkspaceView {
             .collect()
     }
 
+    /// Whether the visible tab is hidden: every pane of it is on an away host, so it has no sidebar row. The welcome
+    /// screen shows in its place.
+    pub(super) fn active_tab_away(&self) -> bool {
+        self.workspace.active_tab().is_some_and(|tab| {
+            !tab.settings && tab.root.leaves().iter().all(|leaf| self.is_away(&self.workspace.leaves[leaf].host))
+        })
+    }
+
+    /// A host was disconnected by hand: when the visible tab lost its sidebar row with it, show the last tab visited
+    /// that has one, else the first in the sidebar, else the welcome screen.
+    fn leave_away_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let away: HashSet<NodeId> =
+            self.workspace.leaves.iter().filter(|(_, leaf)| self.is_away(&leaf.host)).map(|(id, _)| *id).collect();
+        let order = self.sidebar.read(cx).leaf_order();
+        let before = self.workspace.active;
+        if !self.workspace.leave_hidden_tab(&order, |leaf| away.contains(&leaf)) {
+            // The welcome screen: the hidden pane keeps no keyboard focus.
+            self.focus_handle.focus(window, cx);
+        } else if self.workspace.active != before {
+            self.focus_current(window, cx);
+            self.save(cx);
+        }
+    }
+
     /// The × of `host` in the sidebar's Connected block: cancels a connection that is not up, stops an idle host's
     /// daemon, and asks Disconnect only / End sessions and disconnect / Cancel when sessions run there.
     pub(super) fn disconnect_host(&mut self, host: &HostId, window: &mut Window, cx: &mut Context<Self>) {
@@ -574,8 +598,9 @@ impl WorkspaceView {
                 } else {
                     self.forget_host(host, cx);
                 }
+                self.leave_away_tab(window, cx);
             }
-            Some(DisconnectPlan::StopNow) => self.leave_host(host, true, cx),
+            Some(DisconnectPlan::StopNow) => self.leave_host(host, true, window, cx),
             Some(DisconnectPlan::Ask) => {
                 let spec = dialogs::disconnect(host.name(), &self.counts_for(&leaves, cx));
                 self.open_dialog(spec, DialogAction::Disconnect(host.clone()), window, cx);
@@ -585,7 +610,7 @@ impl WorkspaceView {
 
     /// Disconnect from connected SSH host `host`, first asking its daemon to stop (which ends its sessions) when
     /// `stop`. Nothing reconnects by itself; its panes show Not connected.
-    pub(super) fn leave_host(&mut self, host: &HostId, stop: bool, cx: &mut Context<Self>) {
+    pub(super) fn leave_host(&mut self, host: &HostId, stop: bool, window: &mut Window, cx: &mut Context<Self>) {
         if stop && let Some(client) = self.client(host).cloned() {
             // The thread's clone keeps the connection open until the request is written.
             std::thread::spawn(move || client.stop_all_and_wait(Duration::from_secs(2)));
@@ -596,6 +621,7 @@ impl WorkspaceView {
             self.push_search_state(cx);
         }
         self.forget_host(host, cx);
+        self.leave_away_tab(window, cx);
     }
 
     /// The file to upload for `host`'s update, or why nothing can be; `None` when the host is not listed.

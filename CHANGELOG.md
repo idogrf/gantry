@@ -5,6 +5,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+- **Disconnecting an SSH host** - The tab on screen no longer stays behind with a Not connected card (Connect / Close) after its host is disconnected. Gantry shows the tab you were on before, else the first one in the sidebar, else the welcome screen.
+
 ## [0.12.1] - 2026-10-29
 
 ### Fixed

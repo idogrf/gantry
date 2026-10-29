@@ -400,11 +400,12 @@ impl WorkspaceView {
 
     pub(super) fn sync_panes(&self, cx: &mut Context<Self>) {
         self.publish_hosts(cx);
+        let unlisted = self.unlisted_leaves();
         let panes: Vec<PaneEntry> = self
             .workspace
             .leaves
             .iter()
-            .filter(|(_, leaf)| !self.is_away(&leaf.host))
+            .filter(|(id, _)| !unlisted.contains(id))
             .map(|(id, leaf)| {
                 let view = self.slots.get(id).map(|slot| slot.view.read(cx));
                 PaneEntry {
@@ -436,12 +437,8 @@ impl WorkspaceView {
             .enumerate()
             .filter(|(_, tab)| !tab.settings)
             .filter_map(|(index, tab)| {
-                let leaves: Vec<NodeId> = tab
-                    .root
-                    .leaves()
-                    .into_iter()
-                    .filter(|leaf| !self.is_away(&self.workspace.leaves[leaf].host))
-                    .collect();
+                let leaves: Vec<NodeId> =
+                    tab.root.leaves().into_iter().filter(|leaf| !unlisted.contains(leaf)).collect();
                 let focused = if leaves.contains(&tab.focused) { tab.focused } else { *leaves.first()? };
                 Some(TabEntry { index, name: tab.name.clone(), focused, leaves })
             })

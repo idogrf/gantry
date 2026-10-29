@@ -154,6 +154,18 @@ impl HostState {
         !matches!(self, HostState::Connecting | HostState::Connected | HostState::Reconnecting { .. })
     }
 
+    /// Whether the host waits for the user to act on why it could not connect (sign in, install, update, a failure):
+    /// the visible tab of the host stays on screen with its card, though the sidebar does not list it.
+    pub fn asks_user(&self) -> bool {
+        matches!(
+            self,
+            HostState::NeedsSignIn
+                | HostState::UpdateNeeded { .. }
+                | HostState::NotInstalled
+                | HostState::Failed { .. }
+        )
+    }
+
     /// Whether the host is connected or on its way: the sidebar block gives it an X.
     pub fn in_connected_list(&self) -> bool {
         matches!(self, HostState::Connecting | HostState::Connected | HostState::Reconnecting { .. })
@@ -454,6 +466,22 @@ mod tests {
             hosts_summary(&[HostDot::Busy, HostDot::Ok]),
             HostsSummary { dot: HostDot::Ok, connected: 1, total: 2 }
         );
+    }
+
+    #[test]
+    fn asks_user_only_for_what_the_user_must_answer() {
+        let reason = "ssh: no route".to_string();
+        for state in [
+            HostState::NeedsSignIn,
+            HostState::UpdateNeeded { remote: None },
+            HostState::NotInstalled,
+            HostState::Failed { reason },
+        ] {
+            assert!(state.asks_user(), "{state:?}");
+        }
+        for state in [HostState::NotConnected, HostState::Disconnected, HostState::TakenOver, HostState::Connected] {
+            assert!(!state.asks_user(), "{state:?}");
+        }
     }
 
     #[test]

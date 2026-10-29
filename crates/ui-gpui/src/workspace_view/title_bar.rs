@@ -359,7 +359,7 @@ impl WorkspaceView {
     fn render_title_session(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let theme = theme(cx).clone();
         let middle = div().min_w_0().flex_shrink(1.).flex().flex_row().items_center().gap(theme.ui(8.));
-        let Some(tab) = self.workspace.active_tab() else { return middle };
+        let Some(tab) = self.workspace.active_tab().filter(|_| !self.active_tab_off_screen()) else { return middle };
         if tab.settings {
             // With the sidebar hidden its row is gone, so the bar closes Settings.
             return middle.font_weight(FontWeight::SEMIBOLD).child("Settings").when(

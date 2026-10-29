@@ -994,16 +994,38 @@ impl Workspace {
         true
     }
 
-    /// Show the tab `delta` places away in `leaf_order` (the sidebar's leaves, top to bottom), wrapping around. The
-    /// Settings tab comes first (its row is at the top), each tab counts once (at its first listed leaf), and tabs
-    /// with no listed leaf follow in workspace order. Tabs `away` hides are left out.
-    pub fn cycle_tab_in(&mut self, leaf_order: &[NodeId], delta: isize, away: impl Fn(NodeId) -> bool + Copy) {
+    /// Whether the visible tab is hidden: it has leaves and `away` holds for all of them.
+    pub fn active_hidden(&self, away: impl Fn(NodeId) -> bool) -> bool {
+        self.active < self.tabs.len() && self.tab_hidden(self.active, away)
+    }
+
+    /// Move off the visible tab when `away` hides it: to the last tab visited that is not hidden, else the first one
+    /// in sidebar order (see `cycle_tab_in`). False when every tab is hidden (nothing changes).
+    pub fn leave_hidden_tab(&mut self, leaf_order: &[NodeId], away: impl Fn(NodeId) -> bool + Copy) -> bool {
+        if !self.active_hidden(away) || self.history_step(-1, away) {
+            return true;
+        }
+        let Some(&index) = self.tab_order(leaf_order, away).first() else { return false };
+        self.active = index;
+        true
+    }
+
+    /// The tabs in sidebar order: the Settings tab first (its row is at the top), each tab once (at its first leaf in
+    /// `leaf_order`, the sidebar's leaves top to bottom), then tabs with no listed leaf in workspace order. Tabs `away`
+    /// hides are left out.
+    fn tab_order(&self, leaf_order: &[NodeId], away: impl Fn(NodeId) -> bool + Copy) -> Vec<usize> {
         let mut order: Vec<usize> = self.settings_tab().into_iter().collect();
         for index in leaf_order.iter().filter_map(|leaf| self.tab_of(*leaf)).chain(0..self.tabs.len()) {
             if !order.contains(&index) && !self.tab_hidden(index, away) {
                 order.push(index);
             }
         }
+        order
+    }
+
+    /// Show the tab `delta` places away in sidebar order (`tab_order`), wrapping around.
+    pub fn cycle_tab_in(&mut self, leaf_order: &[NodeId], delta: isize, away: impl Fn(NodeId) -> bool + Copy) {
+        let order = self.tab_order(leaf_order, away);
         let Some(at) = order.iter().position(|index| *index == self.active) else { return };
         let len = order.len() as isize;
         self.active = order[(at as isize + delta).rem_euclid(len) as usize];
@@ -1910,6 +1932,44 @@ mod tests {
         assert_eq!(ws.focused(), Some(a));
         ws.cycle_tab_in(&[a, c], -1, away);
         assert_eq!(ws.focused(), Some(c));
+    }
+
+    #[test]
+    fn leave_hidden_tab_goes_back_in_history() {
+        let mut ws = Workspace::default();
+        let (a, b, gone) = (ws.new_tab(shell("/a")), ws.new_tab(shell("/b")), ws.new_tab(shell("/gone")));
+        for leaf in [b, a, gone] {
+            ws.active = ws.tab_of(leaf).unwrap();
+            ws.note_visit();
+        }
+        assert!(ws.leave_hidden_tab(&[b, a, gone], |leaf| leaf == gone));
+        assert_eq!(ws.focused(), Some(a));
+    }
+
+    #[test]
+    fn leave_hidden_tab_falls_back_to_sidebar_order() {
+        let mut ws = Workspace::default();
+        let (a, b, gone) = (ws.new_tab(shell("/a")), ws.new_tab(shell("/b")), ws.new_tab(shell("/gone")));
+        ws.active = ws.tab_of(gone).unwrap();
+        assert!(ws.leave_hidden_tab(&[b, a, gone], |leaf| leaf == gone));
+        assert_eq!(ws.focused(), Some(b));
+    }
+
+    #[test]
+    fn leave_hidden_tab_keeps_a_visible_tab() {
+        let mut ws = Workspace::default();
+        let (a, b) = (ws.new_tab(shell("/a")), ws.new_tab(shell("/b")));
+        let b2 = ws.split(Axis::Horizontal, shell("/b2")).unwrap();
+        assert!(ws.leave_hidden_tab(&[a, b, b2], |leaf| leaf == b2));
+        assert_eq!(ws.active, ws.tab_of(b).unwrap());
+    }
+
+    #[test]
+    fn leave_hidden_tab_with_every_tab_hidden_changes_nothing() {
+        let mut ws = Workspace::default();
+        let (a, b) = (ws.new_tab(shell("/a")), ws.new_tab(shell("/b")));
+        assert!(!ws.leave_hidden_tab(&[a, b], |_| true));
+        assert_eq!(ws.focused(), Some(b));
     }
 
     #[test]

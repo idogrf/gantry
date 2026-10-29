@@ -697,6 +697,8 @@ impl WorkspaceView {
             this.refresh_host_cards(&host, cx);
         }
         this.focus_current(window, cx);
+        // A tab of a host that is not connected has no sidebar row: start on another one.
+        this.leave_off_screen_tab(window, cx);
         // Every connection starts with the GUI's colors: the daemon outlives the GUI.
         this.apply_settings(cx);
         this.save(cx);

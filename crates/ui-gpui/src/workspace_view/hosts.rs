@@ -222,6 +222,18 @@ impl WorkspaceView {
                 .detach();
             }
         }
+        if self.is_away(host) && !self.host_state(host).asks_user() {
+            // Its tabs left the sidebar, so the one on screen goes too; checked once the state settled, since a
+            // reconnect may follow at once (a rename, Settings' Reconnect).
+            if let Some(window) = cx.windows().into_iter().next() {
+                cx.spawn(async move |this, cx| {
+                    let _ = window.update(cx, |_, window, cx| {
+                        let _ = this.update(cx, |view, cx| view.leave_off_screen_tab(window, cx));
+                    });
+                })
+                .detach();
+            }
+        }
         if self.is_away(host) {
             // Its sessions are not known any more; they are listed again when it connects.
             self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, Vec::new(), cx));
@@ -548,16 +560,46 @@ impl WorkspaceView {
         self.ssh_hosts.iter().any(|entry| entry.name == host.name()) && !self.host_state(host).in_connected_list()
     }
 
+    /// The leaves of hosts that are away: the sidebar does not list them.
+    pub(super) fn unlisted_leaves(&self) -> HashSet<NodeId> {
+        self.workspace.leaves.iter().filter(|(_, leaf)| self.is_away(&leaf.host)).map(|(id, _)| *id).collect()
+    }
+
     /// The leaves the sidebar does not show: those of hosts that are away and those under a collapsed project. Their
     /// tabs are passed by when switching tabs.
     pub(super) fn away_leaves(&self, cx: &App) -> HashSet<NodeId> {
-        let collapsed = self.sidebar.read(cx).collapsed_leaves();
-        self.workspace
-            .leaves
-            .iter()
-            .filter(|(id, leaf)| self.is_away(&leaf.host) || collapsed.contains(id))
-            .map(|(id, _)| *id)
-            .collect()
+        let mut away = self.unlisted_leaves();
+        away.extend(self.sidebar.read(cx).collapsed_leaves());
+        away
+    }
+
+    /// The leaves never on screen: those of hosts that are away, except a host waiting for the user (`asks_user`),
+    /// whose visible tab keeps its card.
+    fn off_screen_leaves(&self) -> HashSet<NodeId> {
+        let mut leaves = self.unlisted_leaves();
+        leaves.retain(|leaf| !self.host_state(&self.workspace.leaves[leaf].host).asks_user());
+        leaves
+    }
+
+    /// Whether the visible tab is never on screen (`off_screen_leaves`): the welcome screen shows in its place.
+    pub(super) fn active_tab_off_screen(&self) -> bool {
+        let off = self.off_screen_leaves();
+        self.workspace.active_hidden(|leaf| off.contains(&leaf))
+    }
+
+    /// When the visible tab is never on screen (`off_screen_leaves`), show the last tab visited that is, else the
+    /// first in the sidebar, else the welcome screen.
+    pub(super) fn leave_off_screen_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let off = self.off_screen_leaves();
+        let order = self.sidebar.read(cx).leaf_order();
+        let before = self.workspace.active;
+        if !self.workspace.leave_hidden_tab(&order, |leaf| off.contains(&leaf)) {
+            // The welcome screen: the hidden pane keeps no keyboard focus.
+            self.focus_handle.focus(window, cx);
+        } else if self.workspace.active != before {
+            self.focus_current(window, cx);
+            self.save(cx);
+        }
     }
 
     /// The × of `host` in the sidebar's Connected block: cancels a connection that is not up, stops an idle host's

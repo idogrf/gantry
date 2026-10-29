@@ -219,7 +219,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app-core"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "alacritty_terminal",
  "nucleo-matcher",
@@ -971,7 +971,7 @@ dependencies = [
 
 [[package]]
 name = "claude-index"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "notify",
  "serde",
@@ -1446,7 +1446,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "daemon"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "app-core",
@@ -2208,7 +2208,7 @@ dependencies = [
 
 [[package]]
 name = "gantry"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "app-core",
  "async-channel",
@@ -4823,7 +4823,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -6735,7 +6735,7 @@ dependencies = [
 
 [[package]]
 name = "ui-gpui"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "app-core",
  "async-channel",

@@ -137,6 +137,40 @@ pub enum HostEvent {
     Cancel,
 }
 
+/// What picking a host in the launcher's host step does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostPick {
+    /// The host is connected: go on to its folders.
+    Open,
+    /// Connect it and wait.
+    Connect,
+    /// A background retry is running: only wait.
+    Wait,
+    /// An attempt is running: the row offers Cancel.
+    Cancel,
+    /// The last attempt failed: the row offers Retry.
+    Retry,
+    /// The remote has no Gantry: the row offers Install….
+    Install,
+    /// The remote runs another version: the row offers Update and restart.
+    Update,
+}
+
+/// What picking a host in the state `state` does.
+pub fn host_pick(state: &HostState) -> HostPick {
+    match state {
+        HostState::Connected => HostPick::Open,
+        HostState::NotConnected | HostState::Disconnected | HostState::NeedsSignIn | HostState::TakenOver => {
+            HostPick::Connect
+        }
+        HostState::Reconnecting { .. } => HostPick::Wait,
+        HostState::Connecting => HostPick::Cancel,
+        HostState::Failed { .. } => HostPick::Retry,
+        HostState::NotInstalled => HostPick::Install,
+        HostState::UpdateNeeded { .. } => HostPick::Update,
+    }
+}
+
 /// The message card of a host that is not usable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostCard {
@@ -431,6 +465,21 @@ pub fn away_line(host: &str, state: &HostState) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_pick_follows_the_state() {
+        use super::{HostPick, HostState, host_pick};
+        assert_eq!(host_pick(&HostState::Connected), HostPick::Open);
+        assert_eq!(host_pick(&HostState::NotConnected), HostPick::Connect);
+        assert_eq!(host_pick(&HostState::Disconnected), HostPick::Connect);
+        assert_eq!(host_pick(&HostState::NeedsSignIn), HostPick::Connect);
+        assert_eq!(host_pick(&HostState::TakenOver), HostPick::Connect);
+        assert_eq!(host_pick(&HostState::Reconnecting { attempt: 2 }), HostPick::Wait);
+        assert_eq!(host_pick(&HostState::Connecting), HostPick::Cancel);
+        assert_eq!(host_pick(&HostState::Failed { reason: "x".into() }), HostPick::Retry);
+        assert_eq!(host_pick(&HostState::NotInstalled), HostPick::Install);
+        assert_eq!(host_pick(&HostState::UpdateNeeded { remote: None }), HostPick::Update);
+    }
+
     #[test]
     fn an_empty_host_list_summarizes_to_no_dot_and_zero_of_zero() {
         assert_eq!(hosts_summary(&[]), HostsSummary { dot: HostDot::None, connected: 0, total: 0 });

@@ -1,5 +1,5 @@
-//! The directory launcher's list: one list of folders across this machine and the SSH hosts (open now, favorites,
-//! then recent, newest first), fuzzy filtered, and the typed text that opens a path instead.
+//! The directory launcher's list: a host's folders (open now, favorites, then recent, newest first), fuzzy filtered,
+//! and the typed text that opens a path instead.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -80,8 +80,6 @@ pub enum LauncherItem {
         /// Whether it exists; a favorite of this machine whose folder is gone cannot be opened.
         exists: bool,
     },
-    /// "<host>: type a path on this host"; picking it fills the field with `<host>:~/`.
-    HostHint(HostId),
 }
 
 impl LauncherItem {
@@ -89,16 +87,15 @@ impl LauncherItem {
     pub fn host(&self) -> &HostId {
         match self {
             LauncherItem::Open(folder) => &folder.host,
-            LauncherItem::Dir { host, .. } | LauncherItem::HostHint(host) => host,
+            LauncherItem::Dir { host, .. } => host,
         }
     }
 
-    /// The folder it opens; none for a host hint.
+    /// The folder it opens.
     pub fn folder(&self) -> Option<&PathBuf> {
         match self {
             LauncherItem::Open(folder) => Some(&folder.path),
             LauncherItem::Dir { path, .. } => Some(path),
-            LauncherItem::HostHint(_) => None,
         }
     }
 }
@@ -176,76 +173,43 @@ pub fn recent_folders(
 pub enum Typed {
     /// Words that filter the list.
     Filter,
-    /// A path on a host: it is completed and can be opened as typed.
-    Path {
-        /// The host the path is on.
-        host: HostId,
-        /// The path as typed (`~/` for a bare `<host>:`).
-        path: String,
-    },
+    /// A path on the picked host: it is completed and can be opened as typed.
+    Path(String),
 }
 
-/// `/…` and `~…` are paths on this machine; `<host>:<path>` is a path on that host when it is one of `hosts`
-/// (the `sshHosts` names, matched ignoring case; a path starting with neither `/` nor `~` is under `~/`, like scp);
-/// anything else filters.
-pub fn typed(text: &str, hosts: &[HostId]) -> Typed {
-    if text.starts_with(['/', '~']) {
-        return Typed::Path { host: HostId::local(), path: text.to_string() };
-    }
-    let Some((name, path)) = text.split_once(':') else { return Typed::Filter };
-    let Some(host) = hosts.iter().find(|host| host.name().eq_ignore_ascii_case(name)) else { return Typed::Filter };
-    let path = match path {
-        "" => "~/".to_string(),
-        path if path.starts_with(['/', '~']) => path.to_string(),
-        path => format!("~/{path}"),
-    };
-    Typed::Path { host: host.clone(), path }
+/// `/…` and `~…` are paths on the picked host; anything else filters.
+pub fn typed(text: &str) -> Typed {
+    if text.starts_with(['/', '~']) { Typed::Path(text.to_string()) } else { Typed::Filter }
 }
 
-/// What a row is matched against: the displayed path on this machine, `<host>:<path>` on a host.
+/// What a row is matched against in the list of every host: the displayed path on this machine, `<host>:<path>` on a host.
 fn row_text(host: &HostId, path: &Path, home: Option<&Path>) -> String {
     if host.is_local() { display_path(path, home) } else { format!("{}:{}", host.name(), path.display()) }
 }
 
-/// One list for every host: open folders (in the given order), then favorites (settings order), then recent folders
-/// (by match score, then recency), each (host, folder) once and the first of those groups it is in wins. The query
-/// filters by `row_text`. While it is a bare prefix of a host name (no `:` or `/`), a hint row per such host leads.
-/// `hosts` are the `sshHosts` names; rows of any other remote host are left out.
-pub fn items(
-    open: &[OpenFolder],
-    recent: &[RecentFolder],
+/// The list of one host's folders: open folders (in the given order), then favorites (settings order), then recent
+/// folders (by match score, then recency), each (host, folder) once and the first of those groups it is in wins.
+/// `text` is what a row is matched against.
+fn build(
+    open: Vec<&OpenFolder>,
+    favorites: Vec<(HostId, PathBuf)>,
+    recent: Vec<&RecentFolder>,
     query: &str,
-    home: Option<&Path>,
-    favorites: &[PathBuf],
-    hosts: &[HostId],
+    text: impl Fn(&HostId, &Path) -> String,
 ) -> Vec<LauncherItem> {
-    let shown = |host: &HostId| host.is_local() || hosts.contains(host);
-    let open: Vec<&OpenFolder> = open.iter().filter(|folder| shown(&folder.host)).collect();
-    let favorites: Vec<(HostId, PathBuf)> =
-        favorites.iter().map(|favorite| split_project_key(favorite)).filter(|(host, _)| shown(host)).collect();
-    let recent: Vec<&RecentFolder> = recent.iter().filter(|folder| shown(&folder.host)).collect();
     let is_open = |host: &HostId, path: &Path| open.iter().any(|folder| folder.host == *host && folder.path == path);
     let is_favorite = |host: &HostId, path: &Path| favorites.iter().any(|(h, p)| h == host && p == path);
     let texts = open
         .iter()
-        .map(|folder| row_text(&folder.host, &folder.path, home))
-        .chain(favorites.iter().map(|(host, path)| row_text(host, path, home)))
-        .chain(recent.iter().map(|folder| row_text(&folder.host, &folder.path, home)));
+        .map(|folder| text(&folder.host, &folder.path))
+        .chain(favorites.iter().map(|(host, path)| text(host, path)))
+        .chain(recent.iter().map(|folder| text(&folder.host, &folder.path)));
     let mut fuzzy = Fuzzy::new(query, texts);
     let mut score = |host: &HostId, path: &Path| match &mut fuzzy {
         None => Some(0),
-        Some(fuzzy) => fuzzy.score(&row_text(host, path, home)),
+        Some(fuzzy) => fuzzy.score(&text(host, path)),
     };
     let mut list: Vec<LauncherItem> = Vec::new();
-    if !query.is_empty() && !query.contains([':', '/']) {
-        let query = query.to_lowercase();
-        list.extend(
-            hosts
-                .iter()
-                .filter(|host| host.name().to_lowercase().starts_with(&query))
-                .map(|host| LauncherItem::HostHint(host.clone())),
-        );
-    }
     list.extend(
         open.iter()
             .filter(|folder| score(&folder.host, &folder.path).is_some())
@@ -279,11 +243,52 @@ pub fn items(
     list
 }
 
+/// One list for every host: open folders, favorites, then recent folders (see `items_on`). The query filters by
+/// `<host>:<path>` for a remote row. `hosts` are the `sshHosts` names; rows of any other remote host are left out.
+pub fn items(
+    open: &[OpenFolder],
+    recent: &[RecentFolder],
+    query: &str,
+    home: Option<&Path>,
+    favorites: &[PathBuf],
+    hosts: &[HostId],
+) -> Vec<LauncherItem> {
+    let shown = |host: &HostId| host.is_local() || hosts.contains(host);
+    build(
+        open.iter().filter(|folder| shown(&folder.host)).collect(),
+        favorites.iter().map(|favorite| split_project_key(favorite)).filter(|(host, _)| shown(host)).collect(),
+        recent.iter().filter(|folder| shown(&folder.host)).collect(),
+        query,
+        |host, path| row_text(host, path, home),
+    )
+}
+
+/// The folders of one `host`: its open folders (in the given order), then its favorites (settings order), then its
+/// recent folders (by match score, then recency), each folder once and the first of those groups it is in wins. The
+/// query filters by the displayed path on this machine (`home` is this machine's home; `None` for a remote) and by
+/// the bare path on a remote, never by the host's name.
+pub fn items_on(
+    host: &HostId,
+    open: &[OpenFolder],
+    recent: &[RecentFolder],
+    query: &str,
+    home: Option<&Path>,
+    favorites: &[PathBuf],
+) -> Vec<LauncherItem> {
+    build(
+        open.iter().filter(|folder| folder.host == *host).collect(),
+        favorites.iter().map(|favorite| split_project_key(favorite)).filter(|(h, _)| h == host).collect(),
+        recent.iter().filter(|folder| folder.host == *host).collect(),
+        query,
+        |host, path| if host.is_local() { display_path(path, home) } else { path.display().to_string() },
+    )
+}
+
 /// How many folders the welcome screen lists.
 pub const WELCOME_ROWS: usize = 5;
 
 /// The welcome screen's folders: favorites, then recent folders (newest first), each (host, folder) once, at most
-/// `WELCOME_ROWS`; no open folders and no host hints.
+/// `WELCOME_ROWS`; no open folders.
 pub fn welcome_items(
     recent: &[RecentFolder],
     home: Option<&Path>,
@@ -338,7 +343,7 @@ mod tests {
         OpenPane { host: local(), cwd: cwd.into(), claude, tone }
     }
 
-    /// `open`, `fav`, `dir` or `hint`, then `host:path`.
+    /// `open`, `fav` or `dir`, then `host:path`.
     fn rows(items: &[LauncherItem]) -> Vec<String> {
         items
             .iter()
@@ -347,7 +352,6 @@ mod tests {
                 LauncherItem::Dir { host, path, favorite, .. } => {
                     format!("{} {}:{}", if *favorite { "fav" } else { "dir" }, host.name(), path.display())
                 }
-                LauncherItem::HostHint(host) => format!("hint {}", host.name()),
             })
             .collect()
     }
@@ -389,21 +393,29 @@ mod tests {
         let recent = [recent(&devbox(), "/src/x", 20), recent(&devbox(), "/etc", 15), recent(&local(), "/b", 10)];
         let hosts = [devbox()];
         let by_host = items(&[], &recent, "devbox", None, &[], &hosts);
-        assert_eq!(rows(&by_host), vec!["hint devbox", "dir devbox:/src/x", "dir devbox:/etc"]);
+        assert_eq!(rows(&by_host), vec!["dir devbox:/src/x", "dir devbox:/etc"]);
         assert_eq!(rows(&items(&[], &recent, "src", None, &[], &hosts)), vec!["dir devbox:/src/x"]);
     }
 
     #[test]
-    fn host_hint_rows_only_for_a_bare_prefix() {
-        let hosts = [devbox()];
-        let hinted =
-            |query: &str| items(&[], &[], query, None, &[], &hosts).first() == Some(&LauncherItem::HostHint(devbox()));
-        assert!(hinted("dev"));
-        assert!(hinted("DEV"));
-        assert!(!hinted("dev/x"));
-        assert!(!hinted("dev:"));
-        assert!(!hinted(""));
-        assert!(!hinted("box"));
+    fn no_host_hint_rows() {
+        assert!(items(&[], &[], "dev", None, &[], &[devbox()]).is_empty());
+    }
+
+    #[test]
+    fn items_on_lists_only_that_host() {
+        let favorites = [PathBuf::from("ssh://devbox/c"), PathBuf::from("/d")];
+        let recent = [recent(&local(), "/e", 9), recent(&devbox(), "/f", 3), recent(&devbox(), "/g", 4)];
+        let open = [open(&local(), "/a"), open(&devbox(), "/b")];
+        let list = items_on(&devbox(), &open, &recent, "", None, &favorites);
+        assert_eq!(rows(&list), vec!["open devbox:/b", "fav devbox:/c", "dir devbox:/g", "dir devbox:/f"]);
+    }
+
+    #[test]
+    fn items_on_matches_the_path_not_the_host_name() {
+        let recent = [recent(&devbox(), "/home/u/work", 1)];
+        assert!(items_on(&devbox(), &[], &recent, "devbox", None, &[]).is_empty());
+        assert_eq!(items_on(&devbox(), &[], &recent, "work", None, &[]).len(), 1);
     }
 
     #[test]
@@ -420,19 +432,11 @@ mod tests {
     }
 
     #[test]
-    fn typed_paths() {
-        let hosts = [devbox()];
-        let path = |host: HostId, path: &str| Typed::Path { host, path: path.into() };
-        assert_eq!(typed("~/co", &hosts), path(local(), "~/co"));
-        assert_eq!(typed("/etc", &hosts), path(local(), "/etc"));
-        assert_eq!(typed("devbox:~/src/m", &hosts), path(devbox(), "~/src/m"));
-        assert_eq!(typed("devbox:", &hosts), path(devbox(), "~/"));
-        assert_eq!(typed("devbox:src", &hosts), path(devbox(), "~/src"));
-        assert_eq!(typed("DevBox:/etc", &hosts), path(devbox(), "/etc"));
-        assert_eq!(typed("nohost:~/x", &hosts), Typed::Filter);
-        assert_eq!(typed("devbox:~/x", &[]), Typed::Filter);
-        assert_eq!(typed(":~/x", &hosts), Typed::Filter);
-        assert_eq!(typed("notes", &hosts), Typed::Filter);
+    fn typed_reads_only_slash_and_tilde_as_paths() {
+        assert_eq!(typed("~/src"), Typed::Path("~/src".into()));
+        assert_eq!(typed("/etc"), Typed::Path("/etc".into()));
+        assert_eq!(typed("devbox:~/x"), Typed::Filter);
+        assert_eq!(typed("gan"), Typed::Filter);
     }
 
     #[test]

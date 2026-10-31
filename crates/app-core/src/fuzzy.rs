@@ -33,6 +33,15 @@ impl Fuzzy {
     pub fn score(&mut self, text: &str) -> Option<u32> {
         self.pattern.score(Utf32Str::new(text, &mut self.buf), &mut self.matcher)
     }
+
+    /// The character indices of `text` the query matched (sorted, each once), or `None` if it does not match.
+    pub fn indices(&mut self, text: &str) -> Option<Vec<u32>> {
+        let mut found = Vec::new();
+        self.pattern.indices(Utf32Str::new(text, &mut self.buf), &mut self.matcher, &mut found)?;
+        found.sort_unstable();
+        found.dedup();
+        Some(found)
+    }
 }
 
 #[cfg(test)]
@@ -48,6 +57,13 @@ mod tests {
         let paths = ["~/Private/Repos/rust_terminal", "~/r/u/s/t"];
         let mut exact = Fuzzy::new("rust", paths).unwrap();
         assert!(exact.score(paths[0]).unwrap() > exact.score(paths[1]).unwrap_or(0));
+    }
+
+    #[test]
+    fn indices_mark_the_matched_chars() {
+        let mut fuzzy = Fuzzy::new("se", ["serving"]).unwrap();
+        assert_eq!(fuzzy.indices("serving"), Some(vec![0, 1]));
+        assert_eq!(fuzzy.indices("docs"), None);
     }
 
     #[test]

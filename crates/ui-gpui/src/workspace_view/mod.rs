@@ -304,6 +304,8 @@ pub struct WorkspaceView {
     ssh_hosts: Vec<SshHost>,
     /// Where each SSH host's connection stands (absent = `NotConnected`).
     host_states: HashMap<HostId, HostState>,
+    /// The SSH hosts whose panes the sidebar lists (`HostState::shows_rows`).
+    hosts_with_rows: HashSet<HostId>,
     /// New leaves waiting for their host to connect, to be spawned then.
     queued: HashMap<HostId, Vec<NodeId>>,
     /// The pending reconnect timer of each host.
@@ -576,6 +578,7 @@ impl WorkspaceView {
             search_query: String::new(),
             hosts,
             ssh_hosts: cx.global::<SettingsStore>().settings().ssh_hosts.clone(),
+            hosts_with_rows: host_states.keys().cloned().collect(),
             host_states,
             queued: HashMap::new(),
             retries: HashMap::new(),

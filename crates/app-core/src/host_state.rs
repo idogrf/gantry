@@ -205,6 +205,20 @@ impl HostState {
         matches!(self, HostState::Connecting | HostState::Connected | HostState::Reconnecting { .. })
     }
 
+    /// Whether the sidebar lists the host's panes after the host moved into this state, given whether it did before:
+    /// they appear when the host first connects and stay through every later state (a drop, a retry, a sign-in, a
+    /// take-over), until the host is not connected, or unusable (failed, not installed, needs an update).
+    pub fn shows_rows(&self, before: bool) -> bool {
+        match self {
+            HostState::Connected => true,
+            HostState::NotConnected
+            | HostState::Failed { .. }
+            | HostState::NotInstalled
+            | HostState::UpdateNeeded { .. } => false,
+            _ => before,
+        }
+    }
+
     /// What the X of this host does when `running` of its panes have a live process; `None` when the host is not in
     /// the sidebar block.
     pub fn disconnect_plan(&self, running: usize) -> Option<DisconnectPlan> {
@@ -483,6 +497,21 @@ mod tests {
     #[test]
     fn an_empty_host_list_summarizes_to_no_dot_and_zero_of_zero() {
         assert_eq!(hosts_summary(&[]), HostsSummary { dot: HostDot::None, connected: 0, total: 0 });
+    }
+
+    #[test]
+    fn rows_appear_on_connect_and_stay_until_the_host_is_gone_or_unusable() {
+        let failed = HostState::Failed { reason: String::new() };
+        let update = HostState::UpdateNeeded { remote: None };
+        assert!(HostState::Connected.shows_rows(false));
+        for state in [HostState::Connecting, HostState::Disconnected, HostState::NeedsSignIn, HostState::TakenOver] {
+            assert!(!state.shows_rows(false), "{state:?} before a connect");
+            assert!(state.shows_rows(true), "{state:?} after a connect");
+        }
+        assert!(HostState::Reconnecting { attempt: 3 }.shows_rows(true));
+        for state in [HostState::NotConnected, HostState::NotInstalled, update, failed] {
+            assert!(!state.shows_rows(true), "{state:?} hides the rows");
+        }
     }
 
     #[test]

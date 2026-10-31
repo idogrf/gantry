@@ -128,10 +128,10 @@ impl WorkspaceView {
                     self.push_search_hits(cx);
                     self.push_search_state(cx);
                 }
-                ClientEvent::DirListing { request, dirs, .. } => {
+                ClientEvent::DirListing { request, path, dirs } => {
                     if let Some((view, _)) = &self.launcher {
-                        let dirs = dirs.clone();
-                        view.update(cx, |view, cx| view.set_listing(*request, dirs, cx));
+                        let (path, dirs) = (path.clone(), dirs.clone());
+                        view.update(cx, |view, cx| view.set_listing(*request, path, dirs, cx));
                     }
                 }
                 ClientEvent::DirListingFailed { request, reason } => {
@@ -235,6 +235,7 @@ impl WorkspaceView {
     /// Remember an SSH host's recent folders in the layout, for the launcher while the host is away.
     fn remember_folders(&mut self, host: &HostId, cx: &mut Context<Self>) {
         self.welcome_items.take();
+        self.push_launcher_folders(cx);
         if host.is_local() {
             return;
         }

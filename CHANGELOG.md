@@ -5,6 +5,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed
+- **New session: host first** - "New Claude session" and "New terminal" ask which machine to use first, connect an SSH host right there, then list only that host's folders. Browse… opens a folder browser on an SSH host, with an Open here button; on this machine it still opens the system folder dialog.
+
 ### Fixed
 - **Disconnecting an SSH host** - The tab on screen no longer stays behind with a Not connected card (Connect / Close) once its host is disconnected, drops or is opened from another Gantry: Gantry shows the tab you were on before, else the first one in the sidebar, else the welcome screen. Gantry also starts on another tab when the last one was on an SSH host. A connect that failed or needs you (sign in, install, update) keeps its tab on screen with the reason.
 

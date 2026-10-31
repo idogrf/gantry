@@ -9,6 +9,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **New session: host first** - "New Claude session" and "New terminal" ask which machine to use first, connect an SSH host right there, then list only that host's folders. Browse… opens a folder browser on an SSH host, with an Open here button; on this machine it still opens the system folder dialog.
 
 ### Fixed
+- **SSH host rows no longer jump** - A host's projects and sessions appear in the sidebar once it has connected, and stay through a dropped connection, retries, a sign-in question or another Gantry taking it over. They are gone when you disconnect or cancel, or when the host turns out unusable (failed, Gantry not installed, update needed); a host that has not connected yet shows none, even while it connects.
 - **Disconnecting an SSH host** - The tab on screen no longer stays behind with a Not connected card (Connect / Close) once its host is disconnected, drops or is opened from another Gantry: Gantry shows the tab you were on before, else the first one in the sidebar, else the welcome screen. Gantry also starts on another tab when the last one was on an SSH host. A connect that failed or needs you (sign in, install, update) keeps its tab on screen with the reason.
 
 ## [0.12.1] - 2026-10-29

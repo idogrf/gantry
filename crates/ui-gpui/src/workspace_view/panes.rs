@@ -340,6 +340,10 @@ impl WorkspaceView {
             askpass.focus_handle(cx).focus(window, cx);
             return;
         }
+        if let Some((launcher, _)) = &self.launcher {
+            launcher.focus_handle(cx).focus(window, cx);
+            return;
+        }
         if let Some((wizard, _)) = &self.ssh_wizard {
             wizard.focus_handle(cx).focus(window, cx);
             return;

@@ -5,6 +5,7 @@ pub mod bidi;
 pub mod color_math;
 pub mod dialogs;
 pub mod dir_complete;
+pub mod folder_browser;
 pub mod fuzzy;
 pub mod git_diff;
 pub mod git_view;

@@ -285,11 +285,10 @@ impl Flow {
         if !matches!(self.step, Step::Folders(_)) || launcher::typed(query) != Typed::Filter {
             return;
         }
-        let kept = self.items.get(self.selected).map(|item| (item.host().clone(), item.folder().cloned()));
+        let kept = self.items.get(self.selected).map(|item| (item.host().clone(), item.folder().clone()));
         self.rebuild(query);
         if let Some((host, folder)) = kept
-            && let Some(at) =
-                self.items.iter().position(|item| *item.host() == host && item.folder().cloned() == folder)
+            && let Some(at) = self.items.iter().position(|item| *item.host() == host && *item.folder() == folder)
         {
             self.selected = at;
         }
@@ -622,7 +621,7 @@ mod tests {
         flow.selected = 1;
         let more = vec![recent(&local, "/n", 40), recent(&local, "/a", 30), recent(&local, "/b", 20)];
         flow.set_folders(Vec::new(), more, "");
-        assert_eq!(flow.items[flow.selected].folder(), Some(&PathBuf::from("/b")));
+        assert_eq!(flow.items[flow.selected].folder(), &PathBuf::from("/b"));
         assert_eq!(flow.selected, 2);
         // A folder that left the list sends the highlight to the first row.
         flow.set_folders(Vec::new(), vec![recent(&local, "/z", 1)], "");

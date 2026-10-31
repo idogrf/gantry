@@ -415,7 +415,7 @@ impl LauncherView {
             return Some((host.clone(), self.launch_path(&host, &full)));
         }
         let item = self.flow.items.get(self.flow.selected)?;
-        Some((item.host().clone(), item.folder()?.clone()))
+        Some((item.host().clone(), item.folder().clone()))
     }
 
     /// The index of the dir `folder` resolves to without a pick: the one remembered for it, else the default.

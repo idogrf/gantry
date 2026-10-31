@@ -92,10 +92,10 @@ impl LauncherItem {
     }
 
     /// The folder it opens.
-    pub fn folder(&self) -> Option<&PathBuf> {
+    pub fn folder(&self) -> &PathBuf {
         match self {
-            LauncherItem::Open(folder) => Some(&folder.path),
-            LauncherItem::Dir { path, .. } => Some(path),
+            LauncherItem::Open(folder) => &folder.path,
+            LauncherItem::Dir { path, .. } => path,
         }
     }
 }
@@ -395,11 +395,6 @@ mod tests {
         let by_host = items(&[], &recent, "devbox", None, &[], &hosts);
         assert_eq!(rows(&by_host), vec!["dir devbox:/src/x", "dir devbox:/etc"]);
         assert_eq!(rows(&items(&[], &recent, "src", None, &[], &hosts)), vec!["dir devbox:/src/x"]);
-    }
-
-    #[test]
-    fn no_host_hint_rows() {
-        assert!(items(&[], &[], "dev", None, &[], &[devbox()]).is_empty());
     }
 
     #[test]

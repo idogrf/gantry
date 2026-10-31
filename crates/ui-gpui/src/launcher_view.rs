@@ -1218,15 +1218,13 @@ impl LauncherView {
                     .gap(theme.ui(10.))
                     .border_t_1()
                     .border_color(rgb(theme.tokens.line))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .text_color(rgb(theme.tokens.muted))
-                            .child("↵ / → enter · ⌫ up a level · Ctrl+↵ open here"),
-                    )
+                    .child(div().flex_1().min_w_0().truncate().text_xs().text_color(rgb(theme.tokens.muted)).child(
+                        if cfg!(target_os = "macos") {
+                            "↵ / → enter · ⌫ up a level · ⌘↵ open here"
+                        } else {
+                            "↵ / → enter · ⌫ up a level · Ctrl+↵ open here"
+                        },
+                    ))
                     .child(
                         div()
                             .id("launcher-open-here")

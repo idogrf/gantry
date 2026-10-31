@@ -36,7 +36,14 @@ use crate::theme::theme;
 
 /// This machine's host name, for the launcher's host step (empty when it cannot be read).
 fn machine_name() -> String {
-    let name = std::fs::read_to_string("/etc/hostname").ok().or_else(|| std::env::var("HOSTNAME").ok());
+    let from_command = || {
+        let output = std::process::Command::new("hostname").output().ok()?;
+        String::from_utf8(output.stdout).ok()
+    };
+    let name = std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").ok())
+        .or_else(from_command);
     name.map(|name| name.trim().to_string()).unwrap_or_default()
 }
 

@@ -222,8 +222,12 @@ impl Flow {
             self.waiting = None;
             return None;
         }
-        let up = self.host(&waited).is_some_and(|known| host_pick(&known.state) == HostPick::Open);
-        if !up {
+        let pick = self.host(&waited).map(|known| host_pick(&known.state));
+        // No longer on its way (failed, needs the user): the wait is over, and the pop-up closes on a click outside again.
+        if matches!(pick, Some(HostPick::Retry | HostPick::Install | HostPick::Update | HostPick::Connect)) {
+            self.waiting = None;
+        }
+        if pick != Some(HostPick::Open) {
             return None;
         }
         self.waiting = None;
@@ -526,6 +530,25 @@ mod tests {
         flow.to_hosts();
         assert_eq!(flow.set_hosts(hosts(HostState::Connected, HostState::NotConnected)), None);
         assert!(matches!(flow.step, Step::Hosts));
+    }
+
+    #[test]
+    fn a_failed_wait_ends_the_wait() {
+        for state in [
+            HostState::Failed { reason: "x".into() },
+            HostState::NeedsSignIn,
+            HostState::NotInstalled,
+            HostState::UpdateNeeded { remote: None },
+            HostState::TakenOver,
+        ] {
+            let mut flow = flow(vec![local(), host("devbox", HostState::NotConnected)]);
+            flow.pick(1);
+            assert!(flow.is_waiting());
+            flow.set_hosts(vec![local(), host("devbox", HostState::Connecting)]);
+            assert!(flow.is_waiting());
+            flow.set_hosts(vec![local(), host("devbox", state)]);
+            assert!(!flow.is_waiting());
+        }
     }
 
     #[test]

@@ -114,6 +114,14 @@ impl WorkspaceView {
         }
     }
 
+    /// Give an open launcher the open and recent folders as they are now.
+    pub(super) fn push_launcher_folders(&self, cx: &mut Context<Self>) {
+        if let Some((view, _)) = &self.launcher {
+            let (open, recent) = (self.open_folders(cx), self.recent_folders(cx));
+            view.update(cx, |view, cx| view.set_folders(open, recent, cx));
+        }
+    }
+
     pub(super) fn open_launcher(&mut self, _: &OpenLauncher, window: &mut Window, cx: &mut Context<Self>) {
         self.show_launcher(true, window, cx);
     }

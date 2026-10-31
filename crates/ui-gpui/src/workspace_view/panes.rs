@@ -444,6 +444,7 @@ impl WorkspaceView {
             })
             .collect();
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_panes(panes, tabs, cx));
+        self.push_launcher_folders(cx);
     }
 
     /// Start a new Claude session (or shell) in the folder `dir` of a remote host in a new tab; connects the host when

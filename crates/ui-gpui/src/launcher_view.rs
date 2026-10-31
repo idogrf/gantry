@@ -261,6 +261,21 @@ impl LauncherView {
         cx.notify();
     }
 
+    /// The open and recent folders changed: the rows follow, keeping the highlight, unless a path is typed or the
+    /// browser is showing.
+    pub fn set_folders(&mut self, open: Vec<OpenFolder>, recent: Vec<RecentFolder>, cx: &mut Context<Self>) {
+        self.flow.set_folders(open, recent, self.query.text());
+        cx.notify();
+    }
+
+    /// The field's hint for the picked host.
+    fn placeholder(&self) -> String {
+        match self.folder_host() {
+            host if host.is_local() => "Search folders or type a path".to_string(),
+            host => format!("Search folders on {} or type a path", host.name()),
+        }
+    }
+
     /// Pick host row `index`.
     fn pick_host(&mut self, index: usize, cx: &mut Context<Self>) {
         match self.flow.pick(index) {
@@ -950,7 +965,7 @@ impl LauncherView {
                     .gap(theme.ui(10.))
                     .child(div().flex_1().min_w_0().child(field::render(
                         &self.query,
-                        "Search folders or type a path",
+                        self.placeholder(),
                         true,
                         theme,
                         field::on_press(cx, |this, offset, clicks, _, cx| {

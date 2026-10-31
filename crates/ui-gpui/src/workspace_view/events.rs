@@ -235,6 +235,7 @@ impl WorkspaceView {
     /// Remember an SSH host's recent folders in the layout, for the launcher while the host is away.
     fn remember_folders(&mut self, host: &HostId, cx: &mut Context<Self>) {
         self.welcome_items.take();
+        self.push_launcher_folders(cx);
         if host.is_local() {
             return;
         }

@@ -172,7 +172,7 @@ impl WorkspaceView {
                 host: &host,
                 path: &path,
                 home: home.as_deref(),
-                connected: self.client(&host).is_some(),
+                host_tag: Some(self.client(&host).is_some()),
                 lead,
                 selected: false,
                 dimmed,

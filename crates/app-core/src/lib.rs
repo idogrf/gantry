@@ -16,6 +16,7 @@ pub mod hosts_fold;
 pub mod image_paste;
 pub mod input;
 pub mod launcher;
+pub mod launcher_flow;
 pub mod layout;
 pub mod layout_store;
 pub mod menus;

@@ -11,6 +11,8 @@ use serde_json::Value;
 const HEAD_LIMIT: u64 = 1 << 20;
 /// Bytes read from the end looking for titles; Claude re-appends its title records as it writes.
 const TAIL_LIMIT: u64 = 256 << 10;
+/// Longest project folder name Claude Code writes without a hash suffix.
+const FOLDER_NAME_LIMIT: usize = 200;
 /// Longest title kept, in characters.
 const MAX_TITLE_CHARS: usize = 120;
 /// Longest last prompt kept, in characters.
@@ -21,7 +23,8 @@ const MAX_PROMPT_CHARS: usize = 400;
 pub struct TranscriptSummary {
     /// Session id (the file name without `.jsonl`).
     pub session_id: String,
-    /// Directory the session ran in, read from inside the transcript.
+    /// Directory the session lives in: the one whose project folder holds the transcript (a session moved with `/cd`
+    /// keeps its old `cwd` lines), else the first `cwd` in the file.
     pub cwd: PathBuf,
     /// Name the user gave the session (newest `custom-title` / `agent-name`).
     pub name: Option<String>,
@@ -45,14 +48,85 @@ impl TranscriptSummary {
 /// show (no prompt and no title) — sessions that never started.
 pub fn summarize(path: &Path) -> io::Result<Option<TranscriptSummary>> {
     let Some(session_id) = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()) else { return Ok(None) };
+    let folder = path.parent().and_then(Path::file_name).map(|name| name.to_string_lossy().into_owned());
+    let in_folder = |cwd: &Path| folder.as_deref().is_some_and(|folder| is_project_folder(folder, cwd));
     let mut file = File::open(path)?;
-    let (cwd, first_prompt) = read_head(&mut file)?;
-    let (name, ai_title, last_prompt) = read_tail(&mut file)?;
-    let Some(cwd) = cwd else { return Ok(None) };
-    if first_prompt.is_none() && name.is_none() && ai_title.is_none() {
+    let (first_cwd, first_prompt) = read_head(&mut file)?;
+    let Some(first_cwd) = first_cwd else { return Ok(None) };
+    let moved = !in_folder(&first_cwd);
+    let tail = read_tail(&mut file, moved)?;
+    if first_prompt.is_none() && tail.name.is_none() && tail.ai_title.is_none() {
         return Ok(None);
     }
-    Ok(Some(TranscriptSummary { session_id, cwd, name, ai_title, first_prompt, last_prompt }))
+    let cwd = if moved {
+        match tail.cwds.into_iter().find(|cwd| in_folder(cwd)) {
+            Some(cwd) => cwd,
+            None => head_cwds(&mut file)?.into_iter().find(|cwd| in_folder(cwd)).unwrap_or(first_cwd),
+        }
+    } else {
+        first_cwd
+    };
+    Ok(Some(TranscriptSummary {
+        session_id,
+        cwd,
+        name: tail.name,
+        ai_title: tail.ai_title,
+        first_prompt,
+        last_prompt: tail.last_prompt,
+    }))
+}
+
+/// The folder name Claude Code gives `cwd` under `projects/`: every character that is not an ASCII letter or digit
+/// becomes `-` (per UTF-16 code unit).
+fn folder_name(cwd: &str) -> String {
+    cwd.encode_utf16()
+        .map(|unit| match unit {
+            0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a => unit as u8 as char,
+            _ => '-',
+        })
+        .collect()
+}
+
+/// Whether `folder` is the project folder of `cwd`. Past `FOLDER_NAME_LIMIT` characters Claude Code cuts the name
+/// and appends `-` and a hash; like Claude Code, any folder with that prefix counts, without checking the hash.
+fn is_project_folder(folder: &str, cwd: &Path) -> bool {
+    let name = folder_name(&cwd.to_string_lossy());
+    if name.len() <= FOLDER_NAME_LIMIT {
+        name == folder
+    } else {
+        folder.strip_prefix(&name[..FOLDER_NAME_LIMIT]).is_some_and(|rest| rest.starts_with('-'))
+    }
+}
+
+/// Every `"cwd":"…"` value in one line, found without parsing the line.
+fn cwds_in(line: &[u8]) -> Vec<PathBuf> {
+    const KEY: &[u8] = b"\"cwd\":";
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(at) = line[from..].windows(KEY.len()).position(|window| window == KEY) {
+        let value = &line[from + at + KEY.len()..];
+        if let Some(Ok(cwd)) = serde_json::Deserializer::from_slice(value).into_iter::<String>().next()
+            && !cwd.is_empty()
+        {
+            found.push(PathBuf::from(cwd));
+        }
+        from += at + KEY.len();
+    }
+    found
+}
+
+/// Every `cwd` in the first `HEAD_LIMIT` bytes, in file order.
+fn head_cwds(file: &mut File) -> io::Result<Vec<PathBuf>> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(file.by_ref().take(HEAD_LIMIT));
+    let (mut cwds, mut line) = (Vec::new(), Vec::new());
+    while {
+        line.clear();
+        reader.read_until(b'\n', &mut line)? > 0
+    } {
+        cwds.extend(cwds_in(&line));
+    }
+    Ok(cwds)
 }
 
 /// The first `cwd` and the first user prompt within `HEAD_LIMIT` bytes. Unparseable lines are skipped.
@@ -76,16 +150,28 @@ fn read_head(file: &mut File) -> io::Result<(Option<PathBuf>, Option<String>)> {
     Ok((cwd, prompt))
 }
 
-/// The newest name, AI title and last prompt in the last `TAIL_LIMIT` bytes. Only lines mentioning one of those
-/// records or a user record are parsed; a partial first line (the window starts mid-line) and a half-written last line fail to
-/// parse and are skipped.
-fn read_tail(file: &mut File) -> io::Result<(Option<String>, Option<String>, Option<String>)> {
+/// What the last `TAIL_LIMIT` bytes of a transcript say.
+struct Tail {
+    name: Option<String>,
+    ai_title: Option<String>,
+    last_prompt: Option<String>,
+    /// Every `cwd` in the window, in file order (only collected when asked for).
+    cwds: Vec<PathBuf>,
+}
+
+/// The newest name, AI title and last prompt in the last `TAIL_LIMIT` bytes, and with `want_cwds` every `cwd` there.
+/// Only lines mentioning one of those records or a user record are parsed; a partial first line (the window starts
+/// mid-line) and a half-written last line fail to parse and are skipped.
+fn read_tail(file: &mut File, want_cwds: bool) -> io::Result<Tail> {
     let len = file.metadata()?.len();
     file.seek(SeekFrom::Start(len.saturating_sub(TAIL_LIMIT)))?;
-    let mut tail = Vec::new();
-    file.read_to_end(&mut tail)?;
-    let (mut name, mut ai_title, mut last_prompt, mut typed) = (None, None, None, None);
-    for line in tail.split(|&byte| byte == b'\n') {
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let (mut name, mut ai_title, mut last_prompt, mut typed, mut cwds) = (None, None, None, None, Vec::new());
+    for line in bytes.split(|&byte| byte == b'\n') {
+        if want_cwds {
+            cwds.extend(cwds_in(line));
+        }
         if !mentions(line, b"-title\"")
             && !mentions(line, b"\"agent-name\"")
             && !mentions(line, b"\"last-prompt\"")
@@ -109,7 +195,7 @@ fn read_tail(file: &mut File) -> io::Result<(Option<String>, Option<String>, Opt
             _ => {}
         }
     }
-    Ok((name, ai_title, typed.or(last_prompt)))
+    Ok(Tail { name, ai_title, last_prompt: typed.or(last_prompt), cwds })
 }
 
 fn mentions(line: &[u8], needle: &[u8]) -> bool {
@@ -194,6 +280,68 @@ mod tests {
         assert_eq!(summary.first_prompt.as_deref(), Some("Fix the Jenkins lib"));
         assert_eq!(summary.ai_title.as_deref(), Some("Jenkins library fix"));
         assert_eq!(summary.name, None);
+    }
+
+    fn in_folder(dir: &Path, folder: &str, lines: &[String]) -> PathBuf {
+        let folder = dir.join(folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        write(&folder, lines)
+    }
+
+    fn at(cwd: &str, text: &str) -> String {
+        serde_json::json!({"type": "user", "cwd": cwd, "message": {"role": "user", "content": text}}).to_string()
+    }
+
+    #[test]
+    fn folder_names_follow_claude_code() {
+        assert_eq!(folder_name("/home/me/my_repo.v2"), "-home-me-my-repo-v2");
+        assert_eq!(folder_name("/home/me/דוגמה"), "-home-me------");
+        assert_eq!(folder_name("/a/\u{1F600}"), "-a---");
+        let long = format!("/{}", "x".repeat(250));
+        assert!(is_project_folder(&format!("-{}-1abc", "x".repeat(199)), Path::new(&long)));
+        assert!(!is_project_folder(&format!("-{}", "x".repeat(199)), Path::new(&long)));
+        assert!(!is_project_folder("-other", Path::new(&long)));
+    }
+
+    #[test]
+    fn a_session_moved_with_cd_belongs_to_the_folder_it_is_stored_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lines = vec![at("/home/me/old", "start here")];
+        lines.extend((0..3000).map(|_| at("/home/me/old", &"x".repeat(400))));
+        lines.push(at("/home/me/new_repo", "after the move"));
+        let path = in_folder(dir.path(), "-home-me-new-repo", &lines);
+        assert_eq!(summarize(&path).unwrap().unwrap().cwd, PathBuf::from("/home/me/new_repo"));
+    }
+
+    #[test]
+    fn a_move_inside_the_head_is_found_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lines = vec![at("/home/me/old", "start here"), at("/home/me/new", "after the move")];
+        lines.extend((0..3000).map(|_| at("/home/me/other", &"x".repeat(400))));
+        let path = in_folder(dir.path(), "-home-me-new", &lines);
+        assert_eq!(summarize(&path).unwrap().unwrap().cwd, PathBuf::from("/home/me/new"));
+    }
+
+    #[test]
+    fn without_a_matching_folder_the_first_cwd_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = [at("/home/me/repo/.claude/worktrees/x", "in a worktree"), at("/home/me/repo/sub", "later")];
+        let path = in_folder(dir.path(), "-home-me-repo", &lines);
+        assert_eq!(summarize(&path).unwrap().unwrap().cwd, PathBuf::from("/home/me/repo/.claude/worktrees/x"));
+    }
+
+    #[test]
+    fn a_session_that_never_moved_keeps_its_first_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = [at("/home/me/repo", "one"), at("/home/me/repo/sub", "two")];
+        let path = in_folder(dir.path(), "-home-me-repo", &lines);
+        assert_eq!(summarize(&path).unwrap().unwrap().cwd, PathBuf::from("/home/me/repo"));
+    }
+
+    #[test]
+    fn cwds_are_read_from_lines_without_parsing_them() {
+        let line = br#"{"type":"attachment","cwd":"/a \"b\"","x":{"cwd":"/c"},"text":"\"cwd\":\"/no\""}"#;
+        assert_eq!(cwds_in(line), vec![PathBuf::from("/a \"b\""), PathBuf::from("/c")]);
     }
 
     #[test]

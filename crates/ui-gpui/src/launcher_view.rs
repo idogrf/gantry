@@ -55,6 +55,11 @@ pub enum LauncherEvent {
         /// The Claude config dir (by name) chosen with the badge, when it differs from the one the folder resolves to.
         dir_pick: Option<String>,
     },
+    /// Pick a directory of this machine with the system dialog, then open it.
+    Browse {
+        /// Claude (true) or a terminal.
+        claude: bool,
+    },
     /// Do what the host's pane card button does (connect, retry, cancel, install, update); the launcher stays open.
     HostAction {
         /// The host.
@@ -474,12 +479,17 @@ impl LauncherView {
         cx.emit(LauncherEvent::Open { host, dir: folder, claude, dir_pick });
     }
 
-    /// Browse… (button or Ctrl+O): the folder browser on the picked host, starting at `~`.
+    /// Browse… (button or Ctrl+O): this machine's system folder dialog, or the folder browser on an SSH host,
+    /// starting at `~`.
     fn browse(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.flow.step, Step::Folders(_)) {
             return;
         }
         let host = self.folder_host();
+        if host.is_local() {
+            cx.emit(LauncherEvent::Browse { claude: self.claude_first });
+            return;
+        }
         self.flow.to_browse(host);
         self.badge_open = false;
         self.list_task = None;
@@ -1112,7 +1122,7 @@ impl LauncherView {
         let connected = self.host_connected(&host);
         let known = self.flow.host(&host);
         let dot = known.map_or(HostDot::None, |known| known.state.dot());
-        let title = if host.is_local() { "Browse this machine".to_string() } else { format!("Browse {}", host.name()) };
+        let title = format!("Browse {}", host.name());
         let crumbs = browser.crumbs();
         let last = crumbs.len().saturating_sub(1);
         let error = if connected {

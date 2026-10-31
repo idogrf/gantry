@@ -16,7 +16,7 @@ use app_core::split_tree::NodeId;
 use app_core::theme_colors::terminal_palette;
 use app_core::workspace::ClaudeDirs;
 use daemon::askpass::AskPrompt;
-use gpui::{Context, Focusable, Window, prelude::*};
+use gpui::{Context, Focusable, PathPromptOptions, Window, prelude::*};
 use protocol::host::HostId;
 use protocol::message::{PaletteColors, SessionInfo, SessionStatus};
 
@@ -555,6 +555,25 @@ impl WorkspaceView {
         match event {
             LauncherEvent::Open { host, dir, claude, dir_pick } => {
                 self.open_folder(host, dir, claude, dir_pick, window, cx)
+            }
+            LauncherEvent::Browse { claude } => {
+                let picked = cx.prompt_for_paths(PathPromptOptions {
+                    files: false,
+                    directories: true,
+                    multiple: false,
+                    prompt: None,
+                });
+                cx.spawn_in(window, async move |this, cx| {
+                    let dir = match picked.await {
+                        Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                        _ => None,
+                    };
+                    let _ = this.update_in(cx, |this, window, cx| match dir {
+                        Some(dir) => this.open_launcher_pick(claude, dir, None, cx),
+                        None => this.focus_current(window, cx),
+                    });
+                })
+                .detach();
             }
             LauncherEvent::Dismiss if self.ssh_wizard.is_some() => {}
             LauncherEvent::Dismiss => self.focus_current(window, cx),

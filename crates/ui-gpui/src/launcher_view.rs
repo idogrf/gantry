@@ -257,6 +257,9 @@ impl LauncherView {
         if self.flow.set_hosts(hosts).is_some() {
             self.entered_folders();
         }
+        if let Some(path) = self.flow.browse_resend() {
+            self.browse_to(path, cx);
+        }
         if was_away && !self.typed_host_away() {
             self.completion = Completion::default();
             self.typed_changed(cx);
@@ -488,10 +491,11 @@ impl LauncherView {
     fn browse_to(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(host) = self.flow.browser().map(|browser| browser.host.clone()) else { return };
         let request = NEXT_LISTING.fetch_add(1, Ordering::Relaxed);
+        let connected = self.host_connected(&host);
         if let Some(browser) = self.flow.browser() {
-            browser.ask(request, &path);
+            browser.ask(request, &path, connected);
         }
-        if self.host_connected(&host) {
+        if connected {
             cx.emit(LauncherEvent::ListDir { host, request, path });
         }
     }

@@ -291,6 +291,15 @@ impl Flow {
         }
     }
 
+    /// The browser's folder that was asked while its host was away, when the host is connected now.
+    pub fn browse_resend(&mut self) -> Option<String> {
+        let connected = match &self.step {
+            Step::Browse(browser) => self.connected(&browser.host),
+            _ => false,
+        };
+        if connected { self.browser()?.take_unsent() } else { None }
+    }
+
     /// Start the browser on the step 2 host.
     pub fn to_browse(&mut self, host: HostId) {
         self.waiting = None;
@@ -326,6 +335,8 @@ pub struct Browser {
     /// The highlighted shown row.
     pub selected: usize,
     asked: String,
+    /// The asked folder was never sent (its host was away).
+    unsent: bool,
 }
 
 impl Browser {
@@ -341,13 +352,23 @@ impl Browser {
             filter: TextField::default(),
             selected: 0,
             asked: String::new(),
+            unsent: false,
         }
     }
 
-    /// `request` was sent for `path` (`~` the first time): its answer is the one to take.
-    pub fn ask(&mut self, request: u64, path: &str) {
+    /// `request` was made for `path` (`~` the first time): its answer is the one to take. `sent`: it went out (not
+    /// while the host is away). The filter and highlight start over at once.
+    pub fn ask(&mut self, request: u64, path: &str, sent: bool) {
         self.request = request;
         self.asked = path.to_string();
+        self.unsent = !sent;
+        self.filter = TextField::default();
+        self.selected = 0;
+    }
+
+    /// The folder asked while the host was away, once; the caller asks again under a new request.
+    pub fn take_unsent(&mut self) -> Option<String> {
+        std::mem::take(&mut self.unsent).then(|| self.asked.clone())
     }
 
     /// The listing of `request`; false (and nothing changes) when it is not the newest request.
@@ -361,7 +382,6 @@ impl Browser {
         self.path = Some(path);
         self.dirs = dirs;
         self.error = None;
-        self.filter = TextField::default();
         self.selected = 0;
         true
     }
@@ -376,7 +396,6 @@ impl Browser {
         }
         self.dirs.clear();
         self.error = Some(reason);
-        self.filter = TextField::default();
         self.selected = 0;
         true
     }
@@ -602,7 +621,7 @@ mod tests {
     #[test]
     fn browse_starts_at_home() {
         let mut browser = Browser::new(HostId::local());
-        browser.ask(1, "~");
+        browser.ask(1, "~", true);
         assert!(browser.accept(1, "/home/u".into(), dirs(&["work"])));
         let labels: Vec<String> = browser.crumbs().into_iter().map(|crumb| crumb.label).collect();
         assert_eq!(labels, ["~"]);
@@ -610,12 +629,36 @@ mod tests {
     }
 
     #[test]
+    fn an_unanswered_browse_is_asked_again_on_reconnect() {
+        let mut flow = flow(vec![local(), host("devbox", HostState::NotConnected)]);
+        flow.to_browse(HostId::named("devbox"));
+        flow.browser().unwrap().ask(1, "~", false);
+        assert_eq!(flow.browse_resend(), None);
+        flow.set_hosts(vec![local(), host("devbox", HostState::Connected)]);
+        assert_eq!(flow.browse_resend().as_deref(), Some("~"));
+        assert_eq!(flow.browse_resend(), None);
+    }
+
+    #[test]
+    fn entering_a_folder_clears_the_filter_at_once() {
+        let mut browser = Browser::new(HostId::local());
+        browser.ask(1, "~", true);
+        browser.accept(1, "/home/u".into(), dirs(&["work"]));
+        browser.filter.insert("wo");
+        browser.ask(2, "/home/u/work", true);
+        assert_eq!(browser.filter.text(), "");
+        browser.filter.insert("x");
+        browser.accept(2, "/home/u/work".into(), dirs(&["a"]));
+        assert_eq!(browser.filter.text(), "x");
+    }
+
+    #[test]
     fn stale_listing_is_ignored() {
         let mut browser = Browser::new(HostId::local());
-        browser.ask(1, "~");
+        browser.ask(1, "~", true);
         browser.accept(1, "/home/u".into(), dirs(&["work"]));
-        browser.ask(2, "/home/u/work");
-        browser.ask(3, "/home/u");
+        browser.ask(2, "/home/u/work", true);
+        browser.ask(3, "/home/u", true);
         assert!(!browser.accept(2, "/home/u/work".into(), dirs(&["x"])));
         assert_eq!(browser.path.as_deref(), Some("/home/u"));
         assert!(!browser.fail(2, "late".into()));
@@ -627,11 +670,11 @@ mod tests {
     #[test]
     fn open_here_is_disabled_after_a_failed_listing() {
         let mut browser = Browser::new(HostId::local());
-        browser.ask(1, "~");
+        browser.ask(1, "~", true);
         browser.accept(1, "/home/u".into(), dirs(&["work"]));
         assert!(browser.can_open_here(true));
         assert!(!browser.can_open_here(false));
-        browser.ask(2, "/home/u/work");
+        browser.ask(2, "/home/u/work", true);
         assert!(browser.fail(2, "Permission denied".into()));
         assert!(!browser.can_open_here(true));
         assert_eq!(browser.path.as_deref(), Some("/home/u/work"));
@@ -642,7 +685,7 @@ mod tests {
     #[test]
     fn children_and_parents_follow_the_filter() {
         let mut browser = Browser::new(HostId::local());
-        browser.ask(1, "~");
+        browser.ask(1, "~", true);
         browser.accept(1, "/home/u".into(), dirs(&["docs", "work"]));
         browser.filter.insert("wo");
         assert_eq!(browser.child_path(0).as_deref(), Some("/home/u/work"));

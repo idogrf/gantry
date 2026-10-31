@@ -44,27 +44,48 @@ impl TranscriptSummary {
     }
 }
 
+/// What earlier summaries of one transcript learned about its folder, so a file that only grows is not read again
+/// from the start: the `cwd` that matches its project folder, once seen (the line stays in the file), and how far a
+/// whole-file search for it has got.
+#[derive(Debug, Default)]
+pub struct FolderScan {
+    found: Option<PathBuf>,
+    /// Bytes searched so far, always the end of a complete line.
+    scanned: u64,
+}
+
 /// Summarize the transcript at `path`. `Ok(None)` for transcripts without a directory or with nothing to
 /// show (no prompt and no title) — sessions that never started.
 pub fn summarize(path: &Path) -> io::Result<Option<TranscriptSummary>> {
+    summarize_with(path, &mut FolderScan::default())
+}
+
+/// `summarize`, keeping what it learns about the folder in `scan` for the next call on the same file.
+pub fn summarize_with(path: &Path, scan: &mut FolderScan) -> io::Result<Option<TranscriptSummary>> {
     let Some(session_id) = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()) else { return Ok(None) };
     let folder = path.parent().and_then(Path::file_name).map(|name| name.to_string_lossy().into_owned());
     let in_folder = |cwd: &Path| folder.as_deref().is_some_and(|folder| is_project_folder(folder, cwd));
     let mut file = File::open(path)?;
+    if file.metadata()?.len() < scan.scanned {
+        *scan = FolderScan::default();
+    }
     let (first_cwd, first_prompt) = read_head(&mut file)?;
     let Some(first_cwd) = first_cwd else { return Ok(None) };
     let moved = !in_folder(&first_cwd);
-    let tail = read_tail(&mut file, moved)?;
+    let tail = read_tail(&mut file, moved && scan.found.is_none())?;
     if first_prompt.is_none() && tail.name.is_none() && tail.ai_title.is_none() {
         return Ok(None);
     }
-    let cwd = if moved {
-        match tail.cwds.into_iter().find(|cwd| in_folder(cwd)) {
-            Some(cwd) => cwd,
-            None => head_cwds(&mut file)?.into_iter().find(|cwd| in_folder(cwd)).unwrap_or(first_cwd),
-        }
-    } else {
+    let cwd = if !moved {
         first_cwd
+    } else {
+        if scan.found.is_none() {
+            scan.found = tail.cwds.into_iter().find(|cwd| in_folder(cwd));
+        }
+        if scan.found.is_none() {
+            scan.found = search_file(&mut file, scan, &in_folder)?;
+        }
+        scan.found.clone().unwrap_or(first_cwd)
     };
     Ok(Some(TranscriptSummary {
         session_id,
@@ -115,18 +136,27 @@ fn cwds_in(line: &[u8]) -> Vec<PathBuf> {
     found
 }
 
-/// Every `cwd` in the first `HEAD_LIMIT` bytes, in file order.
-fn head_cwds(file: &mut File) -> io::Result<Vec<PathBuf>> {
-    file.seek(SeekFrom::Start(0))?;
-    let mut reader = BufReader::new(file.by_ref().take(HEAD_LIMIT));
-    let (mut cwds, mut line) = (Vec::new(), Vec::new());
-    while {
+/// The first `cwd` that `in_folder` accepts in the complete lines from `scan.scanned` to the end of the file,
+/// moving `scan.scanned` past the lines it read when there is none.
+fn search_file(
+    file: &mut File,
+    scan: &mut FolderScan,
+    in_folder: &dyn Fn(&Path) -> bool,
+) -> io::Result<Option<PathBuf>> {
+    let end = file.metadata()?.len();
+    file.seek(SeekFrom::Start(scan.scanned))?;
+    let mut reader = BufReader::new(file.by_ref().take(end - scan.scanned));
+    let mut line = Vec::new();
+    loop {
         line.clear();
-        reader.read_until(b'\n', &mut line)? > 0
-    } {
-        cwds.extend(cwds_in(&line));
+        if reader.read_until(b'\n', &mut line)? == 0 || line.last() != Some(&b'\n') {
+            return Ok(None);
+        }
+        if let Some(cwd) = cwds_in(&line).into_iter().find(|cwd| in_folder(cwd)) {
+            return Ok(Some(cwd));
+        }
+        scan.scanned += line.len() as u64;
     }
-    Ok(cwds)
 }
 
 /// The first `cwd` and the first user prompt within `HEAD_LIMIT` bytes. Unparseable lines are skipped.
@@ -320,6 +350,45 @@ mod tests {
         lines.extend((0..3000).map(|_| at("/home/me/other", &"x".repeat(400))));
         let path = in_folder(dir.path(), "-home-me-new", &lines);
         assert_eq!(summarize(&path).unwrap().unwrap().cwd, PathBuf::from("/home/me/new"));
+    }
+
+    #[test]
+    fn a_match_far_from_both_ends_is_found_by_searching_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lines = vec![at("/home/me/old", "start here")];
+        lines.extend((0..3000).map(|_| at("/home/me/old", &"x".repeat(400))));
+        lines.push(at("/home/me/new", "after the move"));
+        lines.extend((0..3000).map(|_| at("/home/me/new/sub", &"y".repeat(400))));
+        let path = in_folder(dir.path(), "-home-me-new", &lines);
+        assert_eq!(summarize(&path).unwrap().unwrap().cwd, PathBuf::from("/home/me/new"));
+    }
+
+    #[test]
+    fn the_search_goes_on_where_it_stopped_when_the_file_grows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lines = vec![at("/home/me/old", "start here")];
+        lines.extend((0..500).map(|_| at("/home/me/old", &"x".repeat(400))));
+        let path = in_folder(dir.path(), "-home-me-new", &lines);
+        let mut scan = FolderScan::default();
+        assert_eq!(summarize_with(&path, &mut scan).unwrap().unwrap().cwd, PathBuf::from("/home/me/old"));
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(scan.scanned, size);
+        // A half-written last line is not searched yet.
+        let mut grown = std::fs::read(&path).unwrap();
+        grown.extend(at("/home/me/old", "more").as_bytes());
+        grown.extend(b"\n");
+        grown.extend(br#"{"type":"user","cwd":"/home/me/ne"#);
+        std::fs::write(&path, &grown).unwrap();
+        summarize_with(&path, &mut scan).unwrap();
+        assert_eq!(scan.scanned, grown.len() as u64 - br#"{"type":"user","cwd":"/home/me/ne"#.len() as u64);
+        // The match arrives, far from the start; it is kept afterwards.
+        let mut grown = grown[..scan.scanned as usize].to_vec();
+        grown.extend(at("/home/me/new", "moved").as_bytes());
+        grown.extend(b"\n");
+        grown.extend((0..3000).flat_map(|_| (at("/home/me/new/sub", &"y".repeat(400)) + "\n").into_bytes()));
+        std::fs::write(&path, &grown).unwrap();
+        assert_eq!(summarize_with(&path, &mut scan).unwrap().unwrap().cwd, PathBuf::from("/home/me/new"));
+        assert_eq!(scan.found.as_deref(), Some(Path::new("/home/me/new")));
     }
 
     #[test]

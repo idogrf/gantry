@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::host::Host;
 use crate::live::{self, Activity, LiveRecord};
-use crate::transcript::{TranscriptSummary, summarize};
+use crate::transcript::{FolderScan, TranscriptSummary, summarize_with};
 
 /// Whether a session runs, as far as the index can tell (the daemon adds which pane runs it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +59,8 @@ struct Cached {
     modified: SystemTime,
     len: u64,
     summary: Option<TranscriptSummary>,
+    /// What was learned about the transcript's folder, for the next time it changes.
+    scan: FolderScan,
 }
 
 /// Scans one config directory; keeps summaries of unchanged transcripts between scans.
@@ -82,7 +84,9 @@ impl<H: Host> Index<H> {
             seen.insert(path.clone());
             let fresh = self.cache.get(&path).is_some_and(|cached| cached.modified == modified && cached.len == len);
             if !fresh {
-                let mut summary = summarize(&path).unwrap_or_else(|err| {
+                let mut scan =
+                    self.cache.get_mut(&path).map(|cached| std::mem::take(&mut cached.scan)).unwrap_or_default();
+                let mut summary = summarize_with(&path, &mut scan).unwrap_or_else(|err| {
                     tracing::debug!("skipping transcript {}: {err}", path.display());
                     None
                 });
@@ -91,7 +95,7 @@ impl<H: Host> Index<H> {
                 if let Some(summary) = summary.as_mut() {
                     summary.last_prompt = summary.last_prompt.take().or(earlier);
                 }
-                self.cache.insert(path.clone(), Cached { modified, len, summary });
+                self.cache.insert(path.clone(), Cached { modified, len, summary, scan });
             }
             let Some(summary) = &self.cache[&path].summary else { continue };
             let record = SessionRecord {

@@ -24,6 +24,7 @@ use gpui::{
 use protocol::host::{HostId, split_project_key};
 use protocol::message::DirEntry;
 
+use crate::assets::FOLDER_ICON;
 use crate::context_menu::host_dot_color;
 use crate::field;
 use crate::settings_store::SettingsStore;
@@ -170,6 +171,7 @@ pub struct LauncherView {
     /// The pause before a listing request.
     list_task: Option<gpui::Task<()>>,
     scroll_completions: UniformListScrollHandle,
+    scroll_browse: UniformListScrollHandle,
     /// The Claude config dirs, with the default one's index.
     dirs: ClaudeDirs,
     /// Folder → dir name remembered for it.
@@ -215,6 +217,7 @@ impl LauncherView {
             completion_selected: None,
             list_task: None,
             scroll_completions: UniformListScrollHandle::new(),
+            scroll_browse: UniformListScrollHandle::new(),
             dirs,
             memory,
             pick: None,
@@ -352,7 +355,14 @@ impl LauncherView {
     }
 
     /// The folders of the newest listing request; replies to older requests are ignored.
-    pub fn set_listing(&mut self, request: u64, dirs: Vec<DirEntry>, cx: &mut Context<Self>) {
+    pub fn set_listing(&mut self, request: u64, path: PathBuf, dirs: Vec<DirEntry>, cx: &mut Context<Self>) {
+        if let Some(browser) = self.flow.browser() {
+            if browser.accept(request, path.to_string_lossy().into_owned(), dirs) {
+                self.scroll_browse.scroll_to_item(0, ScrollStrategy::Top);
+                cx.notify();
+            }
+            return;
+        }
         if request != self.completion.request {
             return;
         }
@@ -363,6 +373,12 @@ impl LauncherView {
 
     /// The newest listing request failed; replies to older requests are ignored.
     pub fn set_listing_failed(&mut self, request: u64, reason: String, cx: &mut Context<Self>) {
+        if let Some(browser) = self.flow.browser() {
+            if browser.fail(request, reason) {
+                cx.notify();
+            }
+            return;
+        }
         if request != self.completion.request {
             return;
         }
@@ -455,8 +471,88 @@ impl LauncherView {
         cx.emit(LauncherEvent::Open { host, dir: folder, claude, dir_pick });
     }
 
-    /// Browse… (button or Ctrl+O).
-    fn browse(&mut self, _alt: bool, _cx: &mut Context<Self>) {}
+    /// Browse… (button or Ctrl+O): the folder browser on the picked host, starting at `~`.
+    fn browse(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.flow.step, Step::Folders(_)) {
+            return;
+        }
+        let host = self.folder_host();
+        self.flow.to_browse(host);
+        self.badge_open = false;
+        self.list_task = None;
+        self.browse_to("~".to_string(), cx);
+        cx.notify();
+    }
+
+    /// List `path` in the browser (at once: it is a click or a key, not typing).
+    fn browse_to(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(host) = self.flow.browser().map(|browser| browser.host.clone()) else { return };
+        let request = NEXT_LISTING.fetch_add(1, Ordering::Relaxed);
+        if let Some(browser) = self.flow.browser() {
+            browser.ask(request, &path);
+        }
+        if self.host_connected(&host) {
+            cx.emit(LauncherEvent::ListDir { host, request, path });
+        }
+    }
+
+    /// Open the browser's current folder; `alt` swaps Claude and terminal.
+    fn open_here(&mut self, alt: bool, cx: &mut Context<Self>) {
+        let claude = self.claude_first != alt;
+        let Some(host) = self.flow.picked().cloned() else { return };
+        let connected = self.host_connected(&host);
+        let Some(dir) =
+            self.flow.browser().filter(|browser| browser.can_open_here(connected)).and_then(|b| b.open_here())
+        else {
+            return;
+        };
+        cx.emit(LauncherEvent::Open { host, dir, claude, dir_pick: None });
+    }
+
+    /// Back from the browser to the host's folders.
+    fn leave_browser(&mut self) {
+        if let Some(host) = self.flow.picked().cloned() {
+            self.flow.to_folders(host);
+            self.entered_folders();
+        }
+    }
+
+    /// A key in the browser.
+    fn browse_key(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) {
+        let Some(browser) = self.flow.browser() else { return };
+        let empty = browser.filter.text().is_empty();
+        match keystroke.key.as_str() {
+            "up" => browser.step(false),
+            "down" => browser.step(true),
+            "enter" if keystroke.modifiers.secondary() => self.open_here(keystroke.modifiers.alt, cx),
+            "enter" | "right" => {
+                if let Some(path) = browser.child_path(browser.selected) {
+                    self.browse_to(path, cx);
+                }
+            }
+            "backspace" | "left" if empty => {
+                if let Some(path) = browser.parent_path() {
+                    self.browse_to(path, cx);
+                }
+            }
+            "escape" => {
+                if self.flow.escape(empty) == Escape::Back {
+                    self.entered_folders();
+                } else if let Some(browser) = self.flow.browser() {
+                    browser.filter = TextField::default();
+                    browser.selected = 0;
+                }
+            }
+            _ => {
+                if field::edit(&mut browser.filter, keystroke, cx) {
+                    browser.selected = 0;
+                }
+            }
+        }
+        if let Some(browser) = self.flow.browser() {
+            self.scroll_browse.scroll_to_item(browser.selected, ScrollStrategy::Center);
+        }
+    }
 
     /// Move the highlighted row's pick one dir on (or back).
     fn cycle_dir(&mut self, backwards: bool) {
@@ -485,6 +581,12 @@ impl LauncherView {
 
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
+        if matches!(self.flow.step, Step::Browse(_)) {
+            self.browse_key(keystroke, cx);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if matches!(self.flow.step, Step::Hosts) {
             match keystroke.key.as_str() {
                 "up" => self.flow.move_host_row(false),
@@ -747,7 +849,7 @@ impl LauncherView {
             .key_context("Launcher")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
-            .on_action(cx.listener(|this, _: &LauncherBrowse, _, cx| this.browse(false, cx)))
+            .on_action(cx.listener(|this, _: &LauncherBrowse, _, cx| this.browse(cx)))
             // A sign-in dialog opened by the wait sits outside the card; a click in it must not close the launcher.
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 if !this.flow.is_waiting() {
@@ -947,6 +1049,210 @@ impl LauncherView {
             )
     }
 
+    /// A folder name with the characters at `bold` in bold.
+    fn folder_name(name: &str, bold: &[u32]) -> Div {
+        let mut runs: Vec<(String, bool)> = Vec::new();
+        for (at, ch) in name.chars().chain(['/']).enumerate() {
+            let is_bold = bold.contains(&(at as u32));
+            match runs.last_mut() {
+                Some((text, last)) if *last == is_bold => text.push(ch),
+                _ => runs.push((ch.to_string(), is_bold)),
+            }
+        }
+        div().flex().children(
+            runs.into_iter()
+                .map(|(text, is_bold)| div().when(is_bold, |run| run.font_weight(FontWeight::BOLD)).child(text)),
+        )
+    }
+
+    /// One subfolder row of the browser.
+    fn render_browse_row(&self, row: usize, theme: &Theme, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let Step::Browse(browser) = &self.flow.step else { return None };
+        let shown = browser.shown();
+        let item = shown.get(row)?;
+        let dir = browser.dirs.get(item.index)?;
+        let selected = row == browser.selected;
+        let children = vec![
+            gpui::svg()
+                .path(FOLDER_ICON)
+                .flex_none()
+                .size(theme.ui(14.))
+                .text_color(rgb(theme.tokens.muted))
+                .into_any_element(),
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .when(item.dimmed, |name| name.text_color(rgb(theme.tokens.muted)))
+                .child(Self::folder_name(&dir.name, &item.bold))
+                .into_any_element(),
+        ];
+        let mut children = children;
+        if selected {
+            children.push(Self::enter_mark(theme));
+        }
+        Some(Self::row(theme, ("launcher-browse-row", row), selected, false, children).on_click(cx.listener(
+            move |this, _: &ClickEvent, _, cx| {
+                if let Some(path) = this.flow.browser().and_then(|browser| browser.child_path(row)) {
+                    this.browse_to(path, cx);
+                    cx.notify();
+                }
+            },
+        )))
+    }
+
+    /// The folder browser: top line, breadcrumbs, filter, subfolders and the Open here footer.
+    fn render_browser(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let Step::Browse(browser) = &self.flow.step else { return div() };
+        let host = browser.host.clone();
+        let connected = self.host_connected(&host);
+        let known = self.flow.host(&host);
+        let dot = known.map_or(HostDot::None, |known| known.state.dot());
+        let title = if host.is_local() { "Browse this machine".to_string() } else { format!("Browse {}", host.name()) };
+        let crumbs = browser.crumbs();
+        let last = crumbs.len().saturating_sub(1);
+        let error = if connected {
+            browser.error.clone()
+        } else {
+            Some(away_line(host.name(), &known.map_or(HostState::NotConnected, |known| known.state.clone())))
+        };
+        let can_open = browser.can_open_here(connected);
+        let open_label = format!("Open here: {}", browser.shown_path().unwrap_or_default());
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(theme.ui(40.))
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .gap(theme.ui(10.))
+                    .border_b_1()
+                    .border_color(rgb(theme.tokens.line))
+                    .child(
+                        div()
+                            .id("launcher-back-folders")
+                            .flex_none()
+                            .cursor_pointer()
+                            .text_color(rgb(theme.tokens.muted))
+                            .hover(|style| style.text_color(rgb(theme.tokens.text)))
+                            .child("← Folders")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.leave_browser();
+                                cx.notify();
+                            })),
+                    )
+                    .child(Self::state_dot(dot, theme))
+                    .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).child(title)),
+            )
+            .child(div().px_4().py(theme.ui(6.)).flex().flex_wrap().items_center().gap(theme.ui(4.)).children(
+                crumbs.into_iter().enumerate().flat_map(|(index, crumb)| {
+                    let separator =
+                        (index > 0).then(|| div().text_color(rgb(theme.tokens.muted)).child("›").into_any_element());
+                    let label = if index == last {
+                        div().font_weight(FontWeight::BOLD).child(crumb.label).into_any_element()
+                    } else {
+                        let path = crumb.path;
+                        div()
+                            .id(("launcher-crumb", index))
+                            .cursor_pointer()
+                            .text_color(rgb(theme.tokens.muted))
+                            .hover(|style| style.text_color(rgb(theme.tokens.text)))
+                            .child(crumb.label)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.browse_to(path.clone(), cx);
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    };
+                    separator.into_iter().chain([label])
+                }),
+            ))
+            .when_some(error, |card, text| {
+                card.child(div().px_4().pb(theme.ui(6.)).text_xs().text_color(rgb(theme.tokens.danger)).child(text))
+            })
+            .child(
+                div()
+                    .h(theme.ui(40.))
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .border_y_1()
+                    .border_color(rgb(theme.tokens.line))
+                    .child(div().flex_1().min_w_0().child(field::render(
+                        &browser.filter,
+                        "Filter folders",
+                        true,
+                        theme,
+                        field::on_press(cx, |this, offset, clicks, _, cx| {
+                            if let Some(browser) = this.flow.browser() {
+                                browser.filter.press(offset, clicks);
+                            }
+                            cx.notify();
+                        }),
+                    ))),
+            )
+            .child(
+                uniform_list(
+                    "launcher-browse-list",
+                    browser.shown().len(),
+                    cx.processor(|this, range: Range<usize>, _window, cx| {
+                        let theme = crate::theme::theme(cx).clone();
+                        range.filter_map(|row| this.render_browse_row(row, &theme, cx)).collect::<Vec<_>>()
+                    }),
+                )
+                .track_scroll(&self.scroll_browse)
+                .h(theme.ui(280.)),
+            )
+            .child(
+                div()
+                    .px_4()
+                    .py(theme.ui(8.))
+                    .flex()
+                    .items_center()
+                    .gap(theme.ui(10.))
+                    .border_t_1()
+                    .border_color(rgb(theme.tokens.line))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(rgb(theme.tokens.muted))
+                            .child("↵ / → enter · ⌫ up a level · Ctrl+↵ open here"),
+                    )
+                    .child(
+                        div()
+                            .id("launcher-open-here")
+                            .flex_none()
+                            .max_w(theme.ui(280.))
+                            .truncate()
+                            .h(theme.ui(28.))
+                            .px(theme.ui(12.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(RADIUS_SMALL))
+                            .when(can_open, |button| {
+                                button
+                                    .bg(rgb(theme.tokens.accent))
+                                    .text_color(rgb(theme.tokens.on_accent))
+                                    .cursor_pointer()
+                            })
+                            .when(!can_open, |button| {
+                                button.bg(rgb(theme.tokens.raised)).text_color(rgb(theme.tokens.muted))
+                            })
+                            .child(open_label)
+                            .on_click(
+                                cx.listener(|this, event: &ClickEvent, _, cx| {
+                                    this.open_here(event.modifiers().alt, cx)
+                                }),
+                            ),
+                    ),
+            )
+    }
+
     /// The folder step: the host line, the field with Browse…, the notice and the host's folders (or the typed path's).
     fn render_folders(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let badge = self.badge().filter(|_| self.badge_open);
@@ -987,7 +1293,8 @@ impl LauncherView {
                             .bg(rgb(theme.tokens.raised))
                             .hover(|style| style.border_color(rgb(theme.tokens.accent)))
                             .cursor_pointer()
-                            .child("Browse…"),
+                            .child("Browse…")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.browse(cx))),
                     ),
             )
             .when_some(self.notice(), |card, (text, error)| {
@@ -1037,7 +1344,8 @@ impl Render for LauncherView {
         let theme = theme(cx).clone();
         let body = match &self.flow.step {
             Step::Hosts => self.render_hosts(&theme, cx),
-            Step::Folders(_) | Step::Browse(_) => self.render_folders(&theme, cx),
+            Step::Folders(_) => self.render_folders(&theme, cx),
+            Step::Browse(_) => self.render_browser(&theme, cx),
         };
         let card = self.card(&theme, cx).child(body);
         fade_in(card, "fade-launcher", FadeKind::Card, cx.global::<SettingsStore>().settings().animate_ui)

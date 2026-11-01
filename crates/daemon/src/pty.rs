@@ -98,6 +98,20 @@ impl PtyProcess {
         self.master.resize(pty_size(cols, rows))
     }
 
+    /// Send the process SIGWINCH, so it reads its terminal's size again even though that did not change (best
+    /// effort; nothing on platforms without signals).
+    #[cfg(unix)]
+    pub fn notify_resize(&self) {
+        use rustix::process::{Pid, Signal, kill_process};
+        if let Some(pid) = self.pid.and_then(|pid| i32::try_from(pid).ok()).and_then(Pid::from_raw) {
+            let _ = kill_process(pid, Signal::WINCH);
+        }
+    }
+
+    /// Send the process SIGWINCH (nothing on platforms without signals).
+    #[cfg(not(unix))]
+    pub fn notify_resize(&self) {}
+
     /// Process id of the program, when the platform reports one.
     pub fn pid(&self) -> Option<u32> {
         self.pid

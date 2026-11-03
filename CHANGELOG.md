@@ -5,7 +5,11 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Cmd+Left / Cmd+Right on macOS** - At a shell or Claude prompt, Cmd+Left jumps to the start of the line and Cmd+Right to the end, like in iTerm2.
+
 ### Changed
+- **Pane focus on macOS** - Focus left / right / up / down moved from Cmd+arrows to Cmd+Option+arrows, to free Cmd+Left / Right for the line start and end. Linux and Windows are unchanged; a binding you set yourself is kept.
 - **New session: host first** - "New Claude session" and "New terminal" ask which machine to use first, connect an SSH host right there, then list only that host's folders. Browse… opens a folder browser on an SSH host, with an Open here button; on this machine it still opens the system folder dialog.
 
 ### Fixed

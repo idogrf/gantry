@@ -1,4 +1,4 @@
-use super::layout::pane_progress;
+use super::layout::{pane_progress, window_resized};
 use super::{CardKind, HostUpdateCard, PANE_GAP, SIDEBAR_EDGE, WorkspaceView};
 
 use app_core::host_update::ask_note;
@@ -42,10 +42,12 @@ impl Render for WorkspaceView {
             Some(false) => window.request_animation_frame(),
             None => {}
         }
-        // The sidebar collapsing or expanding ends at once without animations or with the window inactive.
-        if !(fade && window.is_window_active()) {
+        // The sidebar collapsing or expanding ends at once without animations, with the window inactive or when the
+        // window is resized.
+        if !(fade && window.is_window_active()) || window_resized(self.viewport, viewport) {
             self.sidebar_anim = None;
         }
+        self.viewport = viewport;
         let sidebar_amount = self.sidebar_amount();
         if let Some(anim) = &self.sidebar_anim {
             if anim.started.elapsed().as_secs_f32() * 1000.0 >= sidebar_compact::ANIM_MS {
@@ -74,11 +76,21 @@ impl Render for WorkspaceView {
         // their terminals are resized once and not on every frame.
         let moving = self.sidebar_anim.as_ref().map(|anim| anim.content_width);
         let body = div()
+            .relative()
             .flex_1()
             .min_h_0()
             .w_full()
             .flex()
             .flex_row()
+            .child({
+                let view = cx.entity();
+                canvas(
+                    move |bounds, _, cx| view.update(cx, |this, _| this.body_width = bounds.size.width),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full()
+            })
             .child(
                 div()
                     .relative()

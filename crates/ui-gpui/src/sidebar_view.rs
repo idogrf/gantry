@@ -1020,7 +1020,6 @@ impl SidebarView {
             Some(tab) => div()
                 .flex_1()
                 .min_h_0()
-                .w_full()
                 .flex()
                 .flex_col()
                 .ml(theme.ui(2. * amount))
@@ -1220,7 +1219,9 @@ impl SidebarView {
                 .rounded(px(RADIUS))
                 .cursor_pointer()
                 // The panes of a split tab are a little smaller than the other tiles when compact.
-                .when(row.in_tab, |pill| pill.h(theme.ui(ROW_HEIGHT - 8. - 4. * amount)))
+                .when(row.in_tab && amount > 0.0, |pill| {
+                    pill.h(theme.ui(ROW_HEIGHT) - px(2. * (ROW_PAD_Y + PILL_INSET)) - theme.ui(4. * amount))
+                })
                 .map(|pill| match fill {
                     Some(fill) => pill.bg(rgb(fill)),
                     None => pill.hover(|style| style.bg(rgb(theme.tokens.raised))),
@@ -1322,7 +1323,7 @@ impl SidebarView {
                             })
                             // The dot keeps its place in the line (an empty slot) and is drawn over it, so that it can slide
                             // to the column's center when compact.
-                            .child(div().flex_none().size(theme.ui(8.)))
+                            .when(color.is_some(), |pill| pill.child(div().flex_none().size(theme.ui(8.))))
                             .child(
                                 svg()
                                     .path(if *expanded { CHEVRON_DOWN_ICON } else { CHEVRON_RIGHT_ICON })
@@ -1352,7 +1353,7 @@ impl SidebarView {
                     &session.host,
                 )
                 .map(|badge| dir_badge(&badge, &theme));
-                let close = self.close_slot(index, badge, &theme, cx);
+                let close = self.close_slot(index, badge, &theme, cx).filter(|_| close_slot_shown(amount));
                 let card = HoverCard {
                     title: session_title(session).to_string(),
                     status: Some(note.clone()),
@@ -1400,7 +1401,7 @@ impl SidebarView {
                 )
             }
             RowKind::Pane { entry, tone, note } if !entry.claude => {
-                let close = self.close_slot(index, None, &theme, cx);
+                let close = self.close_slot(index, None, &theme, cx).filter(|_| close_slot_shown(amount));
                 base.tooltip(hover_card::tooltip(HoverCard {
                     title: entry.title.clone(),
                     status: Some(note.clone()),
@@ -1437,7 +1438,7 @@ impl SidebarView {
             }
             RowKind::Pane { entry, tone, note } => {
                 let colors = theme.tone(*tone);
-                let close = self.close_slot(index, None, &theme, cx);
+                let close = self.close_slot(index, None, &theme, cx).filter(|_| close_slot_shown(amount));
                 let card = HoverCard {
                     title: "New session".into(),
                     status: Some(note.clone()),
@@ -1473,7 +1474,7 @@ impl SidebarView {
                 )
             }
             RowKind::Tab { title: tab_title, panes, index: tab, first, .. } => {
-                let close = self.close_slot(index, None, &theme, cx);
+                let close = self.close_slot(index, None, &theme, cx).filter(|_| close_slot_shown(amount));
                 base.on_drag(
                     DraggedTab { first: *first, title: tab_title.clone() },
                     |dragged: &DraggedTab, _offset, _window, cx: &mut App| cx.new(|_| dragged.clone()),
@@ -1687,7 +1688,11 @@ impl Render for SidebarView {
         // The rename field has the focus then, not the filter.
         let focused = focused && self.renaming.is_none();
         // The sessions list started to scroll (or fits again): the SSH hosts block may fold by itself.
-        if let Some(extent) = Extent::of(&self.scroll) {
+        // Not while compact: the column's own bottom rows are taller, and a fold made then would still be there when
+        // the sidebar expands.
+        if follows_list_scroll(self.amount)
+            && let Some(extent) = Extent::of(&self.scroll)
+        {
             self.hosts_fold.observe(extent.contents.1 > extent.viewport.1 + 0.5);
         }
         let theme = theme(cx).clone();
@@ -2118,6 +2123,17 @@ impl Render for SidebarView {
     }
 }
 
+/// Whether a row has its close button (and config badge) at this compact `amount`: not on a compact tile, where
+/// they are invisible and must not take clicks.
+fn close_slot_shown(amount: f32) -> bool {
+    amount <= 0.5
+}
+
+/// Whether the sessions list's scrolling may fold the SSH hosts card: only while the sidebar is fully expanded.
+fn follows_list_scroll(amount: f32) -> bool {
+    amount == 0.0
+}
+
 /// `from` at `amount` 0, `to` at 1.
 fn lerp(from: f32, to: f32, amount: f32) -> f32 {
     from + (to - from) * amount
@@ -2194,6 +2210,17 @@ fn applied_filter(text: &str, amount: f32) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_tiles_have_no_close_slot_and_the_list_does_not_feed_the_hosts_fold() {
+        assert!(close_slot_shown(0.0));
+        assert!(close_slot_shown(0.5));
+        assert!(!close_slot_shown(0.6));
+        assert!(!close_slot_shown(1.0));
+        assert!(follows_list_scroll(0.0));
+        assert!(!follows_list_scroll(0.01));
+        assert!(!follows_list_scroll(1.0));
+    }
 
     #[test]
     fn ring_insets_follow_the_amount() {

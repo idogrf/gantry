@@ -1,3 +1,4 @@
+use super::layout::content_width_beside;
 use super::{
     DialogAction, FindSession, OpenRecents, OpenSettings, SidebarAnim, TakeOverTarget, ToggleSidebar, WorkspaceView,
 };
@@ -261,12 +262,11 @@ impl WorkspaceView {
         }
         let theme = theme(cx).clone();
         let at = |compact: bool| sidebar_compact::width(self.workspace.sidebar.width, f32::from(u8::from(compact)));
-        // The width the tab content has once this ends: what it has now (or will have when the animation under way
-        // ends) plus what the sidebar gives up or takes.
-        let content_width = self.content_bounds.size.width + theme.ui(at(was)) - theme.ui(at(compact));
-        let animate = cx.global::<SettingsStore>().settings().animate_ui
-            && window.is_window_active()
-            && self.content_bounds.size.width > px(0.);
+        // The width the tab content has once this ends, from the body's width, so that it is right on every screen
+        // (a pane tab, Settings, the welcome screen) and when this reverses an animation under way.
+        let content_width = content_width_beside(self.body_width, theme.ui(at(compact)));
+        let animate =
+            cx.global::<SettingsStore>().settings().animate_ui && window.is_window_active() && self.body_width > px(0.);
         let from = self.sidebar_amount();
         self.workspace.sidebar.compact = compact;
         self.sidebar_anim = animate.then(|| SidebarAnim {

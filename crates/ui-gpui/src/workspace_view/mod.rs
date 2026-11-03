@@ -18,8 +18,8 @@ use daemon::askpass::AskPrompt;
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::ssh::{AttemptHandle, Share};
 use gpui::{
-    Bounds, Context, Entity, FocusHandle, Pixels, Point, SharedString, Subscription, Task, UniformListScrollHandle,
-    Window, prelude::*,
+    Bounds, Context, Entity, FocusHandle, Pixels, Point, SharedString, Size, Subscription, Task,
+    UniformListScrollHandle, Window, prelude::*, px,
 };
 use notify::RecommendedWatcher;
 use protocol::host::{HostId, PaneKey};
@@ -364,6 +364,10 @@ pub struct WorkspaceView {
     sidebar: Entity<SidebarView>,
     /// Window bounds of the sidebar (for width drags).
     sidebar_bounds: Bounds<Pixels>,
+    /// The width of the row holding the sidebar and the panes, as of the last frame (0 before the first).
+    body_width: Pixels,
+    /// The window's size as of the last frame, to end the sidebar animation when it changes.
+    viewport: Size<Pixels>,
     /// The sidebar's edge is being dragged.
     resizing_sidebar: bool,
     _sidebar_events: Subscription,
@@ -625,6 +629,8 @@ impl WorkspaceView {
             pane_dragging: false,
             sidebar,
             sidebar_bounds: Bounds::default(),
+            body_width: px(0.),
+            viewport: Size::default(),
             resizing_sidebar: false,
             _sidebar_events: sidebar_events,
             launcher: None,

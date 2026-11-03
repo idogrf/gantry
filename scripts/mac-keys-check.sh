@@ -9,8 +9,15 @@ mkdir -p "$WORK"
 cd "$WORK"
 rm -f X.txt A.txt
 
+# A throwaway HOME for Gantry only, with the setup wizard already answered (it would cover the pane).
+H="$WORK/home"
+for dir in "$H/Library/Application Support/gantry" "$H/.config/gantry"; do
+  mkdir -p "$dir"
+  echo '{"setupDone": true}' > "$dir/settings.json"
+done
+
 export GANTRY_PROFILE=mackeys
-"$BIN" --cwd "$WORK" -- /bin/zsh -f > gantry.log 2>&1 &
+HOME="$H" "$BIN" --cwd "$WORK" -- /bin/zsh -f > gantry.log 2>&1 &
 PID=$!
 sleep 15
 

@@ -199,8 +199,8 @@ mod tests {
 
     #[test]
     fn every_choice_has_its_own_description() {
-        assert_eq!(SIDEBAR.map(|(_, label, _)| label), ["Remember", "Shown", "Hidden"]);
-        assert_eq!(SIDEBAR[2].2, "Always closed when Gantry starts.");
+        assert_eq!(SIDEBAR.map(|(_, label, _)| label), ["Remember", "Expanded", "Compact"]);
+        assert_eq!(SIDEBAR[2].2, "Always the thin icon column when Gantry starts.");
         assert_eq!(RESTORE[0].1, "Restore");
     }
 }

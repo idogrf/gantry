@@ -188,7 +188,7 @@ Default shortcuts. All of them can be changed in Settings.
 | Move focus between panes | `Ctrl+Shift+Arrows` | `Cmd+Arrows` |
 | Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` | `Cmd+Shift+]` / `Cmd+Shift+[` |
 | Close pane | `Ctrl+Shift+W` | `Cmd+W` |
-| Toggle sidebar | `Ctrl+Shift+B` | `Cmd+B` |
+| Collapse / expand sidebar | `Ctrl+Shift+B` | `Cmd+B` |
 | Settings | `Ctrl+,` | `Cmd+,` |
 | Zoom in / out / reset | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | `Cmd+=` / `Cmd+-` / `Cmd+0` |
 

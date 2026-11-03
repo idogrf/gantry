@@ -239,8 +239,8 @@ impl WorkspaceView {
 
     /// Start the inline rename on the sidebar, showing the sidebar first if it is hidden.
     fn start_rename(&mut self, target: RenameTarget, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.workspace.sidebar.visible {
-            self.workspace.sidebar.visible = true;
+        if self.workspace.sidebar.compact {
+            self.workspace.sidebar.compact = false;
             self.save(cx);
             cx.notify();
         }
@@ -249,8 +249,8 @@ impl WorkspaceView {
 
     pub(super) fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
         let state = &mut self.workspace.sidebar;
-        state.visible = !state.visible;
-        if !state.visible {
+        state.compact = !state.compact;
+        if state.compact {
             self.focus_current(window, cx);
         }
         self.save(cx);
@@ -258,7 +258,7 @@ impl WorkspaceView {
     }
 
     pub(super) fn find_session(&mut self, _: &FindSession, window: &mut Window, cx: &mut Context<Self>) {
-        self.workspace.sidebar.visible = true;
+        self.workspace.sidebar.compact = false;
         self.sidebar.focus_handle(cx).focus(window, cx);
         self.save(cx);
         cx.notify();

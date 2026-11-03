@@ -54,7 +54,7 @@ impl Render for WorkspaceView {
             .w_full()
             .flex()
             .flex_row()
-            .when(sidebar.visible, |body| {
+            .when(!sidebar.compact, |body| {
                 body.child(
                     div()
                         .relative()

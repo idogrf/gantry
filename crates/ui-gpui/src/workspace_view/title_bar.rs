@@ -173,7 +173,7 @@ impl WorkspaceView {
                     .font_weight(FontWeight::BOLD)
                     .child(img(LOGO).flex_none().size(theme.ui(22.)))
                     .child("Gantry");
-                if sidebar.visible {
+                if !sidebar.compact {
                     let brand = brand.w(theme.ui(sidebar.width) + px(SIDEBAR_EDGE)).pl(theme.ui(18.));
                     bar.child(if client_decorations { moves_window(brand) } else { brand })
                 } else {
@@ -363,7 +363,7 @@ impl WorkspaceView {
         if tab.settings {
             // With the sidebar hidden its row is gone, so the bar closes Settings.
             return middle.font_weight(FontWeight::SEMIBOLD).child("Settings").when(
-                !self.workspace.sidebar.visible,
+                self.workspace.sidebar.compact,
                 |middle| {
                     middle.child(
                         div()

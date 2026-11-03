@@ -5,7 +5,21 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-03
+
+### Added
+- **Compact sidebar** - A small tab on the sidebar's edge, halfway down, shown while the pointer is over the sidebar (and `Ctrl+Shift+B`), collapses the sidebar to a thin icon column and expands it again, with a short animation. The compact column still shows every session's status color and the first letter of its title, the project dots, split tabs (their pane count in a box around their panes), the tab colors, the unread, closed and elsewhere marks, the SSH hosts count, Recent sessions and the New Claude / New terminal buttons. Hover a tile for its details.
+- **Cmd+Left / Cmd+Right on macOS** - At a shell or Claude prompt, Cmd+Left jumps to the start of the line and Cmd+Right to the end, like in iTerm2.
+
+### Changed
+- **Sidebar shortcut** - `Ctrl+Shift+B` no longer hides the sidebar; it switches between the full sidebar and the compact column. "Sidebar at start" in Settings > Window is now Remember / Expanded / Compact (an old "Hidden" counts as Compact).
+- **Pane focus on macOS** - Focus left / right / up / down moved from Cmd+arrows to Cmd+Option+arrows, to free Cmd+Left / Right for the line start and end. Linux and Windows are unchanged; a binding you set yourself is kept.
+- **New session: host first** - "New Claude session" and "New terminal" ask which machine to use first, connect an SSH host right there, then list only that host's folders. Browse… opens a folder browser on an SSH host, with an Open here button; on this machine it still opens the system folder dialog.
+
 ### Fixed
+- **Dev container panes** - A Claude pane in a dev container could keep an older, taller size than the pane, so Claude's status line and rule were drawn over the prompt, most often after reopening Gantry. The size is now forwarded to the container again once the session has started. Needs a daemon restart.
+- **Sessions moved with /cd** - A session that Claude Code moved to another folder with `/cd` is listed under its new project, and Resume conversation starts it in the new folder (it used to use the folder it started in, loading that folder's CLAUDE.md and memory). Needs a daemon restart.
+- **SSH host rows no longer jump** - A host's projects and sessions appear in the sidebar once it has connected, and stay through a dropped connection, retries, a sign-in question or another Gantry taking it over. They are gone when you disconnect or cancel, or when the host turns out unusable (failed, Gantry not installed, update needed); a host that has not connected yet shows none, even while it connects.
 - **Disconnecting an SSH host** - The tab on screen no longer stays behind with a Not connected card (Connect / Close) once its host is disconnected, drops or is opened from another Gantry: Gantry shows the tab you were on before, else the first one in the sidebar, else the welcome screen. Gantry also starts on another tab when the last one was on an SSH host. A connect that failed or needs you (sign in, install, update) keeps its tab on screen with the reason.
 
 ## [0.12.1] - 2026-10-29

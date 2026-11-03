@@ -1,4 +1,4 @@
-use super::layout::pane_progress;
+use super::layout::{pane_progress, window_resized};
 use super::{CardKind, HostUpdateCard, PANE_GAP, SIDEBAR_EDGE, WorkspaceView};
 
 use app_core::host_update::ask_note;
@@ -10,6 +10,7 @@ use gpui::{
 
 use app_core::menus::MenuAction;
 use app_core::session_tree::Tone;
+use app_core::sidebar_compact;
 
 use crate::color_picker_view::ColorPickerEvent;
 use crate::context_menu::{self};
@@ -41,6 +42,22 @@ impl Render for WorkspaceView {
             Some(false) => window.request_animation_frame(),
             None => {}
         }
+        // The sidebar collapsing or expanding ends at once without animations, with the window inactive or when the
+        // window is resized.
+        if !(fade && window.is_window_active()) || window_resized(self.viewport, viewport) {
+            self.sidebar_anim = None;
+        }
+        self.viewport = viewport;
+        let sidebar_amount = self.sidebar_amount();
+        if let Some(anim) = &self.sidebar_anim {
+            if anim.started.elapsed().as_secs_f32() * 1000.0 >= sidebar_compact::ANIM_MS {
+                self.sidebar_anim = None;
+            } else {
+                window.request_animation_frame();
+            }
+        }
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_amount(sidebar_amount, cx));
+        let sidebar_px = sidebar_compact::width(self.workspace.sidebar.width, sidebar_amount);
         // The panel is a fifth of the width, at most 290 px, never more than 45% of the tab.
         let content_width = f32::from(self.content_bounds.size.width);
         self.panel_full = if content_width > 0.0 { f32::from(theme.ui(290.)).min(content_width * 0.45) } else { 0.0 };
@@ -48,58 +65,97 @@ impl Render for WorkspaceView {
         // The interface scales with `uiFontSize`; GPUI's rem is 16 px at the default of 14.
         window.set_rem_size(px(16.0 * theme.ui_scale));
         let sidebar = self.workspace.sidebar.clone();
+        // The edge can be dragged only while the sidebar is expanded and still.
+        let resizable = !sidebar.compact && self.sidebar_anim.is_none();
+        let panes = if self.git_page.is_some() {
+            self.render_git_page(window, cx).into_any_element()
+        } else {
+            self.render_active_tab(animate, cx).into_any_element()
+        };
+        // While the sidebar moves, the panes are laid out at the width they will have, in a box that clips them, so
+        // their terminals are resized once and not on every frame.
+        let moving = self.sidebar_anim.as_ref().map(|anim| anim.content_width);
         let body = div()
+            .relative()
             .flex_1()
             .min_h_0()
             .w_full()
             .flex()
             .flex_row()
-            .when(sidebar.visible, |body| {
-                body.child(
-                    div()
-                        .relative()
-                        .flex_none()
-                        .h_full()
-                        .w(theme.ui(sidebar.width))
-                        .child({
-                            let view = cx.entity();
-                            canvas(
-                                move |bounds, _, cx| view.update(cx, |this, _| this.sidebar_bounds = bounds),
-                                |_, _, _, _| {},
-                            )
-                            .absolute()
-                            .size_full()
-                        })
-                        .child(self.sidebar.clone()),
+            .child({
+                let view = cx.entity();
+                canvas(
+                    move |bounds, _, cx| view.update(cx, |this, _| this.body_width = bounds.size.width),
+                    |_, _, _, _| {},
                 )
-                .child(
-                    // A hairline, grabbed through a wider invisible handle that overlaps the sidebar.
-                    div().relative().flex_none().w(px(SIDEBAR_EDGE)).h_full().bg(rgb(theme.tokens.line)).child(
-                        div()
-                            .id("sidebar-edge")
-                            .absolute()
-                            .top_0()
-                            .left(px(-5.))
-                            .w(px(7.))
-                            .h_full()
-                            .cursor(CursorStyle::ResizeLeftRight)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.resizing_sidebar = true;
-                                    cx.stop_propagation();
-                                }),
-                            ),
-                    ),
-                )
+                .absolute()
+                .size_full()
             })
-            .child(div().flex_1().min_w_0().h_full().flex().flex_col().p(px(PANE_GAP / 2.)).child(
-                if self.git_page.is_some() {
-                    self.render_git_page(window, cx).into_any_element()
-                } else {
-                    self.render_active_tab(animate, cx).into_any_element()
-                },
-            ));
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .h_full()
+                    .overflow_hidden()
+                    .w(theme.ui(sidebar_px))
+                    .id("sidebar-zone")
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        this.sidebar_hovered = *hovered;
+                        cx.notify();
+                    }))
+                    .child({
+                        let view = cx.entity();
+                        canvas(
+                            move |bounds, _, cx| view.update(cx, |this, _| this.sidebar_bounds = bounds),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full()
+                    })
+                    .child(self.sidebar.clone()),
+            )
+            .child(
+                // A hairline, grabbed through a wider invisible handle that overlaps the sidebar.
+                div().relative().flex_none().w(px(SIDEBAR_EDGE)).h_full().bg(rgb(theme.tokens.line)).when(
+                    resizable,
+                    |edge| {
+                        edge.child(
+                            div()
+                                .id("sidebar-edge")
+                                .absolute()
+                                .top_0()
+                                .left(px(-5.))
+                                .w(px(7.))
+                                .h_full()
+                                .cursor(CursorStyle::ResizeLeftRight)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.resizing_sidebar = true;
+                                        cx.stop_propagation();
+                                    }),
+                                ),
+                        )
+                    },
+                ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .p(px(PANE_GAP / 2.))
+                    .when(moving.is_some(), |wrapper| wrapper.items_end().overflow_hidden())
+                    .child(match moving {
+                        Some(width) => {
+                            div().w(width).flex_none().h_full().flex().flex_col().child(panes).into_any_element()
+                        }
+                        None => panes,
+                    }),
+            )
+            .child(self.render_sidebar_toggle(sidebar_px, cx));
         let root = div()
             // Without the context no shortcut reaches the panes while a dialog is open.
             .when(self.dialog.is_none(), |root| root.key_context("Workspace"))

@@ -103,6 +103,7 @@ impl WorkspaceView {
             }
         }
         self.host_states.remove(from);
+        self.hosts_with_rows.remove(from);
         if let Some(waiting) = self.queued.remove(from) {
             self.queued.entry(to.clone()).or_default().extend(waiting);
         }
@@ -144,6 +145,7 @@ impl WorkspaceView {
         self.killed_offline.retain(|killed| killed.0 != *host);
         self.pending_opens.retain(|_, open| open.host != *host);
         self.host_states.remove(host);
+        self.hosts_with_rows.remove(host);
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, Vec::new(), cx));
         self.welcome_items.take();
         self.attention.reset(host, &[]);
@@ -207,6 +209,11 @@ impl WorkspaceView {
 
     /// Record `host`'s state and show it on the host's panes.
     fn set_host_state(&mut self, host: &HostId, state: HostState, cx: &mut Context<Self>) {
+        if state.shows_rows(self.hosts_with_rows.contains(host)) {
+            self.hosts_with_rows.insert(host.clone());
+        } else {
+            self.hosts_with_rows.remove(host);
+        }
         self.host_states.insert(host.clone(), state);
         if self.host_state(host) != HostState::Connected
             && matches!(&self.dialog, Some(open) if matches!(&open.action, DialogAction::Disconnect(asked) if asked == host))
@@ -554,10 +561,10 @@ impl WorkspaceView {
         }
     }
 
-    /// Whether `host` is a listed SSH host that is not connected (nor on its way): the sidebar shows nothing of it, its
-    /// panes and sessions come back when it connects. A host that is not listed keeps its rows, so they can be closed.
+    /// Whether `host` is a listed SSH host the sidebar shows nothing of: it has not connected yet, or was disconnected
+    /// or found unusable since (`HostState::shows_rows`). Its panes and sessions come back when it connects. A host that is not listed keeps its rows, so they can be closed.
     pub(super) fn is_away(&self, host: &HostId) -> bool {
-        self.ssh_hosts.iter().any(|entry| entry.name == host.name()) && !self.host_state(host).in_connected_list()
+        self.ssh_hosts.iter().any(|entry| entry.name == host.name()) && !self.hosts_with_rows.contains(host)
     }
 
     /// The leaves of hosts that are away: the sidebar does not list them.

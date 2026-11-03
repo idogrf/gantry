@@ -238,7 +238,7 @@ fn workspace(
         restore(saved, &hosts, launch, window_settings.restore_layout, &keep)
     };
     let resume = resume_mode(&window_settings, resume_sessions, was_live);
-    restored.workspace.sidebar.visible = window_settings.sidebar_at_start.visible(restored.workspace.sidebar.visible);
+    restored.workspace.sidebar.compact = window_settings.sidebar_at_start.compact(restored.workspace.sidebar.compact);
     let default_cwd: PathBuf = launch.default.cwd.clone();
     WorkspaceView::new(connection, extra, restored, paths.layout_file.clone(), default_cwd, resume, window, cx)
 }

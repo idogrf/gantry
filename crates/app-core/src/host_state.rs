@@ -137,6 +137,40 @@ pub enum HostEvent {
     Cancel,
 }
 
+/// What picking a host in the launcher's host step does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostPick {
+    /// The host is connected: go on to its folders.
+    Open,
+    /// Connect it and wait.
+    Connect,
+    /// A background retry is running: only wait.
+    Wait,
+    /// An attempt is running: the row offers Cancel.
+    Cancel,
+    /// The last attempt failed: the row offers Retry.
+    Retry,
+    /// The remote has no Gantry: the row offers Install….
+    Install,
+    /// The remote runs another version: the row offers Update and restart.
+    Update,
+}
+
+/// What picking a host in the state `state` does.
+pub fn host_pick(state: &HostState) -> HostPick {
+    match state {
+        HostState::Connected => HostPick::Open,
+        HostState::NotConnected | HostState::Disconnected | HostState::NeedsSignIn | HostState::TakenOver => {
+            HostPick::Connect
+        }
+        HostState::Reconnecting { .. } => HostPick::Wait,
+        HostState::Connecting => HostPick::Cancel,
+        HostState::Failed { .. } => HostPick::Retry,
+        HostState::NotInstalled => HostPick::Install,
+        HostState::UpdateNeeded { .. } => HostPick::Update,
+    }
+}
+
 /// The message card of a host that is not usable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostCard {
@@ -169,6 +203,20 @@ impl HostState {
     /// Whether the host is connected or on its way: the sidebar block gives it an X.
     pub fn in_connected_list(&self) -> bool {
         matches!(self, HostState::Connecting | HostState::Connected | HostState::Reconnecting { .. })
+    }
+
+    /// Whether the sidebar lists the host's panes after the host moved into this state, given whether it did before:
+    /// they appear when the host first connects and stay through every later state (a drop, a retry, a sign-in, a
+    /// take-over), until the host is not connected, or unusable (failed, not installed, needs an update).
+    pub fn shows_rows(&self, before: bool) -> bool {
+        match self {
+            HostState::Connected => true,
+            HostState::NotConnected
+            | HostState::Failed { .. }
+            | HostState::NotInstalled
+            | HostState::UpdateNeeded { .. } => false,
+            _ => before,
+        }
     }
 
     /// What the X of this host does when `running` of its panes have a live process; `None` when the host is not in
@@ -432,8 +480,38 @@ pub fn away_line(host: &str, state: &HostState) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn host_pick_follows_the_state() {
+        use super::{HostPick, HostState, host_pick};
+        assert_eq!(host_pick(&HostState::Connected), HostPick::Open);
+        assert_eq!(host_pick(&HostState::NotConnected), HostPick::Connect);
+        assert_eq!(host_pick(&HostState::Disconnected), HostPick::Connect);
+        assert_eq!(host_pick(&HostState::NeedsSignIn), HostPick::Connect);
+        assert_eq!(host_pick(&HostState::TakenOver), HostPick::Connect);
+        assert_eq!(host_pick(&HostState::Reconnecting { attempt: 2 }), HostPick::Wait);
+        assert_eq!(host_pick(&HostState::Connecting), HostPick::Cancel);
+        assert_eq!(host_pick(&HostState::Failed { reason: "x".into() }), HostPick::Retry);
+        assert_eq!(host_pick(&HostState::NotInstalled), HostPick::Install);
+        assert_eq!(host_pick(&HostState::UpdateNeeded { remote: None }), HostPick::Update);
+    }
+
+    #[test]
     fn an_empty_host_list_summarizes_to_no_dot_and_zero_of_zero() {
         assert_eq!(hosts_summary(&[]), HostsSummary { dot: HostDot::None, connected: 0, total: 0 });
+    }
+
+    #[test]
+    fn rows_appear_on_connect_and_stay_until_the_host_is_gone_or_unusable() {
+        let failed = HostState::Failed { reason: String::new() };
+        let update = HostState::UpdateNeeded { remote: None };
+        assert!(HostState::Connected.shows_rows(false));
+        for state in [HostState::Connecting, HostState::Disconnected, HostState::NeedsSignIn, HostState::TakenOver] {
+            assert!(!state.shows_rows(false), "{state:?} before a connect");
+            assert!(state.shows_rows(true), "{state:?} after a connect");
+        }
+        assert!(HostState::Reconnecting { attempt: 3 }.shows_rows(true));
+        for state in [HostState::NotConnected, HostState::NotInstalled, update, failed] {
+            assert!(!state.shows_rows(true), "{state:?} hides the rows");
+        }
     }
 
     #[test]

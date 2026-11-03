@@ -1098,6 +1098,7 @@ fn start_pane(
     state.focus_seq += 1;
     let exit = pty.exit_signal();
     let start = pty.pid().and_then(claude_index::host::process_start);
+    let in_container = container.is_some();
     let mut term = match spec.scrollback {
         Some(lines) => TermState::with_scrollback(spec.cols, spec.rows, lines as usize),
         None => TermState::new(spec.cols, spec.rows),
@@ -1130,12 +1131,19 @@ fn start_pane(
     let output = spawn_output_reader(reader, OUTPUT_QUEUE_CHUNKS);
     let (reader_shared, reader_done) = (shared.clone(), output_done.clone());
     tokio::spawn(async move {
+        let mut first_output = true;
         while let Ok(first) = output.recv().await {
             let bytes = drain_batch(&output, first, MAX_BATCH_BYTES);
             let pane_alive = {
                 let mut state = reader_shared.lock();
                 match state.panes.get_mut(&id) {
                     Some(pane) => {
+                        // `docker exec` forwards its terminal's size to the container at start and on SIGWINCH; a
+                        // resize that came while the exec was still starting is lost, leaving the container's
+                        // terminal at an older size. Once it prints, the exec runs: have it forward the size again.
+                        if std::mem::take(&mut first_output) && in_container {
+                            pane.pty.notify_resize();
+                        }
                         pane.term.feed(&bytes);
                         let replies = pane.term.take_pty_writes();
                         if !replies.is_empty() {
@@ -1328,6 +1336,67 @@ mod tests {
         for pane in ids {
             handle_message(&shared, 1, ClientMessage::Kill { pane });
         }
+    }
+
+    /// Start a pane whose program is a shell that prints `winch` for every SIGWINCH it gets (standing in for the
+    /// `docker exec` client, which forwards its terminal's size to the container then), flagged as a container pane or
+    /// not; the screen text once it has had time to react.
+    #[cfg(unix)]
+    async fn screen_after_first_output(container: bool) -> String {
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State { next_pane: 1, ..State::default() }),
+            shutdown: Notify::new(),
+            base_env: std::env::vars().collect(),
+            owner_uid: None,
+            instance: String::new(),
+            docker: None,
+            claude_dir: None,
+            search: None,
+            paste_dir: None,
+        });
+        let spec = SpawnRequest {
+            program: "sh".into(),
+            args: Vec::new(),
+            cwd: "/".into(),
+            cols: 80,
+            rows: 24,
+            cwd_from: None,
+            container: None,
+            claude: false,
+            env: Vec::new(),
+            scrollback: None,
+        };
+        let script = "trap 'echo winch' WINCH; echo up; while :; do sleep 0.05; done";
+        let command = |_| ("sh".to_string(), vec!["-c".to_string(), script.to_string()]);
+        let container = container.then(|| (PathBuf::from("/"), "abc".to_string(), None));
+        start_pane(&shared, 1, 1, spec, "/".into(), command, container);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let text = {
+            let state = shared.lock();
+            let pane = state.panes.values().next().expect("the pane is running");
+            (0..4).map(|row| pane.term.row_text(row)).collect::<Vec<_>>().join("\n")
+        };
+        let ids: Vec<PaneId> = shared.lock().panes.keys().copied().collect();
+        for pane in ids {
+            handle_message(&shared, 1, ClientMessage::Kill { pane });
+        }
+        text
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_container_pane_gets_a_resize_signal_after_its_first_output() {
+        // `docker exec` forwards the size once at start and again on SIGWINCH, and a resize that arrives while the
+        // exec is still starting is lost, leaving the container's terminal taller than the pane.
+        let screen = screen_after_first_output(true).await;
+        assert!(screen.contains("up") && screen.contains("winch"), "screen:\n{screen}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_plain_pane_gets_no_resize_signal() {
+        let screen = screen_after_first_output(false).await;
+        assert!(screen.contains("up") && !screen.contains("winch"), "screen:\n{screen}");
     }
 
     #[test]

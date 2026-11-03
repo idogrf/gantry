@@ -10,6 +10,9 @@ pub(crate) const CONTAINER_ICON: &str = "icons/container.svg";
 /// The SSH host icon (two stacked servers), drawn by `theme::ssh_icon`.
 pub(crate) const SSH_ICON: &str = "icons/ssh.svg";
 
+/// The folder browser's folder icon, drawn by `launcher_view`.
+pub(crate) const FOLDER_ICON: &str = "icons/folder.svg";
+
 /// The split right button's icon (a window with its right half filled).
 pub(crate) const SPLIT_RIGHT_ICON: &str = "icons/split-right.svg";
 
@@ -37,6 +40,9 @@ pub(crate) const PIN_ICON: &str = "icons/pin.svg";
 /// The git chip's icon (a branch), drawn by `git_chip`.
 pub(crate) const BRANCH_ICON: &str = "icons/branch.svg";
 
+/// The sidebar toggle tab's collapse arrow, drawn by `workspace_view` (the expand arrow is `CHEVRON_RIGHT_ICON`).
+pub(crate) const CHEVRON_LEFT_ICON: &str = "icons/chevron-left.svg";
+
 /// The app icon in color, drawn next to the name in the title bar (a picture, not a tinted icon like the others).
 pub(crate) const LOGO: &str = "icons/gantry.png";
 
@@ -51,6 +57,7 @@ impl AssetSource for Assets {
         let bytes: Option<&'static [u8]> = match path {
             CONTAINER_ICON => Some(include_bytes!("../assets/icons/container.svg")),
             SSH_ICON => Some(include_bytes!("../assets/icons/ssh.svg")),
+            FOLDER_ICON => Some(include_bytes!("../assets/icons/folder.svg")),
             SPLIT_RIGHT_ICON => Some(include_bytes!("../assets/icons/split-right.svg")),
             SPLIT_DOWN_ICON => Some(include_bytes!("../assets/icons/split-down.svg")),
             CLOSE_ICON => Some(include_bytes!("../assets/icons/close.svg")),
@@ -61,6 +68,7 @@ impl AssetSource for Assets {
             PIN_ICON => Some(include_bytes!("../assets/icons/pin.svg")),
             INFO_ICON => Some(include_bytes!("../assets/icons/info.svg")),
             BRANCH_ICON => Some(include_bytes!("../assets/icons/branch.svg")),
+            CHEVRON_LEFT_ICON => Some(include_bytes!("../assets/icons/chevron-left.svg")),
             LOGO => Some(include_bytes!("../assets/icons/gantry.png")),
             _ => None,
         };
@@ -80,6 +88,7 @@ impl AssetSource for Assets {
             PROMPT_ICON.into(),
             PIN_ICON.into(),
             INFO_ICON.into(),
+            CHEVRON_LEFT_ICON.into(),
             LOGO.into(),
         ])
     }

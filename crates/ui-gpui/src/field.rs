@@ -2,8 +2,8 @@
 
 use app_core::text_field::TextField;
 use gpui::{
-    App, ClipboardItem, Context, DispatchPhase, Div, Keystroke, MouseButton, MouseDownEvent, Window, canvas, div,
-    prelude::*, px, rgb, rgba,
+    App, ClipboardItem, Context, DispatchPhase, Div, Keystroke, MouseButton, MouseDownEvent, SharedString, Window,
+    canvas, div, prelude::*, px, rgb, rgba,
 };
 
 use crate::theme::Theme;
@@ -118,7 +118,13 @@ fn edit_keys(field: &mut TextField, keystroke: &Keystroke) -> bool {
 
 /// The field's text with a caret at the cursor when `focused` and the selection highlighted; `placeholder` while empty.
 /// `press` runs on a left press inside the field.
-pub(crate) fn render(field: &TextField, placeholder: &'static str, focused: bool, theme: &Theme, press: Press) -> Div {
+pub(crate) fn render(
+    field: &TextField,
+    placeholder: impl Into<SharedString>,
+    focused: bool,
+    theme: &Theme,
+    press: Press,
+) -> Div {
     let caret = || div().flex_none().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.accent));
     let row = div()
         .relative()
@@ -132,7 +138,7 @@ pub(crate) fn render(field: &TextField, placeholder: &'static str, focused: bool
     if field.text().is_empty() {
         return row
             .when(focused, |row| row.child(caret()))
-            .child(div().text_color(rgb(theme.tokens.muted)).child(placeholder));
+            .child(div().text_color(rgb(theme.tokens.muted)).child(placeholder.into()));
     }
     let text = field.text();
     let range = field.selection().unwrap_or(field.cursor()..field.cursor());

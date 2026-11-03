@@ -23,10 +23,18 @@ pub struct KeyInput {
 ///
 /// Returns `None` for keys that should arrive through the platform text-input path instead
 /// (plain or shifted printable characters) and for Super/Cmd combinations, which are reserved
-/// for application shortcuts.
+/// for application shortcuts. The exception is Cmd+Left / Cmd+Right alone, which move to the start and end of the
+/// line like in iTerm2 (Ctrl+A / Ctrl+E, which shells and Claude's prompt already understand).
 pub fn encode_key(input: &KeyInput, modes: KeyModes) -> Option<Vec<u8>> {
     if input.platform {
-        return None;
+        if input.ctrl || input.alt || input.shift {
+            return None;
+        }
+        return match input.key.as_str() {
+            "left" => Some(vec![0x01]),
+            "right" => Some(vec![0x05]),
+            _ => None,
+        };
     }
     let m = modifier_param(input);
     let has_mods = m > 1;
@@ -228,5 +236,17 @@ mod tests {
         assert_eq!(enc("space", "", LEGACY), None);
         assert_eq!(enc("c", "p", LEGACY), None);
         assert_eq!(enc("enter", "p", LEGACY), None);
+        assert_eq!(enc("up", "p", LEGACY), None);
+    }
+
+    #[test]
+    fn cmd_left_and_right_go_to_line_start_and_end() {
+        assert_eq!(enc("left", "p", LEGACY), Some(vec![0x01]));
+        assert_eq!(enc("right", "p", LEGACY), Some(vec![0x05]));
+        assert_eq!(enc("left", "p", KITTY), Some(vec![0x01]));
+        // With another modifier they stay application shortcuts (pane focus is Cmd+Alt+arrows).
+        assert_eq!(enc("left", "pa", LEGACY), None);
+        assert_eq!(enc("right", "ps", LEGACY), None);
+        assert_eq!(enc("left", "pc", LEGACY), None);
     }
 }

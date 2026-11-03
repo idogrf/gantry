@@ -69,14 +69,14 @@ pub const ACTIONS: &[Action] = &[
     action("splitDownClaude", Group::Panes, "Split down (Claude)", "ctrl-shift-e", "cmd-e"),
     action("splitDownShell", Group::Panes, "Split down (terminal)", "ctrl-shift-alt-e", "cmd-alt-e"),
     action("closePane", Group::Panes, "Close pane", "ctrl-shift-w", "cmd-w"),
-    action("focusLeft", Group::Focus, "Focus left", "ctrl-shift-left", "cmd-left"),
-    action("focusRight", Group::Focus, "Focus right", "ctrl-shift-right", "cmd-right"),
-    action("focusUp", Group::Focus, "Focus up", "ctrl-shift-up", "cmd-up"),
-    action("focusDown", Group::Focus, "Focus down", "ctrl-shift-down", "cmd-down"),
+    action("focusLeft", Group::Focus, "Focus left", "ctrl-shift-left", "cmd-alt-left"),
+    action("focusRight", Group::Focus, "Focus right", "ctrl-shift-right", "cmd-alt-right"),
+    action("focusUp", Group::Focus, "Focus up", "ctrl-shift-up", "cmd-alt-up"),
+    action("focusDown", Group::Focus, "Focus down", "ctrl-shift-down", "cmd-alt-down"),
     action("openLauncher", Group::Overlays, "New Claude session…", "ctrl-shift-o", "cmd-o"),
     action("findSession", Group::Overlays, "Find session", "ctrl-shift-f", "cmd-f"),
     action("openRecents", Group::Overlays, "Recent sessions", "ctrl-shift-r", "cmd-r"),
-    action("toggleSidebar", Group::Overlays, "Toggle sidebar", "ctrl-shift-b", "cmd-b"),
+    action("toggleSidebar", Group::Overlays, "Collapse / expand sidebar", "ctrl-shift-b", "cmd-b"),
     action("toggleGitPanel", Group::Overlays, "Git panel", "ctrl-shift-g", "cmd-shift-g"),
     action("openSettings", Group::Overlays, "Settings", "ctrl-,", "cmd-,"),
     action("copy", Group::Terminal, "Copy", "ctrl-shift-c", "cmd-c"),
@@ -336,6 +336,12 @@ pub fn label(keystroke: Option<&str>, platform: Platform) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sidebar_shortcut_is_named_for_collapsing_and_expanding() {
+        let action = ACTIONS.iter().find(|action| action.id == "toggleSidebar").unwrap();
+        assert_eq!(action.label, "Collapse / expand sidebar");
+    }
 
     #[test]
     fn labels_say_terminal_and_session() {

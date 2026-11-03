@@ -340,6 +340,10 @@ impl WorkspaceView {
             askpass.focus_handle(cx).focus(window, cx);
             return;
         }
+        if let Some((launcher, _)) = &self.launcher {
+            launcher.focus_handle(cx).focus(window, cx);
+            return;
+        }
         if let Some((wizard, _)) = &self.ssh_wizard {
             wizard.focus_handle(cx).focus(window, cx);
             return;
@@ -444,6 +448,8 @@ impl WorkspaceView {
             })
             .collect();
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_panes(panes, tabs, cx));
+        self.push_launcher_folders(cx);
+        self.push_launcher_hosts(cx);
     }
 
     /// Start a new Claude session (or shell) in the folder `dir` of a remote host in a new tab; connects the host when

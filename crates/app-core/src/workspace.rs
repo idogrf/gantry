@@ -512,19 +512,41 @@ pub const SIDEBAR_WIDTH: f32 = 280.0;
 
 /// How the sidebar is shown (saved with the layout).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "RawSidebarState")]
 pub struct SidebarState {
-    /// Shown at all.
-    pub visible: bool,
-    /// Width in pixels.
+    /// The thin icon column instead of the full sidebar. Written only when true; a layout from before the compact
+    /// column has `visible` instead, and `visible: false` loads as compact.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compact: bool,
+    /// Expanded width in pixels (kept while compact).
     pub width: f32,
     /// The SSH hosts card is folded to one line by hand (an automatic fold is not saved).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hosts_collapsed: bool,
 }
 
+/// `SidebarState` as the layout file spells it, with the `visible` key of earlier versions.
+#[derive(Deserialize)]
+struct RawSidebarState {
+    #[serde(default)]
+    compact: Option<bool>,
+    #[serde(default)]
+    visible: Option<bool>,
+    width: f32,
+    #[serde(default)]
+    hosts_collapsed: bool,
+}
+
+impl From<RawSidebarState> for SidebarState {
+    fn from(raw: RawSidebarState) -> Self {
+        let compact = raw.compact.or(raw.visible.map(|visible| !visible)).unwrap_or(false);
+        SidebarState { compact, width: raw.width, hosts_collapsed: raw.hosts_collapsed }
+    }
+}
+
 impl Default for SidebarState {
     fn default() -> Self {
-        SidebarState { visible: true, width: SIDEBAR_WIDTH, hosts_collapsed: false }
+        SidebarState { compact: false, width: SIDEBAR_WIDTH, hosts_collapsed: false }
     }
 }
 
@@ -2462,13 +2484,13 @@ mod tests {
     #[test]
     fn the_sidebar_defaults_to_visible() {
         let state = Workspace::default().sidebar;
-        assert_eq!((state.visible, state.width), (true, SIDEBAR_WIDTH));
+        assert_eq!((state.compact, state.width), (false, SIDEBAR_WIDTH));
     }
 
     #[test]
     fn layouts_saved_with_a_sidebar_view_still_load() {
         let state: SidebarState = serde_json::from_str(r#"{"visible":false,"width":300.0,"view":"Status"}"#).unwrap();
-        assert_eq!((state.visible, state.width), (false, 300.0));
+        assert_eq!((state.compact, state.width), (true, 300.0));
     }
 
     #[test]
@@ -2980,7 +3002,7 @@ mod tests {
         saved.pane_started(c, 3, "/c".into());
         let d = saved.split(Axis::Vertical, shell("/d")).unwrap();
         saved.pane_started(d, 4, "/d".into());
-        saved.sidebar.visible = false;
+        saved.sidebar.compact = true;
         let mut restored =
             restore_local(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), false, &HashSet::new()).workspace;
         restored.sidebar.width = 300.0;
@@ -2992,7 +3014,7 @@ mod tests {
             (kept.leaves[&a].launch.claude_dir.clone(), kept.leaves[&a].launch.env.len()),
             (Some("/w".into()), 1)
         );
-        assert_eq!((kept.sidebar.visible, kept.sidebar.width), (false, 300.0));
+        assert_eq!((kept.sidebar.compact, kept.sidebar.width), (true, 300.0));
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("layout.json");
         crate::layout_store::save(&file, &restored).unwrap();
@@ -3005,7 +3027,35 @@ mod tests {
             &HashSet::new(),
         );
         assert_eq!(back.workspace.leaves.len(), 1, "switching back does not restore the finished leaves");
-        assert!(!back.workspace.sidebar.visible);
+        assert!(back.workspace.sidebar.compact);
+    }
+
+    #[test]
+    fn sidebar_loads_old_visible_false_as_compact() {
+        let state: SidebarState = serde_json::from_str(r#"{"visible": false, "width": 300.0}"#).unwrap();
+        assert_eq!((state.compact, state.width), (true, 300.0));
+    }
+
+    #[test]
+    fn sidebar_loads_old_visible_true_as_expanded() {
+        let state: SidebarState = serde_json::from_str(r#"{"visible": true, "width": 300.0}"#).unwrap();
+        assert!(!state.compact);
+    }
+
+    #[test]
+    fn sidebar_without_the_key_is_expanded() {
+        let state: SidebarState = serde_json::from_str(r#"{"width": 300.0}"#).unwrap();
+        assert!(!state.compact);
+    }
+
+    #[test]
+    fn sidebar_saves_compact_only_when_true() {
+        let expanded = serde_json::to_string(&SidebarState::default()).unwrap();
+        assert!(!expanded.contains("compact") && !expanded.contains("visible"), "{expanded}");
+        let compact = serde_json::to_string(&SidebarState { compact: true, ..SidebarState::default() }).unwrap();
+        assert!(compact.contains(r#""compact":true"#), "{compact}");
+        let back: SidebarState = serde_json::from_str(&compact).unwrap();
+        assert!(back.compact);
     }
 
     #[test]

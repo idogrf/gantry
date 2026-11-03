@@ -1,16 +1,27 @@
-use super::{DialogAction, FindSession, OpenRecents, OpenSettings, TakeOverTarget, ToggleSidebar, WorkspaceView};
+use super::layout::content_width_beside;
+use super::{
+    DialogAction, FindSession, OpenRecents, OpenSettings, SIDEBAR_EDGE, SidebarAnim, TakeOverTarget, ToggleSidebar,
+    WorkspaceView,
+};
 
 use app_core::attention::AlertKind;
 use app_core::dialogs;
-use gpui::{ClipboardItem, Context, Focusable, MouseButton, MouseMoveEvent, Pixels, Point, Window};
+use app_core::sidebar_compact;
+use gpui::{
+    ClipboardItem, Context, Focusable, IntoElement, MouseButton, MouseMoveEvent, Pixels, Point, Window, div,
+    prelude::*, px, relative, rgb, svg,
+};
 use protocol::host::HostId;
 use protocol::message::SessionState;
+use std::time::Instant;
 
 use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortcut};
 use app_core::session_tree::{Activation, Tone, Unseen, status_tone};
 
+use crate::assets::{CHEVRON_LEFT_ICON, CHEVRON_RIGHT_ICON};
 use crate::context_menu::OpenMenu;
-use crate::settings_store::SettingsStore;
+use crate::hover_card::{self, HoverCard};
+use crate::settings_store::{SettingsStore, shortcut_label};
 use crate::sidebar_view::{RenameTarget, SidebarEvent};
 use crate::ssh_wizard::WizardStart;
 use crate::theme::theme;
@@ -19,6 +30,56 @@ const SIDEBAR_MIN: f32 = 160.0;
 const SIDEBAR_MAX: f32 = 600.0;
 
 impl WorkspaceView {
+    /// The tab on the sidebar's outer edge, halfway down, that collapses or expands it: drawn only while the pointer
+    /// is over the sidebar or the tab, and fused to the edge so it follows it while the width animates.
+    pub(super) fn render_sidebar_toggle(&self, sidebar_px: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme(cx).clone();
+        let compact = self.sidebar_amount() > 0.5;
+        let shown = self.sidebar_hovered || self.toggle_hovered;
+        div()
+            .id("sidebar-toggle")
+            .absolute()
+            .left(theme.ui(sidebar_px) + px(SIDEBAR_EDGE))
+            .top(relative(0.5))
+            .mt(theme.ui(-23.))
+            .w(theme.ui(16.))
+            .h(theme.ui(46.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_r(theme.ui(10.))
+            .bg(rgb(theme.tokens.raised))
+            .border_1()
+            .border_l_0()
+            .border_color(rgb(theme.tokens.line))
+            .cursor_pointer()
+            .opacity(if shown { 1.0 } else { 0.0 })
+            .hover(|style| style.border_color(rgb(theme.tokens.accent)))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.toggle_hovered = *hovered;
+                cx.notify();
+            }))
+            .child(
+                svg()
+                    .path(if compact { CHEVRON_RIGHT_ICON } else { CHEVRON_LEFT_ICON })
+                    .size(theme.ui(12.))
+                    .text_color(rgb(if self.toggle_hovered { theme.tokens.accent } else { theme.tokens.muted })),
+            )
+            .tooltip(hover_card::tooltip(HoverCard {
+                title: if compact { "Expand sidebar" } else { "Collapse sidebar" }.into(),
+                status: Some(shortcut_label(cx.global::<SettingsStore>().settings(), "toggleSidebar")),
+                dir: None,
+                container: false,
+                host: None,
+                folder: None,
+            }))
+            .on_click(
+                cx.listener(|this, _, window, cx| {
+                    this.set_sidebar_compact(!this.workspace.sidebar.compact, window, cx)
+                }),
+            )
+    }
+
     /// Do what a right-click menu entry says.
     pub(super) fn run_menu_action(&mut self, action: MenuAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
@@ -232,6 +293,7 @@ impl WorkspaceView {
                 self.workspace.sidebar.hosts_collapsed = collapsed;
                 self.save(cx);
             }
+            SidebarEvent::ToggleCompact => self.set_sidebar_compact(!self.workspace.sidebar.compact, window, cx),
             SidebarEvent::AddSshHost => self.open_ssh_wizard(WizardStart::Add, window, cx),
             SidebarEvent::UpdateHost { host, position } => self.click_host_update(&host, position, window, cx),
         }
@@ -239,28 +301,54 @@ impl WorkspaceView {
 
     /// Start the inline rename on the sidebar, showing the sidebar first if it is hidden.
     fn start_rename(&mut self, target: RenameTarget, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.workspace.sidebar.visible {
-            self.workspace.sidebar.visible = true;
-            self.save(cx);
-            cx.notify();
-        }
+        self.set_sidebar_compact(false, window, cx);
         self.sidebar.update(cx, |sidebar, cx| sidebar.start_rename(target, &name, window, cx));
     }
 
     pub(super) fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
-        let state = &mut self.workspace.sidebar;
-        state.visible = !state.visible;
-        if !state.visible {
+        self.set_sidebar_compact(!self.workspace.sidebar.compact, window, cx);
+    }
+
+    /// Collapse the sidebar to its compact column or expand it, with the animation when it is on. Collapsing moves the
+    /// focus to the pane: the filter field it may have had is gone.
+    pub(super) fn set_sidebar_compact(&mut self, compact: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let was = self.workspace.sidebar.compact;
+        if was == compact {
+            return;
+        }
+        let theme = theme(cx).clone();
+        let at = |compact: bool| sidebar_compact::width(self.workspace.sidebar.width, f32::from(u8::from(compact)));
+        // The width the tab content has once this ends, from the body's width, so that it is right on every screen
+        // (a pane tab, Settings, the welcome screen) and when this reverses an animation under way.
+        let content_width = content_width_beside(self.body_width, theme.ui(at(compact)));
+        let animate =
+            cx.global::<SettingsStore>().settings().animate_ui && window.is_window_active() && self.body_width > px(0.);
+        let from = self.sidebar_amount();
+        self.workspace.sidebar.compact = compact;
+        self.sidebar_anim = animate.then(|| SidebarAnim {
+            started: Instant::now(),
+            from,
+            to: f32::from(u8::from(compact)),
+            content_width,
+        });
+        if compact {
             self.focus_current(window, cx);
         }
         self.save(cx);
         cx.notify();
     }
 
+    /// How compact the sidebar is drawn right now: 0 = expanded, 1 = compact, between while it animates.
+    pub(super) fn sidebar_amount(&self) -> f32 {
+        match &self.sidebar_anim {
+            Some(anim) => sidebar_compact::amount(anim.from, anim.to, anim.started.elapsed().as_secs_f32() * 1000.0),
+            None => f32::from(u8::from(self.workspace.sidebar.compact)),
+        }
+    }
+
     pub(super) fn find_session(&mut self, _: &FindSession, window: &mut Window, cx: &mut Context<Self>) {
-        self.workspace.sidebar.visible = true;
+        self.set_sidebar_compact(false, window, cx);
         self.sidebar.focus_handle(cx).focus(window, cx);
-        self.save(cx);
         cx.notify();
     }
 

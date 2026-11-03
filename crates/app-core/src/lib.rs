@@ -32,6 +32,7 @@ pub mod session_tree;
 pub mod sessions;
 pub mod settings;
 pub mod shortcuts;
+pub mod sidebar_compact;
 pub mod sidebar_order;
 pub mod snapshot;
 pub mod split_tree;

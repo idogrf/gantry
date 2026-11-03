@@ -8,7 +8,7 @@ use protocol::message::{SessionInfo, SessionState, SessionStatus};
 use crate::settings::{AlertSettings, AlertTone};
 
 /// A turn counts as finished only after this much busy time unless the settings say otherwise.
-const DEFAULT_FINISHED_AFTER_MS: u64 = 3_000;
+const DEFAULT_FINISHED_AFTER_MS: u64 = 1_000;
 
 /// Why a session wants attention.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -256,15 +256,15 @@ mod tests {
     }
 
     #[test]
-    fn finished_needs_a_busy_run_of_three_seconds() {
+    fn finished_needs_a_busy_run_of_one_second() {
         let mut tracker = AttentionTracker::default();
         tracker.reset(&HostId::local(), &[mine(Some(SessionStatus::Idle), 0)]);
         tracker.update(&HostId::local(), &[mine(Some(SessionStatus::Busy), 10_000)], &[]);
-        // Busy for 2.9 s: a quick turn, or flapping.
-        assert!(tracker.update(&HostId::local(), &[mine(Some(SessionStatus::Idle), 12_900)], &[]).is_empty());
+        // Busy for 0.9 s: a quick turn, or flapping.
+        assert!(tracker.update(&HostId::local(), &[mine(Some(SessionStatus::Idle), 10_900)], &[]).is_empty());
         tracker.update(&HostId::local(), &[mine(Some(SessionStatus::Busy), 20_000)], &[]);
         assert_eq!(
-            kinds(tracker.update(&HostId::local(), &[mine(Some(SessionStatus::Idle), 23_000)], &[])),
+            kinds(tracker.update(&HostId::local(), &[mine(Some(SessionStatus::Idle), 21_000)], &[])),
             vec![AlertKind::Finished]
         );
     }

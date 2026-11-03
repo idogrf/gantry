@@ -463,7 +463,7 @@ impl Default for Settings {
             alerts: AlertSettings {
                 needs_input: EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::FallingBlip },
                 finished: EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::ClassicBlip },
-                finished_after_seconds: 3,
+                finished_after_seconds: 1,
                 when_visible: false,
                 only_when_unfocused: false,
                 play_sounds: true,
@@ -883,7 +883,7 @@ impl Reader {
         let alerts = AlertSettings {
             needs_input: self.event(&map, "needsInput", default.needs_input),
             finished: self.event(&map, "finished", default.finished),
-            finished_after_seconds: self.number(&map, "alerts.", "finishedAfterSeconds", 3.0, (0.0, 600.0)).round()
+            finished_after_seconds: self.number(&map, "alerts.", "finishedAfterSeconds", 1.0, (0.0, 600.0)).round()
                 as u32,
             when_visible: self.bool(&map, "alerts.", "whenVisible", default.when_visible),
             only_when_unfocused: self.bool(&map, "alerts.", "onlyWhenUnfocused", default.only_when_unfocused),
@@ -1342,7 +1342,7 @@ mod tests {
             (14.0, 1.2, None)
         );
         assert_eq!(s.ui_font_size, 14.0);
-        assert_eq!(s.alerts.finished_after_seconds, 3);
+        assert_eq!(s.alerts.finished_after_seconds, 1);
         assert_eq!(s.alerts.volume, 0.4);
         assert_eq!(
             (s.alerts.needs_input.tone, s.alerts.finished.tone),

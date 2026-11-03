@@ -44,6 +44,16 @@ cargo deny check
 CI runs the same checks. `scripts/cargo` is a wrapper that limits CPU and memory and allows one build at a time; plain
 `cargo` works too.
 
+## Branches and releases
+
+- `main` is always the last release. New work does not go there directly.
+- The next minor release collects on its own branch, `release/<next version>` (for example `release/0.13.0` after
+  0.12.x). Branch from it and open your pull request against it (`--base release/0.13.0`), not against `main`.
+- Only a fix for a bug in the released version goes to `main`, for a patch release (0.12.2). It is merged into the
+  release branch afterwards, so you don't need to open it twice.
+- When the release branch is ready, it is merged into `main` and tagged.
+- Not sure which branch? Ask in the issue.
+
 ## Pull requests
 
 - Keep a pull request to one change, with tests for new behavior.

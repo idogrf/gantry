@@ -40,6 +40,9 @@ pub(crate) const PIN_ICON: &str = "icons/pin.svg";
 /// The git chip's icon (a branch), drawn by `git_chip`.
 pub(crate) const BRANCH_ICON: &str = "icons/branch.svg";
 
+/// The sidebar toggle button's icon (a panel with its left column), drawn by `sidebar_view`.
+pub(crate) const SIDEBAR_ICON: &str = "icons/sidebar.svg";
+
 /// The app icon in color, drawn next to the name in the title bar (a picture, not a tinted icon like the others).
 pub(crate) const LOGO: &str = "icons/gantry.png";
 
@@ -65,6 +68,7 @@ impl AssetSource for Assets {
             PIN_ICON => Some(include_bytes!("../assets/icons/pin.svg")),
             INFO_ICON => Some(include_bytes!("../assets/icons/info.svg")),
             BRANCH_ICON => Some(include_bytes!("../assets/icons/branch.svg")),
+            SIDEBAR_ICON => Some(include_bytes!("../assets/icons/sidebar.svg")),
             LOGO => Some(include_bytes!("../assets/icons/gantry.png")),
             _ => None,
         };
@@ -84,6 +88,7 @@ impl AssetSource for Assets {
             PROMPT_ICON.into(),
             PIN_ICON.into(),
             INFO_ICON.into(),
+            SIDEBAR_ICON.into(),
             LOGO.into(),
         ])
     }

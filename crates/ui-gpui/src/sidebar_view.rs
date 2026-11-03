@@ -28,7 +28,7 @@ use gpui::{
 use protocol::host::HostId;
 use protocol::message::SessionInfo;
 
-use crate::assets::{CHEVRON_DOWN_ICON, CHEVRON_RIGHT_ICON, CLOSE_ICON};
+use crate::assets::{CHEVRON_DOWN_ICON, CHEVRON_RIGHT_ICON, CLOSE_ICON, SIDEBAR_ICON};
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::git_scrollbar::Extent;
@@ -263,12 +263,27 @@ impl SidebarView {
         sidebar
     }
 
-    /// Draw the sidebar `amount` of the way to its compact column (0 = expanded, 1 = compact).
+    /// Draw the sidebar `amount` of the way to its compact column (0 = expanded, 1 = compact). The rows follow the
+    /// filter again, or stop following it, when this crosses half way.
     pub fn set_amount(&mut self, amount: f32, cx: &mut Context<Self>) {
         if self.amount != amount {
+            let filtering = self.filtering();
             self.amount = amount;
+            if self.filtering() != filtering {
+                self.rebuild(cx);
+            }
             cx.notify();
         }
+    }
+
+    /// The filter text the rows follow: none while the sidebar is compact (the text itself is kept).
+    fn filter_text(&self) -> &str {
+        applied_filter(self.filter.text(), self.amount)
+    }
+
+    /// Whether the rows follow the filter field now.
+    fn filtering(&self) -> bool {
+        !self.filter_text().is_empty()
     }
 
     /// The project a directory belongs to (its git repository, else the directory).
@@ -283,7 +298,7 @@ impl SidebarView {
 
     /// The leaves whose rows a collapsed project hides (none while a filter expands every project).
     pub fn collapsed_leaves(&self) -> Vec<NodeId> {
-        if self.filter.text().is_empty() { session_tree::hidden_leaves(&self.all_rows, &self.rows) } else { Vec::new() }
+        if self.filter_text().is_empty() { session_tree::hidden_leaves(&self.all_rows, &self.rows) } else { Vec::new() }
     }
 
     /// The leaves whose session needs input, in sidebar order.
@@ -630,18 +645,19 @@ impl SidebarView {
                 (&mut unloaded.0, &mut unloaded.1)
             };
             let all_rows = build("", &HashSet::new(), None, arrivals, order);
-            let plain = self.filter.text().is_empty() && self.toggled.is_empty() && self.details.is_none();
+            let filter = applied_filter(self.filter.text(), self.amount);
+            let plain = filter.is_empty() && self.toggled.is_empty() && self.details.is_none();
             let rows = if plain {
                 all_rows.clone()
             } else {
-                build(self.filter.text(), &self.toggled, self.details.as_deref(), arrivals, order)
+                build(filter, &self.toggled, self.details.as_deref(), arrivals, order)
             };
             (all_rows, rows)
         };
         self.all_rows = all_rows;
         self.rows = rows;
         // Tabs can only be moved while nothing is filtered away.
-        self.items = Rc::new(if self.filter.text().is_empty() { project_items(&self.rows) } else { Vec::new() });
+        self.items = Rc::new(if self.filter_text().is_empty() { project_items(&self.rows) } else { Vec::new() });
         // A row that is gone (its pane closed) ends its rename.
         if let Some((target, _)) = &self.renaming
             && !self.rows.iter().any(|row| renames(&row.kind, *target))
@@ -1453,6 +1469,7 @@ impl Render for SidebarView {
             self.hosts_fold.observe(extent.contents.1 > extent.viewport.1 + 0.5);
         }
         let theme = theme(cx).clone();
+        let amount = self.amount;
         div()
             .key_context("Sidebar")
             .track_focus(&self.focus_handle)
@@ -1477,34 +1494,73 @@ impl Render for SidebarView {
             }))
             .child(
                 div()
-                    .id("filter")
-                    .h(theme.ui(36.))
                     .flex_none()
-                    .mx_3()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.))
+                    .ml(theme.ui(10.))
+                    .mr_3()
                     .mt_3()
                     .mb_1()
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .text_sm()
-                    .rounded(px(RADIUS))
-                    .bg(rgb(theme.tokens.raised))
-                    .border_1()
-                    .border_color(rgb(if focused { theme.tokens.accent } else { theme.tokens.line }))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.focus_handle.focus(window, cx);
-                        cx.notify();
-                    }))
-                    .child(field::render(
-                        &self.filter,
-                        "Filter active sessions",
-                        focused,
-                        &theme,
-                        field::on_press(cx, |this, offset, clicks, _, cx| {
-                            this.filter.press(offset, clicks);
-                            cx.notify();
-                        }),
-                    )),
+                    .child(
+                        div()
+                            .id("sidebar-toggle")
+                            .flex_none()
+                            .size(theme.ui(36.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(RADIUS))
+                            .bg(rgb(theme.tokens.raised))
+                            .border_1()
+                            .border_color(rgb(theme.tokens.line))
+                            .cursor_pointer()
+                            .hover(|style| style.border_color(rgb(theme.tokens.accent)))
+                            .child(svg().path(SIDEBAR_ICON).size(theme.ui(18.)).text_color(rgb(theme.tokens.accent)))
+                            .tooltip(hover_card::tooltip(HoverCard {
+                                title: if self.amount > 0.5 { "Expand sidebar" } else { "Collapse sidebar" }.into(),
+                                status: Some(shortcut_label(cx.global::<SettingsStore>().settings(), "toggleSidebar")),
+                                dir: None,
+                                container: false,
+                                host: None,
+                                folder: None,
+                            }))
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::ToggleCompact))),
+                    )
+                    .when(self.amount < 1.0, |row| {
+                        row.child(
+                            div()
+                                .id("filter")
+                                .h(theme.ui(36.))
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .opacity(1.0 - self.amount)
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .text_sm()
+                                .rounded(px(RADIUS))
+                                .bg(rgb(theme.tokens.raised))
+                                .border_1()
+                                .border_color(rgb(if focused { theme.tokens.accent } else { theme.tokens.line }))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.focus_handle.focus(window, cx);
+                                    cx.notify();
+                                }))
+                                .child(field::render(
+                                    &self.filter,
+                                    "Filter active sessions",
+                                    focused,
+                                    &theme,
+                                    field::on_press(cx, |this, offset, clicks, _, cx| {
+                                        this.filter.press(offset, clicks);
+                                        cx.notify();
+                                    }),
+                                )),
+                        )
+                    }),
             )
             .when(self.settings_open, |this| {
                 let out = RING + RING_GAP;
@@ -1525,14 +1581,17 @@ impl Render for SidebarView {
                         .h(theme.ui(ROW_HEIGHT - 4.))
                         .flex_none()
                         .p(px(PILL_INSET))
-                        .mx_3()
+                        .ml(theme.ui(12. - 8. * amount))
+                        .mr(theme.ui(12. - 8. * amount))
                         .mb_1()
                         .children(ring)
                         .child(
                             div()
                                 .id("settings-row")
                                 .size_full()
-                                .px(theme.ui(12.))
+                                .overflow_hidden()
+                                .pl(theme.ui(12. + 3. * amount))
+                                .pr(theme.ui(12. * (1. - amount)))
                                 .flex()
                                 .items_center()
                                 .gap_2()
@@ -1541,9 +1600,19 @@ impl Render for SidebarView {
                                 .bg(rgb(theme.tokens.text))
                                 .text_color(rgb(theme.tokens.ground))
                                 .cursor_pointer()
+                                .when(amount >= 1.0, |row| {
+                                    row.tooltip(hover_card::tooltip(HoverCard {
+                                        title: "Settings".into(),
+                                        status: None,
+                                        dir: None,
+                                        container: false,
+                                        host: None,
+                                        folder: None,
+                                    }))
+                                })
                                 .child("⚙")
-                                .child(div().flex_1().min_w_0().truncate().child("Settings"))
-                                .child(
+                                .child(div().flex_1().min_w_0().truncate().opacity(1. - amount).child("Settings"))
+                                .children((amount < 1.0).then(|| {
                                     div()
                                         .id("close-settings")
                                         .flex_none()
@@ -1558,8 +1627,8 @@ impl Render for SidebarView {
                                         .on_click(cx.listener(|_, _, _, cx| {
                                             cx.stop_propagation();
                                             cx.emit(SidebarEvent::CloseSettings);
-                                        })),
-                                )
+                                        }))
+                                }))
                                 .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::ShowSettings)))
                                 .on_mouse_down(
                                     MouseButton::Middle,
@@ -1588,7 +1657,8 @@ impl Render for SidebarView {
                         .h(theme.ui(ROW_HEIGHT - 4.))
                         .flex_none()
                         .p(px(PILL_INSET))
-                        .mx_3()
+                        .ml(theme.ui(12. - 8. * amount))
+                        .mr(theme.ui(12. - 8. * amount))
                         .mb_1()
                         .child(
                             div()
@@ -1605,7 +1675,9 @@ impl Render for SidebarView {
                             div()
                                 .id("git-row")
                                 .size_full()
-                                .px(theme.ui(12.))
+                                .overflow_hidden()
+                                .pl(theme.ui(12. + 3. * amount))
+                                .pr(theme.ui(12. * (1. - amount)))
                                 .flex()
                                 .items_center()
                                 .gap_2()
@@ -1613,9 +1685,26 @@ impl Render for SidebarView {
                                 .rounded(px(RADIUS))
                                 .bg(rgb(theme.tokens.text))
                                 .text_color(rgb(theme.tokens.ground))
+                                .when(amount >= 1.0, |row| {
+                                    row.tooltip(hover_card::tooltip(HoverCard {
+                                        title: "Git".into(),
+                                        status: Some(label.to_string()),
+                                        dir: None,
+                                        container: false,
+                                        host: None,
+                                        folder: None,
+                                    }))
+                                })
                                 .child("⎇")
-                                .child(div().flex_1().min_w_0().truncate().child(format!("Git · {label}")))
                                 .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .opacity(1. - amount)
+                                        .child(format!("Git · {label}")),
+                                )
+                                .children((amount < 1.0).then(|| {
                                     div()
                                         .id("close-git")
                                         .flex_none()
@@ -1631,8 +1720,8 @@ impl Render for SidebarView {
                                         .on_click(cx.listener(|_, _, _, cx| {
                                             cx.stop_propagation();
                                             cx.emit(SidebarEvent::CloseGit);
-                                        })),
-                                ),
+                                        }))
+                                })),
                         ),
                 )
             })
@@ -1773,5 +1862,24 @@ impl Render for SidebarView {
                     move |window, cx| dismiss(&(), window, cx),
                 ))
             })
+    }
+}
+
+/// The filter text that applies when the sidebar is `amount` compact: none once it is past half way, the text itself
+/// is kept for when it expands again.
+fn applied_filter(text: &str, amount: f32) -> &str {
+    if amount > 0.5 { "" } else { text }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_filter_is_ignored_while_compact_and_kept_for_later() {
+        assert_eq!(applied_filter("abc", 0.0), "abc");
+        assert_eq!(applied_filter("abc", 0.5), "abc");
+        assert_eq!(applied_filter("abc", 0.6), "");
+        assert_eq!(applied_filter("abc", 1.0), "");
     }
 }

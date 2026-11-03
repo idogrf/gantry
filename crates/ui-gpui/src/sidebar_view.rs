@@ -30,7 +30,7 @@ use gpui::{
 use protocol::host::HostId;
 use protocol::message::SessionInfo;
 
-use crate::assets::{CHEVRON_DOWN_ICON, CHEVRON_RIGHT_ICON, CLOSE_ICON, SIDEBAR_ICON};
+use crate::assets::{CHEVRON_DOWN_ICON, CHEVRON_RIGHT_ICON, CLOSE_ICON};
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::git_scrollbar::Extent;
@@ -1725,36 +1725,11 @@ impl Render for SidebarView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(6.))
+                    .h(theme.ui(36.))
                     .ml(theme.ui(10.))
                     .mr_3()
                     .mt_3()
                     .mb_1()
-                    .child(
-                        div()
-                            .id("sidebar-toggle")
-                            .flex_none()
-                            .size(theme.ui(36.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(RADIUS))
-                            .bg(rgb(theme.tokens.raised))
-                            .border_1()
-                            .border_color(rgb(theme.tokens.line))
-                            .cursor_pointer()
-                            .hover(|style| style.border_color(rgb(theme.tokens.accent)))
-                            .child(svg().path(SIDEBAR_ICON).size(theme.ui(18.)).text_color(rgb(theme.tokens.accent)))
-                            .tooltip(hover_card::tooltip(HoverCard {
-                                title: if self.amount > 0.5 { "Expand sidebar" } else { "Collapse sidebar" }.into(),
-                                status: Some(shortcut_label(cx.global::<SettingsStore>().settings(), "toggleSidebar")),
-                                dir: None,
-                                container: false,
-                                host: None,
-                                folder: None,
-                            }))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::ToggleCompact))),
-                    )
                     .when(self.amount < 1.0, |row| {
                         row.child(
                             div()

@@ -1,12 +1,16 @@
 use super::layout::content_width_beside;
 use super::{
-    DialogAction, FindSession, OpenRecents, OpenSettings, SidebarAnim, TakeOverTarget, ToggleSidebar, WorkspaceView,
+    DialogAction, FindSession, OpenRecents, OpenSettings, SIDEBAR_EDGE, SidebarAnim, TakeOverTarget, ToggleSidebar,
+    WorkspaceView,
 };
 
 use app_core::attention::AlertKind;
 use app_core::dialogs;
 use app_core::sidebar_compact;
-use gpui::{ClipboardItem, Context, Focusable, MouseButton, MouseMoveEvent, Pixels, Point, Window, px};
+use gpui::{
+    ClipboardItem, Context, Focusable, IntoElement, MouseButton, MouseMoveEvent, Pixels, Point, Window, div,
+    prelude::*, px, relative, rgb, svg,
+};
 use protocol::host::HostId;
 use protocol::message::SessionState;
 use std::time::Instant;
@@ -14,8 +18,10 @@ use std::time::Instant;
 use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortcut};
 use app_core::session_tree::{Activation, Tone, Unseen, status_tone};
 
+use crate::assets::{CHEVRON_LEFT_ICON, CHEVRON_RIGHT_ICON};
 use crate::context_menu::OpenMenu;
-use crate::settings_store::SettingsStore;
+use crate::hover_card::{self, HoverCard};
+use crate::settings_store::{SettingsStore, shortcut_label};
 use crate::sidebar_view::{RenameTarget, SidebarEvent};
 use crate::ssh_wizard::WizardStart;
 use crate::theme::theme;
@@ -24,6 +30,52 @@ const SIDEBAR_MIN: f32 = 160.0;
 const SIDEBAR_MAX: f32 = 600.0;
 
 impl WorkspaceView {
+    /// The tab on the sidebar's outer edge, halfway down, that collapses or expands it: drawn only while the pointer
+    /// is over the sidebar or the tab, and fused to the edge so it follows it while the width animates.
+    pub(super) fn render_sidebar_toggle(&self, sidebar_px: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme(cx).clone();
+        let compact = self.sidebar_amount() > 0.5;
+        let shown = self.sidebar_hovered || self.toggle_hovered;
+        div()
+            .id("sidebar-toggle")
+            .absolute()
+            .left(theme.ui(sidebar_px) + px(SIDEBAR_EDGE))
+            .top(relative(0.5))
+            .mt(theme.ui(-23.))
+            .w(theme.ui(16.))
+            .h(theme.ui(46.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_r(theme.ui(10.))
+            .bg(rgb(theme.tokens.raised))
+            .border_1()
+            .border_l_0()
+            .border_color(rgb(theme.tokens.line))
+            .text_color(rgb(theme.tokens.muted))
+            .cursor_pointer()
+            .opacity(if shown { 1.0 } else { 0.0 })
+            .hover(|style| style.border_color(rgb(theme.tokens.accent)).text_color(rgb(theme.tokens.accent)))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.toggle_hovered = *hovered;
+                cx.notify();
+            }))
+            .child(svg().path(if compact { CHEVRON_RIGHT_ICON } else { CHEVRON_LEFT_ICON }).size(theme.ui(12.)))
+            .tooltip(hover_card::tooltip(HoverCard {
+                title: if compact { "Expand sidebar" } else { "Collapse sidebar" }.into(),
+                status: Some(shortcut_label(cx.global::<SettingsStore>().settings(), "toggleSidebar")),
+                dir: None,
+                container: false,
+                host: None,
+                folder: None,
+            }))
+            .on_click(
+                cx.listener(|this, _, window, cx| {
+                    this.set_sidebar_compact(!this.workspace.sidebar.compact, window, cx)
+                }),
+            )
+    }
+
     /// Do what a right-click menu entry says.
     pub(super) fn run_menu_action(&mut self, action: MenuAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {

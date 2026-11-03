@@ -98,6 +98,11 @@ impl Render for WorkspaceView {
                     .h_full()
                     .overflow_hidden()
                     .w(theme.ui(sidebar_px))
+                    .id("sidebar-zone")
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        this.sidebar_hovered = *hovered;
+                        cx.notify();
+                    }))
                     .child({
                         let view = cx.entity();
                         canvas(
@@ -149,7 +154,8 @@ impl Render for WorkspaceView {
                         }
                         None => panes,
                     }),
-            );
+            )
+            .child(self.render_sidebar_toggle(sidebar_px, cx));
         let root = div()
             // Without the context no shortcut reaches the panes while a dialog is open.
             .when(self.dialog.is_none(), |root| root.key_context("Workspace"))

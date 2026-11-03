@@ -6,7 +6,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [Unreleased]
 
 ### Added
-- **Compact sidebar** - A button left of the filter field (and `Ctrl+Shift+B`) collapses the sidebar to a thin icon column and expands it again, with a short animation. The compact column still shows every session's status color and the first letter of its title, the project dots, split tabs (their pane count in a box around their panes), the tab colors, the unread, closed and elsewhere marks, the SSH hosts count, Recent sessions and the New Claude / New terminal buttons. Hover a tile for its details.
+- **Compact sidebar** - A small tab on the sidebar's edge, halfway down, shown while the pointer is over the sidebar (and `Ctrl+Shift+B`), collapses the sidebar to a thin icon column and expands it again, with a short animation. The compact column still shows every session's status color and the first letter of its title, the project dots, split tabs (their pane count in a box around their panes), the tab colors, the unread, closed and elsewhere marks, the SSH hosts count, Recent sessions and the New Claude / New terminal buttons. Hover a tile for its details.
 
 ### Changed
 - **Sidebar shortcut** - `Ctrl+Shift+B` no longer hides the sidebar; it switches between the full sidebar and the compact column. "Sidebar at start" in Settings > Window is now Remember / Expanded / Compact (an old "Hidden" counts as Compact).

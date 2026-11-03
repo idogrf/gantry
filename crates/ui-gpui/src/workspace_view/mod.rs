@@ -370,6 +370,9 @@ pub struct WorkspaceView {
     viewport: Size<Pixels>,
     /// The sidebar's edge is being dragged.
     resizing_sidebar: bool,
+    /// The pointer is over the sidebar or over its toggle tab: only then the tab is drawn.
+    sidebar_hovered: bool,
+    toggle_hovered: bool,
     _sidebar_events: Subscription,
     /// The open launcher overlay.
     launcher: Option<(Entity<LauncherView>, Subscription)>,
@@ -632,6 +635,8 @@ impl WorkspaceView {
             body_width: px(0.),
             viewport: Size::default(),
             resizing_sidebar: false,
+            sidebar_hovered: false,
+            toggle_hovered: false,
             _sidebar_events: sidebar_events,
             launcher: None,
             recents: None,

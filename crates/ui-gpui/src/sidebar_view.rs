@@ -16,6 +16,7 @@ use app_core::session_tree::{
     shown_order,
 };
 use app_core::sessions::SessionStore;
+use app_core::sidebar_compact::tile_letter;
 use app_core::sidebar_order::SidebarOrder;
 use app_core::split_tree::NodeId;
 use app_core::text_field::TextField;
@@ -23,7 +24,8 @@ use app_core::theme_colors::ToneColors;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task,
-    UniformListDecoration, UniformListScrollHandle, Window, div, prelude::*, px, rgb, rgba, svg, uniform_list,
+    UniformListDecoration, UniformListScrollHandle, Window, div, prelude::*, px, relative, rgb, rgba, svg,
+    uniform_list,
 };
 use protocol::host::HostId;
 use protocol::message::SessionInfo;
@@ -53,6 +55,8 @@ const SESSION_INSET: f32 = 15.0;
 const TAB_INSET: f32 = 37.0;
 /// The least width the hairline in a project heading is drawn at.
 const MIN_RULE: f32 = 16.0;
+/// Space left of a compact tile's fill inside the row's own padding (the row's `PILL_INSET` comes on top).
+const TILE_EDGE: f32 = 3.0;
 /// Width of the ring around the selected row.
 const RING: f32 = 2.0;
 /// Empty space between the ring and the selected row's fill, besides `PILL_INSET`.
@@ -267,9 +271,9 @@ impl SidebarView {
     /// filter again, or stop following it, when this crosses half way.
     pub fn set_amount(&mut self, amount: f32, cx: &mut Context<Self>) {
         if self.amount != amount {
-            let filtering = self.filtering();
+            let compact = self.amount > 0.5;
             self.amount = amount;
-            if self.filtering() != filtering {
+            if (amount > 0.5) != compact {
                 self.rebuild(cx);
             }
             cx.notify();
@@ -279,11 +283,6 @@ impl SidebarView {
     /// The filter text the rows follow: none while the sidebar is compact (the text itself is kept).
     fn filter_text(&self) -> &str {
         applied_filter(self.filter.text(), self.amount)
-    }
-
-    /// Whether the rows follow the filter field now.
-    fn filtering(&self) -> bool {
-        !self.filter_text().is_empty()
     }
 
     /// The project a directory belongs to (its git repository, else the directory).
@@ -646,12 +645,10 @@ impl SidebarView {
             };
             let all_rows = build("", &HashSet::new(), None, arrivals, order);
             let filter = applied_filter(self.filter.text(), self.amount);
-            let plain = filter.is_empty() && self.toggled.is_empty() && self.details.is_none();
-            let rows = if plain {
-                all_rows.clone()
-            } else {
-                build(filter, &self.toggled, self.details.as_deref(), arrivals, order)
-            };
+            // The details of an outside session have no place in the compact column.
+            let details = if self.amount > 0.5 { None } else { self.details.as_deref() };
+            let plain = filter.is_empty() && self.toggled.is_empty() && details.is_none();
+            let rows = if plain { all_rows.clone() } else { build(filter, &self.toggled, details, arrivals, order) };
             (all_rows, rows)
         };
         self.all_rows = all_rows;
@@ -938,6 +935,33 @@ impl SidebarView {
         let group_name = format!("row-{index}");
         let marker = div().absolute().left(theme.ui(14.)).right(theme.ui(14.)).h(px(3.)).rounded(px(2.));
         let marker = if edges.first { marker.top(px(0.)) } else { marker.bottom(px(0.)) };
+        let amount = self.amount;
+        let faded = 1.0 - amount;
+        // A split tab's box: absent when expanded, an accent-tinted box around the heading and its panes when compact.
+        let content = match session_tree::tab_group_edges(&self.rows, index) {
+            Some(tab) => div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .ml(theme.ui(2. * amount))
+                .mr(theme.ui(2. * amount))
+                .when(amount > 0.0, |boxed| {
+                    boxed
+                        .border_l_1()
+                        .border_r_1()
+                        .border_color(rgba(with_opacity(theme.tokens.accent, 0.55 * amount)))
+                        .bg(rgba(with_opacity(theme.tokens.accent, 0.16 * amount)))
+                        .when(tab.first, |boxed| boxed.border_t_1().rounded_t(px(RADIUS)))
+                        .when(tab.last, |boxed| boxed.border_b_1().rounded_b(px(RADIUS)))
+                })
+                .child(content)
+                .into_any_element(),
+            None => content.into_any_element(),
+        };
+        // The project group's border and tint fade out with the compact column.
+        let group_alpha = |color: u32, opacity: f32| rgba(with_opacity(color, opacity * faded));
         let group = div()
             .flex_1()
             .min_h_0()
@@ -945,8 +969,8 @@ impl SidebarView {
             .flex_col()
             .border_l_1()
             .border_r_1()
-            .border_color(rgb(theme.tokens.line))
-            .bg(rgba(group_tint(theme.tokens.text)))
+            .border_color(group_alpha(theme.tokens.line, 1.0))
+            .bg(rgba((theme.tokens.text << 8) | ((group_tint(theme.tokens.text) & 0xff) as f32 * faded).round() as u32))
             .when(edges.first, |group| group.border_t_1().rounded_t(px(RADIUS)))
             .when(edges.last, |group| group.border_b_1().rounded_b(px(RADIUS)))
             .child(content);
@@ -955,12 +979,24 @@ impl SidebarView {
             .relative()
             .h(theme.ui(ROW_HEIGHT))
             .w_full()
-            .px(theme.ui(6.))
+            .px(theme.ui(6. * faded))
             .flex()
             .flex_col()
             // The whole gap between groups is in the heading row, which has no fill.
             .when(edges.first, |row| row.pt(theme.ui(8.)))
             .child(group)
+            // Compact: a hairline in that gap above every project's dot but the first.
+            .when(matches!(self.rows[index].kind, RowKind::Project { .. }) && index > 0 && amount > 0.0, |row| {
+                row.child(
+                    div()
+                        .absolute()
+                        .top(theme.ui(3.))
+                        .left(theme.ui(12.))
+                        .right(theme.ui(12.))
+                        .h(px(1.))
+                        .bg(rgba(with_opacity(theme.tokens.line, amount))),
+                )
+            })
             .when_some(landings, |row, (upper, lower)| row.children(upper).children(lower))
             .when(target.is_some(), |row| {
                 row.child(
@@ -1035,13 +1071,15 @@ impl SidebarView {
         let menu_key = key.clone();
         let (middle_down, middle_up) = (key.clone(), key.clone());
         let theme = theme(cx).clone();
+        let amount = self.amount;
+        let faded = 1.0 - amount;
         let base = div()
             .id(index)
             .flex_1()
             .min_h_0()
             .w_full()
-            .pl(theme.ui(SESSION_INSET) + px(PILL_INSET))
-            .pr(theme.ui(HEADING_INSET) + px(PILL_INSET))
+            .pl(theme.ui(lerp(SESSION_INSET, TILE_EDGE, amount)) + px(PILL_INSET))
+            .pr(theme.ui(lerp(HEADING_INSET, TILE_EDGE, amount)) + px(PILL_INSET))
             .py(px(ROW_PAD_Y + PILL_INSET))
             .flex()
             .flex_row()
@@ -1094,7 +1132,8 @@ impl SidebarView {
         let pill = |fill: Option<u32>| {
             div()
                 .size_full()
-                .px(theme.ui(12.))
+                .px(theme.ui(12. * faded))
+                .relative()
                 .overflow_hidden()
                 .flex()
                 .flex_row()
@@ -1102,6 +1141,8 @@ impl SidebarView {
                 .gap_2()
                 .rounded(px(RADIUS))
                 .cursor_pointer()
+                // The panes of a split tab are a little smaller than the other tiles when compact.
+                .when(row.in_tab, |pill| pill.h(theme.ui(ROW_HEIGHT - 8. - 4. * amount)))
                 .map(|pill| match fill {
                     Some(fill) => pill.bg(rgb(fill)),
                     None => pill.hover(|style| style.bg(rgb(theme.tokens.raised))),
@@ -1120,21 +1161,26 @@ impl SidebarView {
         .map(|tint| tint.value(theme.preset));
         let lined = |pill: gpui::Div| match (line, pane_color) {
             (Some(color), marker) => pill
-                .relative()
-                .pl(theme.ui(35.))
-                .child(side_line(color, &theme).left(theme.ui(9.)))
-                .children(marker.map(|marker| pane_marker(marker, 17., &theme))),
-            (None, Some(marker)) => pill.relative().pl(theme.ui(23.)).child(pane_marker(marker, 9., &theme)),
-            (None, None) => pill.pl(theme.ui(17.)),
+                .pl(theme.ui(35. * faded))
+                .child(side_line(color, &theme).left(theme.ui(9.)).opacity(faded))
+                .children(marker.map(|marker| pane_marker(marker, lerp(17., 4., amount), &theme))),
+            (None, Some(marker)) => {
+                pill.pl(theme.ui(23. * faded)).child(pane_marker(marker, lerp(9., 4., amount), &theme))
+            }
+            (None, None) => pill.pl(theme.ui(17. * faded)),
         };
+        // What a row says in words (marks, title, notes, badge); it fades out as the column closes.
+        let line_content =
+            |faded: f32| div().flex_1().min_w_0().flex().flex_row().items_center().gap_2().opacity(faded);
         let title = |text: String| div().flex_1().min_w_0().truncate().child(text);
         let aside =
             |text: String, ink: u32| div().flex_none().text_xs().text_color(rgba((ink << 8) | 0xcc)).child(text);
-        let guide = row
-            .in_tab
-            .then(|| div().absolute().left(theme.ui(30.)).top_0().bottom_0().w(px(2.)).bg(rgb(theme.tokens.line)));
-        let base =
-            base.when(row.in_tab, |base| base.relative().pl(theme.ui(TAB_INSET) + px(PILL_INSET))).children(guide);
+        let guide = row.in_tab.then(|| {
+            div().absolute().left(theme.ui(30.)).top_0().bottom_0().w(px(2.)).opacity(faded).bg(rgb(theme.tokens.line))
+        });
+        let base = base
+            .when(row.in_tab, |base| base.relative().pl(theme.ui(lerp(TAB_INSET, TILE_EDGE, amount)) + px(PILL_INSET)))
+            .children(guide);
         // A row that stands for a pane of the layout can be picked up and dropped on a pane or on the sidebar.
         let dragged_pane = match &row.kind {
             RowKind::Session { session, leaf: Some(leaf), .. } => {
@@ -1166,7 +1212,7 @@ impl SidebarView {
                 });
                 // The name starts further left than the sessions' bars, so the heading reads as their parent; the
                 // project dot and the fold chevron sit together at the right, joined to the name by a hairline.
-                base.pl(theme.ui(HEADING_INSET) + px(PILL_INSET))
+                base.pl(theme.ui(lerp(HEADING_INSET, TILE_EDGE, amount)) + px(PILL_INSET))
                     .on_drag(dragged, |dragged: &DraggedProject, _offset, _window, cx: &mut App| {
                         cx.new(|_| dragged.clone())
                     })
@@ -1182,6 +1228,7 @@ impl SidebarView {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .when_some(color, |name, color| name.text_color(rgb(color)))
                                     .when(!rule, |name| name.flex_1())
+                                    .opacity(faded)
                                     .child(label.clone()),
                             )
                             // A hairline in the project color joins the name to the dot and the chevron.
@@ -1191,18 +1238,31 @@ impl SidebarView {
                                         .flex_1()
                                         .min_w_0()
                                         .h(px(1.))
+                                        .opacity(faded)
                                         .bg(rgba((color.unwrap_or(theme.tokens.muted) << 8) | 0x61)),
                                 )
                             })
-                            .children(
-                                color.map(|color| div().flex_none().size(theme.ui(8.)).rounded(px(3.)).bg(rgb(color))),
-                            )
+                            // The dot keeps its place in the line (an empty slot) and is drawn over it, so that it can slide
+                            // to the column's center when compact.
+                            .child(div().flex_none().size(theme.ui(8.)))
                             .child(
                                 svg()
                                     .path(if *expanded { CHEVRON_DOWN_ICON } else { CHEVRON_RIGHT_ICON })
                                     .flex_none()
                                     .size(theme.ui(14.))
+                                    .opacity(faded)
                                     .text_color(rgb(theme.tokens.muted)),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .right(theme.ui(26. - 8. * amount))
+                                    .top(relative(0.5))
+                                    .mt(theme.ui(-4.))
+                                    .size(theme.ui(8.))
+                                    .rounded(px(3.))
+                                    .bg(rgb(color.unwrap_or(theme.tokens.muted)))
+                                    .when(color.is_none(), |dot| dot.opacity(amount)),
                             ),
                     )
             }
@@ -1227,21 +1287,38 @@ impl SidebarView {
                     host: session.host.remote_name().map(String::from),
                     folder: Some(display_path(&session.cwd, std::env::home_dir().as_deref())),
                 };
+                let (container, remote) = (session.container.is_some(), !session.host.is_local());
+                let letter = tile_letter(session_title(session)).to_string();
                 base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
                         .when(sweeping(*tone, self.animate, true), |pill| {
                             pill.relative().child(working_sweep(("sweep-row", index), px(RADIUS), &theme))
                         })
                         .text_color(rgb(colors.ink))
-                        .children(lead_mark(*tone, &colors, &theme))
                         .child(
-                            title(session_title(session).to_string())
-                                .when(*tone == Tone::NeedsInput, |title| title.font_weight(FontWeight::SEMIBOLD)),
+                            line_content(faded)
+                                .children(lead_mark(*tone, &colors, &theme))
+                                .child(
+                                    title(session_title(session).to_string())
+                                        .when(*tone == Tone::NeedsInput, |title| {
+                                            title.font_weight(FontWeight::SEMIBOLD)
+                                        }),
+                                )
+                                .when(container, |line| line.child(container_icon(colors.ink, &theme)))
+                                .when(remote, |line| line.child(ssh_icon(colors.ink, &theme)))
+                                .children(close)
+                                .children(project()),
                         )
-                        .when(session.container.is_some(), |pill| pill.child(container_icon(colors.ink, &theme)))
-                        .when(!session.host.is_local(), |pill| pill.child(ssh_icon(colors.ink, &theme)))
-                        .children(close)
-                        .children(project()),
+                        .when(amount > 0.0, |pill| {
+                            pill.child(tile_glyph(letter.into_any_element(), amount, &theme)).child(corner_marks(
+                                lead_mark(*tone, &colors, &theme),
+                                container,
+                                remote,
+                                colors.ink,
+                                amount,
+                                &theme,
+                            ))
+                        }),
                 )
             }
             RowKind::Pane { entry, tone, note } if !entry.claude => {
@@ -1257,14 +1334,27 @@ impl SidebarView {
                 .child(
                     lined(pill(None))
                         .text_color(rgb(if *tone == Tone::Closed { theme.tokens.muted } else { theme.tokens.text }))
-                        .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(">_"))
                         .child(
-                            self.rename_field(RenameTarget::Pane(entry.leaf), &theme, cx)
-                                .unwrap_or_else(|| title(entry.title.clone())),
+                            line_content(faded)
+                                .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(">_"))
+                                .child(
+                                    self.rename_field(RenameTarget::Pane(entry.leaf), &theme, cx)
+                                        .unwrap_or_else(|| title(entry.title.clone())),
+                                )
+                                .when(!entry.host.is_local(), |line| line.child(ssh_icon(theme.tokens.muted, &theme)))
+                                .children(project())
+                                .children(close),
                         )
-                        .when(!entry.host.is_local(), |pill| pill.child(ssh_icon(theme.tokens.muted, &theme)))
-                        .children(project())
-                        .children(close),
+                        .when(amount > 0.0, |pill| {
+                            pill.child(tile_glyph(">_".into_any_element(), amount, &theme)).child(corner_marks(
+                                None,
+                                false,
+                                !entry.host.is_local(),
+                                theme.tokens.muted,
+                                amount,
+                                &theme,
+                            ))
+                        }),
                 )
             }
             RowKind::Pane { entry, tone, note } => {
@@ -1284,11 +1374,24 @@ impl SidebarView {
                             pill.relative().child(working_sweep(("sweep-row", index), px(RADIUS), &theme))
                         })
                         .text_color(rgb(colors.ink))
-                        .children(lead_mark(*tone, &colors, &theme))
-                        .child(title("New session".into()))
-                        .when(!entry.host.is_local(), |pill| pill.child(ssh_icon(colors.ink, &theme)))
-                        .children(project())
-                        .children(close),
+                        .child(
+                            line_content(faded)
+                                .children(lead_mark(*tone, &colors, &theme))
+                                .child(title("New session".into()))
+                                .when(!entry.host.is_local(), |line| line.child(ssh_icon(colors.ink, &theme)))
+                                .children(project())
+                                .children(close),
+                        )
+                        .when(amount > 0.0, |pill| {
+                            pill.child(tile_glyph("N".into_any_element(), amount, &theme)).child(corner_marks(
+                                lead_mark(*tone, &colors, &theme),
+                                false,
+                                !entry.host.is_local(),
+                                colors.ink,
+                                amount,
+                                &theme,
+                            ))
+                        }),
                 )
             }
             RowKind::Tab { title: tab_title, panes, index: tab, first, .. } => {
@@ -1297,16 +1400,50 @@ impl SidebarView {
                     DraggedTab { first: *first, title: tab_title.clone() },
                     |dragged: &DraggedTab, _offset, _window, cx: &mut App| cx.new(|_| dragged.clone()),
                 )
+                .when(amount >= 1.0, |base| {
+                    base.tooltip(hover_card::tooltip(HoverCard {
+                        title: tab_title.clone(),
+                        status: Some(format!("Split tab · {panes} panes")),
+                        dir: None,
+                        container: false,
+                        host: None,
+                        folder: None,
+                    }))
+                })
                 .child(
                     lined(pill(None))
                         .h(theme.ui(28.))
                         .child(
-                            self.rename_field(RenameTarget::Tab(*tab), &theme, cx)
-                                .unwrap_or_else(|| title(tab_title.clone()))
-                                .font_weight(FontWeight::SEMIBOLD),
+                            line_content(faded)
+                                .child(
+                                    self.rename_field(RenameTarget::Tab(*tab), &theme, cx)
+                                        .unwrap_or_else(|| title(tab_title.clone()))
+                                        .font_weight(FontWeight::SEMIBOLD),
+                                )
+                                .child(aside(format!("{panes} panes"), theme.tokens.muted))
+                                .children(close),
                         )
-                        .child(aside(format!("{panes} panes"), theme.tokens.muted))
-                        .children(close),
+                        .when(amount > 0.0, |pill| {
+                            // The pane count in a badge that fills with the accent as the column closes.
+                            let badge = div()
+                                .flex_none()
+                                .size(theme.ui(22.))
+                                .rounded(px(7.))
+                                .border_1()
+                                .border_color(rgb(theme.tokens.accent))
+                                .bg(rgba(with_opacity(theme.tokens.accent, amount)))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(theme.ui(12.))
+                                .text_color(rgb(if amount > 0.5 {
+                                    theme.tokens.on_accent
+                                } else {
+                                    theme.tokens.accent
+                                }))
+                                .child(panes.to_string());
+                            pill.child(tile_glyph(badge.into_any_element(), amount, &theme))
+                        }),
                 )
             }
             RowKind::Detail { text, .. } => base.child(
@@ -1339,6 +1476,12 @@ struct SelectionRing {
     /// The selected row, its group edges, the space left of its fill (`HEADING_INSET`, `SESSION_INSET` or `TAB_INSET`)
     /// and the ring color.
     row: Option<(usize, GroupEdges, f32, u32)>,
+    /// How compact the sidebar is drawn.
+    amount: f32,
+    /// The row is inside a split tab's box (compact tiles there are narrower).
+    boxed: bool,
+    /// The row is a pane of a split tab (its tile is a little lower when compact).
+    shrinks: bool,
     /// The theme's UI scale, for the paddings the row itself uses.
     theme: Theme,
 }
@@ -1364,14 +1507,15 @@ impl UniformListDecoration for SelectionRing {
         // the group's top gap and top/bottom border.
         let top = item_height * index + if edges.first { theme.ui(8.) + px(1.) } else { px(0.) };
         let bottom = item_height * (index + 1) - if edges.last { px(1.) } else { px(0.) };
-        let side = theme.ui(6.) + px(1.) + theme.ui(10.) - out;
-        let left = theme.ui(6.) + px(1.) + theme.ui(inset) - out;
+        let (left, side) = ring_insets(inset, self.boxed, self.amount);
+        let (left, side) = (theme.ui(left) - out, theme.ui(side) - out);
+        let shrink = theme.ui(if self.shrinks { 2. * self.amount } else { 0. });
         let ring = div()
             .absolute()
             .left(left)
             .right(side)
-            .top(top + px(ROW_PAD_Y) - out)
-            .h(bottom - top - px(ROW_PAD_Y * 2.) + out * 2.)
+            .top(top + px(ROW_PAD_Y) + shrink - out)
+            .h(bottom - top - px(ROW_PAD_Y * 2.) - shrink * 2. + out * 2.)
             .rounded(px(RADIUS) + out)
             .border_2()
             .border_color(rgb(color));
@@ -1748,6 +1892,11 @@ impl Render for SidebarView {
                                 let edges = session_tree::group_edges(&self.rows, index);
                                 (index, edges, row_inset(&self.rows[index]), theme.selection())
                             }),
+                            amount,
+                            boxed: self
+                                .selected_index()
+                                .is_some_and(|index| session_tree::tab_group_edges(&self.rows, index).is_some()),
+                            shrinks: self.selected_index().is_some_and(|index| self.rows[index].in_tab),
                             theme: theme.clone(),
                         })
                         .track_scroll(&self.scroll)
@@ -1865,6 +2014,73 @@ impl Render for SidebarView {
     }
 }
 
+/// `from` at `amount` 0, `to` at 1.
+fn lerp(from: f32, to: f32, amount: f32) -> f32 {
+    from + (to - from) * amount
+}
+
+/// `color` (`0xRRGGBB`) at `opacity` (0..1) as `rgba` bits.
+fn with_opacity(color: u32, opacity: f32) -> u32 {
+    (color << 8) | (opacity.clamp(0., 1.) * 255.).round() as u32
+}
+
+/// How far in, from the list's left and right edges, the selection ring starts for a row whose fill is `inset` from
+/// its group when expanded, with the sidebar `amount` compact; `boxed` = the row is inside a split tab's box (its tile
+/// is narrower). In `theme.ui` units, before the ring's own width and gap are taken off.
+fn ring_insets(inset: f32, boxed: bool, amount: f32) -> (f32, f32) {
+    let compact = if boxed { 7.0 } else { 4.0 };
+    (lerp(7.0 + inset, compact, amount), lerp(17.0, compact, amount))
+}
+
+/// The marks a compact tile shows in its corners: the unread pin, closed ring or ↗ top right, the container and SSH
+/// icons top left. They fade in with `amount`.
+fn corner_marks(
+    lead: Option<gpui::Div>,
+    container: bool,
+    ssh: bool,
+    ink: u32,
+    amount: f32,
+    theme: &Theme,
+) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right_0()
+        .opacity(amount)
+        .children(lead.map(|mark| mark.absolute().top(theme.ui(2.)).right(theme.ui(4.))))
+        .child(
+            div()
+                .absolute()
+                .top(theme.ui(2.))
+                .left(theme.ui(12.))
+                .flex()
+                .flex_row()
+                .gap(px(2.))
+                .when(container, |icons| icons.child(container_icon(ink, theme).size(theme.ui(10.))))
+                .when(ssh, |icons| icons.child(ssh_icon(ink, theme).size(theme.ui(10.)))),
+        )
+}
+
+/// What a compact tile shows in its middle, centered: the title's letter, `>_` or the pane count. It fades in with
+/// `amount`.
+fn tile_glyph(content: AnyElement, amount: f32, theme: &Theme) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .opacity(amount)
+        .font_weight(FontWeight::BOLD)
+        .text_size(theme.ui(15.))
+        .child(content)
+}
+
 /// The filter text that applies when the sidebar is `amount` compact: none once it is past half way, the text itself
 /// is kept for when it expands again.
 fn applied_filter(text: &str, amount: f32) -> &str {
@@ -1874,6 +2090,25 @@ fn applied_filter(text: &str, amount: f32) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ring_insets_follow_the_amount() {
+        // Expanded: the existing values (group padding + border + the row's inset on the left, 17 on the right).
+        assert_eq!(ring_insets(SESSION_INSET, false, 0.0), (22.0, 17.0));
+        assert_eq!(ring_insets(TAB_INSET, true, 0.0), (44.0, 17.0));
+        // Compact: 6 px from the column's edge (9 px inside a split tab's box), less the row's own `PILL_INSET`.
+        assert_eq!(ring_insets(SESSION_INSET, false, 1.0), (4.0, 4.0));
+        assert_eq!(ring_insets(TAB_INSET, true, 1.0), (7.0, 7.0));
+        assert_eq!(ring_insets(SESSION_INSET, false, 0.5), (13.0, 10.5));
+    }
+
+    #[test]
+    fn colors_fade_with_their_opacity() {
+        assert_eq!(with_opacity(0x112233, 1.0), 0x112233ff);
+        assert_eq!(with_opacity(0x112233, 0.0), 0x11223300);
+        assert_eq!(with_opacity(0x112233, 0.5), 0x11223380);
+        assert_eq!(lerp(10.0, 3.0, 0.5), 6.5);
+    }
 
     #[test]
     fn the_filter_is_ignored_while_compact_and_kept_for_later() {

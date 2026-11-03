@@ -5,7 +5,11 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Compact sidebar** - A button left of the filter field (and `Ctrl+Shift+B`) collapses the sidebar to a thin icon column and expands it again, with a short animation. The compact column still shows every session's status color and the first letter of its title, the project dots, split tabs (their pane count in a box around their panes), the tab colors, the unread, closed and elsewhere marks, the SSH hosts count, Recent sessions and the New Claude / New terminal buttons. Hover a tile for its details.
+
 ### Changed
+- **Sidebar shortcut** - `Ctrl+Shift+B` no longer hides the sidebar; it switches between the full sidebar and the compact column. "Sidebar at start" in Settings > Window is now Remember / Expanded / Compact (an old "Hidden" counts as Compact).
 - **New session: host first** - "New Claude session" and "New terminal" ask which machine to use first, connect an SSH host right there, then list only that host's folders. Browse… opens a folder browser on an SSH host, with an Open here button; on this machine it still opens the system folder dialog.
 
 ### Fixed

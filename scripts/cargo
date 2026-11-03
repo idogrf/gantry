@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Run cargo for Gantry the way every session on this machine must: one build at a time (a machine-wide lock shared
 # by all checkouts and worktrees), capped in memory and CPU at the lowest priority. A worktree builds in its own
-# target/, seeded once with a copy-on-write (btrfs reflink) copy of the main checkout's compiled dependencies, so it
-# does not compile GPUI from scratch. (Sharing one target/ between checkouts is wrong: cargo then mistakes the other
-# checkout's build of a workspace crate for an up-to-date one.)
+# target/, seeded once with a copy of the main checkout's compiled dependencies (a copy-on-write reflink where the
+# filesystem supports one, such as btrfs; a full copy otherwise, such as ext4), so it does not compile GPUI from
+# scratch. (Sharing one target/ between checkouts is wrong: cargo then mistakes the other checkout's build of a
+# workspace crate for an up-to-date one.)
 # Usage: scripts/cargo <cargo arguments>, e.g. scripts/cargo test -p daemon
 set -euo pipefail
 
@@ -21,12 +22,12 @@ fi
 if [ "$here" != "$common" ] && [ -z "${CARGO_TARGET_DIR:-}" ]; then
     target="$(git rev-parse --show-toplevel)/target"
     if [ ! -d "$target/debug/deps" ] && [ -d "$main_target/debug/deps" ]; then
-        echo "scripts/cargo: seeding $target from the main checkout's build (reflink)…" >&2
+        echo "scripts/cargo: seeding $target from the main checkout's build (reflink if supported, else a copy)…" >&2
         mkdir -p "$target/debug"
         for part in deps build .fingerprint; do
             [ -d "$main_target/debug/$part" ] || continue
-            cp -a --reflink=always "$main_target/debug/$part" "$target/debug/" \
-                || echo "scripts/cargo: no reflink copy of $part; it builds from scratch" >&2
+            cp -a --reflink=auto "$main_target/debug/$part" "$target/debug/" \
+                || echo "scripts/cargo: could not copy $part; it builds from scratch" >&2
         done
     fi
 fi

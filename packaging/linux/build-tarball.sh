@@ -6,20 +6,21 @@ set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 podman=${PODMAN:-podman}
 toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$root/rust-toolchain.toml")
-# A worktree's first release build starts from a copy-on-write (reflink) copy of the main checkout's compiled
-# dependencies, like scripts/cargo does for debug builds. The workspace crates' fingerprints are dropped: the container
-# mounts every checkout at /src, so their paths match and a copied fingerprint could look fresh when it is not.
+# A worktree's first release build starts from a copy of the main checkout's compiled dependencies (a reflink where
+# the filesystem supports one, else a full copy), like scripts/cargo does for debug builds. The workspace crates'
+# fingerprints are dropped: the container mounts every checkout at /src, so their paths match and a copied
+# fingerprint could look fresh when it is not.
 common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)
 here=$(git -C "$root" rev-parse --path-format=absolute --git-dir)
 main_target="$(dirname "$common")/target/ubuntu-22.04"
 target="$root/target/ubuntu-22.04"
 if [ "$here" != "$common" ] && [ ! -d "$target/release/deps" ] && [ -d "$main_target/release/deps" ]; then
-  echo "build-tarball.sh: seeding $target from the main checkout's build (reflink)..." >&2
+  echo "build-tarball.sh: seeding $target from the main checkout's build (reflink if supported, else a copy)..." >&2
   mkdir -p "$target/release"
   for part in deps build .fingerprint; do
     [ -d "$main_target/release/$part" ] || continue
-    cp -a --reflink=always "$main_target/release/$part" "$target/release/" ||
-      echo "build-tarball.sh: no reflink copy of $part; it builds from scratch" >&2
+    cp -a --reflink=auto "$main_target/release/$part" "$target/release/" ||
+      echo "build-tarball.sh: could not copy $part; it builds from scratch" >&2
   done
   for crate in "$root"/crates/*/; do
     rm -rf "$target/release/.fingerprint/$(basename "$crate")"-*

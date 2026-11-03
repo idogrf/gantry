@@ -1,10 +1,10 @@
-use super::{PANE_GAP, PaneAnim, WorkspaceView};
+use super::{PANE_GAP, PaneAnim, SIDEBAR_EDGE, WorkspaceView};
 use std::time::{Duration, Instant};
 
 use app_core::split_tree::{self, Axis, NodeId, PANE_ANIM_MS, Rect, drop_zone};
 use gpui::{
-    App, Context, Div, DragMoveEvent, FontWeight, MouseButton, MouseMoveEvent, Window, div, prelude::*, px, relative,
-    rgb, rgba,
+    App, Context, Div, DragMoveEvent, FontWeight, MouseButton, MouseMoveEvent, Pixels, Size, Window, div, prelude::*,
+    px, relative, rgb, rgba,
 };
 
 use crate::pane_drag::{DraggedPane, PaneDrop, preview_for, preview_label};
@@ -208,6 +208,17 @@ pub(super) fn content_frame(end: Rect, width: f32, height: f32) -> [f32; 4] {
     [CARD_PAD, CARD_PAD, end.w * width - inset, end.h * height - inset]
 }
 
+/// The tab content's width when the sidebar is `sidebar` wide in a body `body` wide: what is left after the sidebar,
+/// its hairline and the panes' own gap.
+pub(super) fn content_width_beside(body: Pixels, sidebar: Pixels) -> Pixels {
+    (body - sidebar - px(SIDEBAR_EDGE) - px(PANE_GAP)).max(px(0.))
+}
+
+/// The window changed size since `previous` (a zero `previous` is the first frame, not a resize).
+pub(super) fn window_resized(previous: Size<Pixels>, now: Size<Pixels>) -> bool {
+    previous != Size::default() && previous != now
+}
+
 /// How far a pane animation is after `elapsed`: 0 at the start, 1 (or more) when it is done.
 pub(super) fn pane_progress(elapsed: Duration) -> f32 {
     elapsed.as_secs_f32() * 1000.0 / PANE_ANIM_MS as f32
@@ -243,6 +254,23 @@ mod tests {
     fn start_rects_without_the_target_adds_nothing() {
         let drawn = [(1, Rect::UNIT)];
         assert_eq!(start_rects(&drawn, 7, 8, Axis::Horizontal), drawn.to_vec());
+    }
+
+    #[test]
+    fn content_width_beside_takes_the_sidebar_its_hairline_and_the_panes_gap() {
+        use gpui::px;
+        let beside = content_width_beside(px(1000.), px(280.));
+        assert_eq!(beside, px(1000. - 280. - super::super::SIDEBAR_EDGE - super::super::PANE_GAP));
+        assert_eq!(content_width_beside(px(100.), px(280.)), px(0.));
+    }
+
+    #[test]
+    fn only_a_changed_known_window_size_counts_as_a_resize() {
+        use gpui::size;
+        let (a, b) = (size(gpui::px(800.), gpui::px(600.)), size(gpui::px(900.), gpui::px(600.)));
+        assert!(window_resized(a, b));
+        assert!(!window_resized(a, a));
+        assert!(!window_resized(Size::default(), a), "the first frame is not a resize");
     }
 
     #[test]

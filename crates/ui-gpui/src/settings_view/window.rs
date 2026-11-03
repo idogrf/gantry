@@ -19,9 +19,9 @@ const RESTORE: [(bool, &str, &str); 2] = [
 ];
 
 const SIDEBAR: [(SidebarAtStart, &str, &str); 3] = [
-    (SidebarAtStart::Remember, "Remember", "As you left it. The sidebar shortcut toggles it any time."),
-    (SidebarAtStart::Shown, "Shown", "Always open when Gantry starts."),
-    (SidebarAtStart::Hidden, "Hidden", "Always closed when Gantry starts."),
+    (SidebarAtStart::Remember, "Remember", "As you left it. The sidebar shortcut or button switches it any time."),
+    (SidebarAtStart::Expanded, "Expanded", "Always the full sidebar when Gantry starts."),
+    (SidebarAtStart::Compact, "Compact", "Always the thin icon column when Gantry starts."),
 ];
 
 impl SettingsView {
@@ -199,8 +199,8 @@ mod tests {
 
     #[test]
     fn every_choice_has_its_own_description() {
-        assert_eq!(SIDEBAR.map(|(_, label, _)| label), ["Remember", "Shown", "Hidden"]);
-        assert_eq!(SIDEBAR[2].2, "Always closed when Gantry starts.");
+        assert_eq!(SIDEBAR.map(|(_, label, _)| label), ["Remember", "Expanded", "Compact"]);
+        assert_eq!(SIDEBAR[2].2, "Always the thin icon column when Gantry starts.");
         assert_eq!(RESTORE[0].1, "Restore");
     }
 }

@@ -171,41 +171,42 @@ pub struct ClaudeDir {
     pub color: Option<ProjectColor>,
 }
 
-/// Whether the sidebar is shown when Gantry starts.
+/// How the sidebar looks when Gantry starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SidebarAtStart {
     /// Use the saved layout's state.
     #[default]
     Remember,
-    /// Always shown.
-    Shown,
-    /// Always hidden.
-    Hidden,
+    /// Always the full sidebar.
+    Expanded,
+    /// Always the thin icon column.
+    Compact,
 }
 
 impl SidebarAtStart {
-    /// Whether the sidebar is visible at start, given whether the saved layout had it visible.
-    pub fn visible(self, saved: bool) -> bool {
+    /// Whether the sidebar starts compact, given whether the saved layout had it compact.
+    pub fn compact(self, saved: bool) -> bool {
         match self {
             SidebarAtStart::Remember => saved,
-            SidebarAtStart::Shown => true,
-            SidebarAtStart::Hidden => false,
+            SidebarAtStart::Expanded => false,
+            SidebarAtStart::Compact => true,
         }
     }
 
     fn name(self) -> &'static str {
         match self {
             SidebarAtStart::Remember => "remember",
-            SidebarAtStart::Shown => "shown",
-            SidebarAtStart::Hidden => "hidden",
+            SidebarAtStart::Expanded => "expanded",
+            SidebarAtStart::Compact => "compact",
         }
     }
 
+    /// The names of earlier versions, `shown` and `hidden`, still read.
     fn from_name(name: &str) -> Option<Self> {
         match name {
             "remember" => Some(SidebarAtStart::Remember),
-            "shown" => Some(SidebarAtStart::Shown),
-            "hidden" => Some(SidebarAtStart::Hidden),
+            "expanded" | "shown" => Some(SidebarAtStart::Expanded),
+            "compact" | "hidden" => Some(SidebarAtStart::Compact),
             _ => None,
         }
     }
@@ -1480,7 +1481,7 @@ mod tests {
         settings.window = WindowSettings {
             restore_layout: false,
             resume_sessions: false,
-            sidebar_at_start: SidebarAtStart::Hidden,
+            sidebar_at_start: SidebarAtStart::Compact,
             scrollback: 50000,
             right_to_left: false,
         };
@@ -1515,12 +1516,30 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_at_start_overrides_the_saved_state_only_when_asked() {
+    fn sidebar_at_start_compact_overrides_the_saved_state_only_when_asked() {
         for saved in [true, false] {
-            assert_eq!(SidebarAtStart::Remember.visible(saved), saved);
-            assert!(SidebarAtStart::Shown.visible(saved));
-            assert!(!SidebarAtStart::Hidden.visible(saved));
+            assert_eq!(SidebarAtStart::Remember.compact(saved), saved);
+            assert!(!SidebarAtStart::Expanded.compact(saved));
+            assert!(SidebarAtStart::Compact.compact(saved));
         }
+    }
+
+    #[test]
+    fn sidebar_at_start_reads_old_names() {
+        let read = |name: &str| {
+            parse(&format!(r#"{{"window": {{"sidebarAtStart": "{name}"}}}}"#)).settings.unwrap().window.sidebar_at_start
+        };
+        assert_eq!(read("shown"), SidebarAtStart::Expanded);
+        assert_eq!(read("hidden"), SidebarAtStart::Compact);
+        assert_eq!(read("expanded"), SidebarAtStart::Expanded);
+        assert_eq!(read("compact"), SidebarAtStart::Compact);
+    }
+
+    #[test]
+    fn sidebar_at_start_writes_new_names() {
+        assert_eq!(SidebarAtStart::Expanded.name(), "expanded");
+        assert_eq!(SidebarAtStart::Compact.name(), "compact");
+        assert_eq!(SidebarAtStart::Remember.name(), "remember");
     }
 
     #[test]

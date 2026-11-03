@@ -377,6 +377,16 @@ pub fn group_edges(rows: &[Row], index: usize) -> GroupEdges {
     GroupEdges { first: heading(&rows[index]), last: rows.get(index + 1).is_none_or(heading) }
 }
 
+/// The edges of the split tab `rows[index]` belongs to, for drawing its box in segments: the tab's heading row (`first`)
+/// and the panes listed under it (`last` on the final one). `None` for every other row.
+pub fn tab_group_edges(rows: &[Row], index: usize) -> Option<GroupEdges> {
+    let heading = matches!(rows[index].kind, RowKind::Tab { .. });
+    if !heading && !rows[index].in_tab {
+        return None;
+    }
+    Some(GroupEdges { first: heading, last: rows.get(index + 1).is_none_or(|next| !next.in_tab) })
+}
+
 /// What a row shows.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RowKind {
@@ -1870,6 +1880,26 @@ mod tests {
         let rows = fixture.rows();
         assert_eq!(keys(&rows), vec![RowKey::Project("/r/alpha".into()), RowKey::Tab(1), RowKey::Leaf(2)]);
         assert_eq!(rows[2].project_label.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn tab_group_edges_marks_a_split_tab_and_its_panes() {
+        let mut fixture =
+            Fixture::of(vec![], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/alpha"), shell_pane(3, "/r/alpha")]);
+        fixture.tabs = vec![tab(0, 2, &[2, 1]), tab(1, 3, &[3])];
+        let rows = fixture.rows();
+        let edges: Vec<Option<(bool, bool)>> =
+            (0..rows.len()).map(|i| tab_group_edges(&rows, i)).map(|e| e.map(|e| (e.first, e.last))).collect();
+        assert_eq!(edges, vec![None, None, Some((true, false)), Some((false, false)), Some((false, true))]);
+    }
+
+    #[test]
+    fn a_split_tab_at_the_end_of_the_list_closes_its_box() {
+        let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/alpha")]);
+        fixture.tabs = vec![tab(0, 2, &[1, 2])];
+        let rows = fixture.rows();
+        let last = rows.len() - 1;
+        assert_eq!(tab_group_edges(&rows, last).map(|e| e.last), Some(true));
     }
 
     #[test]

@@ -108,6 +108,8 @@ pub enum SidebarEvent {
     OrderChanged(SidebarOrder),
     /// Open the recent sessions pop-up.
     OpenRecents,
+    /// The toggle button was pressed: collapse the sidebar to its compact column, or expand it.
+    ToggleCompact,
     /// Give keyboard focus back to the pane.
     Dismiss,
     /// The Settings row was clicked: show Settings.
@@ -195,6 +197,8 @@ pub struct SidebarView {
     hosts_fold: HostsFold,
     /// What a middle press started on, until the button is released: a row, or the Settings row (`None`).
     middle_pressed: Option<Option<RowKey>>,
+    /// How compact the sidebar is drawn: 0 = expanded, 1 = the compact column, between while it animates.
+    amount: f32,
     _refresh: Task<()>,
 }
 
@@ -252,10 +256,19 @@ impl SidebarView {
             hosts: Vec::new(),
             hosts_fold: HostsFold::new(false),
             middle_pressed: None,
+            amount: 0.0,
             _refresh: refresh,
         };
         sidebar.rebuild(cx);
         sidebar
+    }
+
+    /// Draw the sidebar `amount` of the way to its compact column (0 = expanded, 1 = compact).
+    pub fn set_amount(&mut self, amount: f32, cx: &mut Context<Self>) {
+        if self.amount != amount {
+            self.amount = amount;
+            cx.notify();
+        }
     }
 
     /// The project a directory belongs to (its git repository, else the directory).

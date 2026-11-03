@@ -209,6 +209,18 @@ struct PanelAnim {
     opening: bool,
 }
 
+/// The sidebar collapsing to its compact column or expanding again, from `started`.
+struct SidebarAnim {
+    started: Instant,
+    /// How compact it was when this began (0 = expanded, 1 = compact); a reversal starts where the last one was.
+    from: f32,
+    /// Where it ends.
+    to: f32,
+    /// The tab content's width once the animation is over. The panes are laid out at this width the whole time, in a
+    /// clipped box, so their terminals are resized once per toggle and not on every frame.
+    content_width: Pixels,
+}
+
 /// Now, in seconds since the Unix epoch.
 fn unix_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
@@ -412,6 +424,8 @@ pub struct WorkspaceView {
     git_panel_open: bool,
     /// The panel sliding in or out.
     panel_anim: Option<PanelAnim>,
+    /// The sidebar is collapsing or expanding.
+    sidebar_anim: Option<SidebarAnim>,
     /// The panel's width when open, in px (0 until the tab content has been measured).
     panel_full: f32,
     /// The panel's tab.
@@ -526,6 +540,8 @@ impl WorkspaceView {
         }
         let sidebar = cx.new(SidebarView::new);
         sidebar.update(cx, |sidebar, _| sidebar.set_hosts_collapsed(restored.workspace.sidebar.hosts_collapsed));
+        sidebar
+            .update(cx, |sidebar, cx| sidebar.set_amount(f32::from(u8::from(restored.workspace.sidebar.compact)), cx));
         sidebar.update(cx, |sidebar, cx| sidebar.set_saved_order(restored.workspace.sidebar_order.clone(), cx));
         let sidebar_events = cx.subscribe_in(&sidebar, window, |this, _, event: &SidebarEvent, window, cx| {
             this.on_sidebar_event(event.clone(), window, cx)
@@ -639,6 +655,7 @@ impl WorkspaceView {
             git: GitRepos::default(),
             git_panel_open: false,
             panel_anim: None,
+            sidebar_anim: None,
             panel_full: 0.0,
             git_tab: PanelTab::Changes,
             git_page: None,

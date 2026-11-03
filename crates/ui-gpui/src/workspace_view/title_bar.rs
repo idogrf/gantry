@@ -2,6 +2,7 @@ use super::{OpenSettings, SIDEBAR_EDGE, WorkspaceView};
 use std::time::Duration;
 
 use app_core::release::{self, CheckStatus, Inline, NotesBlock, Online, Release};
+use app_core::sidebar_compact;
 use app_core::version::{self, Update, Version};
 use daemon::paths::{Paths, current_profile};
 use gpui::{
@@ -162,23 +163,24 @@ impl WorkspaceView {
             .border_color(rgb(theme.tokens.line))
             .text_sm()
             .map(|bar| {
-                // The brand keeps the sidebar's width; the focused session starts where the panes do.
+                // The brand keeps the sidebar's width (so the logo alone shows when it is compact); the focused
+                // session starts where the panes do.
+                let amount = self.sidebar_amount();
+                let width = sidebar_compact::width(sidebar.width, amount);
                 let brand = div()
                     .id("brand")
                     .flex_none()
                     .h_full()
+                    .w(theme.ui(width) + px(SIDEBAR_EDGE))
+                    .pl(theme.ui(17.))
+                    .overflow_hidden()
                     .flex()
                     .items_center()
                     .gap(theme.ui(8.))
                     .font_weight(FontWeight::BOLD)
                     .child(img(LOGO).flex_none().size(theme.ui(22.)))
-                    .child("Gantry");
-                if !sidebar.compact {
-                    let brand = brand.w(theme.ui(sidebar.width) + px(SIDEBAR_EDGE)).pl(theme.ui(18.));
-                    bar.child(if client_decorations { moves_window(brand) } else { brand })
-                } else {
-                    bar.pl_2().child(if client_decorations { moves_window(brand) } else { brand })
-                }
+                    .child(div().flex_none().whitespace_nowrap().opacity(1. - amount).child("Gantry"));
+                bar.child(if client_decorations { moves_window(brand) } else { brand })
             })
             .child(self.render_title_session(window, cx))
             .child(if client_decorations { moves_window(spacer) } else { spacer })
@@ -361,28 +363,7 @@ impl WorkspaceView {
         let middle = div().min_w_0().flex_shrink(1.).flex().flex_row().items_center().gap(theme.ui(8.));
         let Some(tab) = self.workspace.active_tab().filter(|_| !self.active_tab_off_screen()) else { return middle };
         if tab.settings {
-            // With the sidebar hidden its row is gone, so the bar closes Settings.
-            return middle.font_weight(FontWeight::SEMIBOLD).child("Settings").when(
-                self.workspace.sidebar.compact,
-                |middle| {
-                    middle.child(
-                        div()
-                            .id("close-settings")
-                            .flex_none()
-                            .size(theme.ui(20.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .text_xs()
-                            .font_weight(FontWeight::NORMAL)
-                            .hover(|style| style.bg(rgb(theme.tokens.raised)))
-                            .cursor_pointer()
-                            .child("×")
-                            .on_click(cx.listener(|this, _, window, cx| this.close_settings(window, cx))),
-                    )
-                },
-            );
+            return middle.font_weight(FontWeight::SEMIBOLD).child("Settings");
         }
         let index = self.workspace.active;
         let leaf = tab.focused;

@@ -1,10 +1,14 @@
-use super::{DialogAction, FindSession, OpenRecents, OpenSettings, TakeOverTarget, ToggleSidebar, WorkspaceView};
+use super::{
+    DialogAction, FindSession, OpenRecents, OpenSettings, SidebarAnim, TakeOverTarget, ToggleSidebar, WorkspaceView,
+};
 
 use app_core::attention::AlertKind;
 use app_core::dialogs;
-use gpui::{ClipboardItem, Context, Focusable, MouseButton, MouseMoveEvent, Pixels, Point, Window};
+use app_core::sidebar_compact;
+use gpui::{ClipboardItem, Context, Focusable, MouseButton, MouseMoveEvent, Pixels, Point, Window, px};
 use protocol::host::HostId;
 use protocol::message::SessionState;
+use std::time::Instant;
 
 use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortcut};
 use app_core::session_tree::{Activation, Tone, Unseen, status_tone};
@@ -232,6 +236,7 @@ impl WorkspaceView {
                 self.workspace.sidebar.hosts_collapsed = collapsed;
                 self.save(cx);
             }
+            SidebarEvent::ToggleCompact => self.set_sidebar_compact(!self.workspace.sidebar.compact, window, cx),
             SidebarEvent::AddSshHost => self.open_ssh_wizard(WizardStart::Add, window, cx),
             SidebarEvent::UpdateHost { host, position } => self.click_host_update(&host, position, window, cx),
         }
@@ -239,28 +244,55 @@ impl WorkspaceView {
 
     /// Start the inline rename on the sidebar, showing the sidebar first if it is hidden.
     fn start_rename(&mut self, target: RenameTarget, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self.workspace.sidebar.compact {
-            self.workspace.sidebar.compact = false;
-            self.save(cx);
-            cx.notify();
-        }
+        self.set_sidebar_compact(false, window, cx);
         self.sidebar.update(cx, |sidebar, cx| sidebar.start_rename(target, &name, window, cx));
     }
 
     pub(super) fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
-        let state = &mut self.workspace.sidebar;
-        state.compact = !state.compact;
-        if state.compact {
+        self.set_sidebar_compact(!self.workspace.sidebar.compact, window, cx);
+    }
+
+    /// Collapse the sidebar to its compact column or expand it, with the animation when it is on. Collapsing moves the
+    /// focus to the pane: the filter field it may have had is gone.
+    pub(super) fn set_sidebar_compact(&mut self, compact: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let was = self.workspace.sidebar.compact;
+        if was == compact {
+            return;
+        }
+        let theme = theme(cx).clone();
+        let at = |compact: bool| sidebar_compact::width(self.workspace.sidebar.width, f32::from(u8::from(compact)));
+        // The width the tab content has once this ends: what it has now (or will have when the animation under way
+        // ends) plus what the sidebar gives up or takes.
+        let content_width = self.content_bounds.size.width + theme.ui(at(was)) - theme.ui(at(compact));
+        let animate = cx.global::<SettingsStore>().settings().animate_ui
+            && window.is_window_active()
+            && self.content_bounds.size.width > px(0.);
+        let from = self.sidebar_amount();
+        self.workspace.sidebar.compact = compact;
+        self.sidebar_anim = animate.then(|| SidebarAnim {
+            started: Instant::now(),
+            from,
+            to: f32::from(u8::from(compact)),
+            content_width,
+        });
+        if compact {
             self.focus_current(window, cx);
         }
         self.save(cx);
         cx.notify();
     }
 
+    /// How compact the sidebar is drawn right now: 0 = expanded, 1 = compact, between while it animates.
+    pub(super) fn sidebar_amount(&self) -> f32 {
+        match &self.sidebar_anim {
+            Some(anim) => sidebar_compact::amount(anim.from, anim.to, anim.started.elapsed().as_secs_f32() * 1000.0),
+            None => f32::from(u8::from(self.workspace.sidebar.compact)),
+        }
+    }
+
     pub(super) fn find_session(&mut self, _: &FindSession, window: &mut Window, cx: &mut Context<Self>) {
-        self.workspace.sidebar.compact = false;
+        self.set_sidebar_compact(false, window, cx);
         self.sidebar.focus_handle(cx).focus(window, cx);
-        self.save(cx);
         cx.notify();
     }
 

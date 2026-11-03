@@ -285,6 +285,43 @@ impl SidebarView {
         applied_filter(self.filter.text(), self.amount)
     }
 
+    /// The `>_` button that opens a terminal: `scale` = 1 at full size, 0 collapsed to nothing.
+    fn new_terminal_button(
+        &self,
+        id: &'static str,
+        scale: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .flex_none()
+            .w(theme.ui(36. * scale))
+            .h(theme.ui(36.))
+            .overflow_hidden()
+            .opacity(scale)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(RADIUS))
+            .border_1()
+            .border_color(rgb(theme.tokens.line))
+            .text_color(rgb(theme.tokens.muted))
+            .text_xs()
+            .cursor_pointer()
+            .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.raised)))
+            .child(">_")
+            .tooltip(hover_card::tooltip(HoverCard {
+                title: "New terminal".into(),
+                status: None,
+                dir: None,
+                container: false,
+                host: None,
+                folder: None,
+            }))
+            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SidebarEvent::New { claude: false })))
+    }
+
     /// The project a directory belongs to (its git repository, else the directory).
     pub(crate) fn project_of(&self, host: &HostId, cwd: &Path) -> PathBuf {
         self.roots.of(host, cwd)
@@ -363,12 +400,65 @@ impl SidebarView {
 
     /// The SSH hosts block: a filled card with a heading that folds it, a row per host and "Add SSH host…"; folded, it
     /// is the heading with the number of connected hosts and one status dot.
-    fn render_hosts(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_hosts(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let open = !self.hosts_fold.collapsed();
         // A connected host being updated shows the Busy dot on its row but still counts as connected.
         let summary_dot = |row: &HostRow| if row.up && row.label.is_none() { HostDot::Ok } else { row.dot };
         let summary = hosts_summary(&self.hosts.iter().map(summary_dot).collect::<Vec<_>>());
         let pill_color = if summary.connected > 0 { theme.tokens.accent } else { theme.tokens.muted };
+        let amount = self.amount;
+        let hosts_card = || HostsCard {
+            hosts: self
+                .hosts
+                .iter()
+                .map(|row| {
+                    (summary_dot(row), row.host.name().to_string(), row.label.clone().unwrap_or("connected".into()))
+                })
+                .collect(),
+        };
+        // Compact: one tile with the connected count and the status dot; a click opens the sidebar.
+        if amount > 0.5 {
+            return div()
+                .id("ssh-hosts-tile")
+                .flex_none()
+                .mx(theme.ui(lerp(12., 6., amount)))
+                .mt_2()
+                .h(theme.ui(36.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(theme.ui(5.))
+                .rounded(px(RADIUS))
+                .opacity(2. * amount - 1.)
+                .cursor_pointer()
+                .hover(|style| style.bg(rgba((theme.tokens.raised << 8) | 0x80)))
+                .when(summary.total > 0, |tile| {
+                    tile.child(
+                        div()
+                            .flex_none()
+                            .h(theme.ui(16.))
+                            .px(theme.ui(6.))
+                            .flex()
+                            .items_center()
+                            .rounded_full()
+                            .bg(rgba((pill_color << 8) | 0x26))
+                            .text_size(theme.ui(11.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(pill_color))
+                            .child(summary.connected.to_string()),
+                    )
+                    .tooltip(hover_card::tooltip(hosts_card()))
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(7.))
+                        .rounded_full()
+                        .bg(rgb(crate::context_menu::host_dot_color(theme, summary.dot))),
+                )
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::ToggleCompact)))
+                .into_any_element();
+        }
         let heading = div()
             .id("ssh-hosts-heading")
             .px_2()
@@ -408,21 +498,7 @@ impl SidebarView {
                         .bg(rgb(crate::context_menu::host_dot_color(theme, summary.dot))),
                 )
             })
-            .when(!open && summary.total > 0, |heading| {
-                heading.tooltip(hover_card::tooltip(HostsCard {
-                    hosts: self
-                        .hosts
-                        .iter()
-                        .map(|row| {
-                            (
-                                summary_dot(row),
-                                row.host.name().to_string(),
-                                row.label.clone().unwrap_or("connected".into()),
-                            )
-                        })
-                        .collect(),
-                }))
-            })
+            .when(!open && summary.total > 0, |heading| heading.tooltip(hover_card::tooltip(hosts_card())))
             .on_click(cx.listener(|this, _, _, cx| {
                 let collapsed = this.hosts_fold.toggle();
                 cx.emit(SidebarEvent::HostsCollapsed(collapsed));
@@ -433,13 +509,14 @@ impl SidebarView {
         };
         div()
             .flex_none()
-            .mx_3()
+            .mx(theme.ui(lerp(12., 6., amount)))
             .mt_2()
             .p_1()
             .flex()
             .flex_col()
             .gap(px(2.))
             .rounded(px(RADIUS))
+            .opacity(1. - 2. * amount)
             .bg(rgba((theme.tokens.raised << 8) | 0x80))
             .child(heading)
             .when(open, |card| {
@@ -526,6 +603,7 @@ impl SidebarView {
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::AddSshHost))),
                 )
             })
+            .into_any_element()
     }
 
     /// Apply a session change of `host`.
@@ -1910,85 +1988,111 @@ impl Render for SidebarView {
                 div()
                     .id("recent-sessions")
                     .flex_none()
+                    .relative()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
                     .h(theme.ui(34.))
-                    .mx_3()
+                    .mx(theme.ui(lerp(12., 6., amount)))
                     .mt_2()
-                    .px_3()
+                    .px(theme.ui(12. * (1. - amount)))
                     .flex()
                     .items_center()
                     .gap_2()
                     .rounded(px(RADIUS))
                     .border_1()
-                    .border_color(rgb(theme.tokens.line))
+                    .border_color(rgba(with_opacity(theme.tokens.line, 1. - amount)))
                     .text_xs()
                     .text_color(rgb(theme.tokens.muted))
                     .cursor_pointer()
                     .hover(|style| style.text_color(rgb(theme.tokens.text)))
-                    .child(div().flex_1().child("Recent sessions"))
+                    .child(div().flex_1().opacity(1. - amount).child("Recent sessions"))
                     .child(
                         div()
                             .px(px(6.))
                             .py(px(2.))
                             .rounded(px(6.))
                             .bg(rgb(theme.tokens.raised))
+                            .opacity(1. - amount)
                             .child(shortcut_label(cx.global::<SettingsStore>().settings(), "openRecents")),
                     )
+                    .when(amount > 0.0, |row| row.child(tile_glyph("↺".into_any_element(), amount, &theme)))
+                    .when(amount >= 1.0, |row| {
+                        row.tooltip(hover_card::tooltip(HoverCard {
+                            title: "Recent sessions".into(),
+                            status: Some(shortcut_label(cx.global::<SettingsStore>().settings(), "openRecents")),
+                            dir: None,
+                            container: false,
+                            host: None,
+                            folder: None,
+                        }))
+                    })
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::OpenRecents))),
             )
             .child(
                 div()
                     .flex_none()
-                    .p_3()
+                    .px(theme.ui(lerp(12., 6., amount)))
+                    .py_3()
                     .flex()
-                    .gap_2()
+                    .flex_col()
                     .text_sm()
                     .child(
                         div()
-                            .id("new-claude")
-                            .flex_1()
-                            .h(theme.ui(36.))
                             .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(RADIUS))
-                            .bg(rgb(theme.tokens.accent))
-                            .text_color(rgb(theme.tokens.on_accent))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .cursor_pointer()
-                            .hover(|style| style.opacity(0.9))
-                            .child("New Claude session")
-                            .on_click(
-                                cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SidebarEvent::New { claude: true })),
-                            ),
+                            .flex_row()
+                            .gap(theme.ui(8. * (1. - amount)))
+                            .child(
+                                div()
+                                    .id("new-claude")
+                                    .relative()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h(theme.ui(36.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(RADIUS))
+                                    .bg(rgb(theme.tokens.accent))
+                                    .text_color(rgb(theme.tokens.on_accent))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .cursor_pointer()
+                                    .hover(|style| style.opacity(0.9))
+                                    .child(div().opacity(1. - amount).child("New Claude session"))
+                                    .when(amount > 0.0, |button| {
+                                        button.child(tile_glyph("+".into_any_element(), amount, &theme))
+                                    })
+                                    .when(amount >= 1.0, |button| {
+                                        button.tooltip(hover_card::tooltip(HoverCard {
+                                            title: "New Claude session".into(),
+                                            status: Some(shortcut_label(
+                                                cx.global::<SettingsStore>().settings(),
+                                                "openLauncher",
+                                            )),
+                                            dir: None,
+                                            container: false,
+                                            host: None,
+                                            folder: None,
+                                        }))
+                                    })
+                                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                                        cx.emit(SidebarEvent::New { claude: true })
+                                    })),
+                            )
+                            // Beside "New Claude session" when expanded; the compact column puts it below instead.
+                            .child(self.new_terminal_button("new-shell", 1. - amount, &theme, cx)),
                     )
-                    .child(
-                        div()
-                            .id("new-shell")
-                            .flex_none()
-                            .size(theme.ui(36.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(RADIUS))
-                            .border_1()
-                            .border_color(rgb(theme.tokens.line))
-                            .text_color(rgb(theme.tokens.muted))
-                            .text_xs()
-                            .cursor_pointer()
-                            .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.raised)))
-                            .child(">_")
-                            .tooltip(hover_card::tooltip(HoverCard {
-                                title: "New terminal".into(),
-                                status: None,
-                                dir: None,
-                                container: false,
-                                host: None,
-                                folder: None,
-                            }))
-                            .on_click(
-                                cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SidebarEvent::New { claude: false })),
-                            ),
-                    ),
+                    .when(amount > 0.0, |column| {
+                        column.child(
+                            div()
+                                .h(theme.ui(36. * amount + 6. * amount))
+                                .pt(theme.ui(6. * amount))
+                                .overflow_hidden()
+                                .opacity(amount)
+                                .child(self.new_terminal_button("new-shell-compact", amount, &theme, cx).w_full()),
+                        )
+                    }),
             )
             .when_some(self.menu.as_ref(), |el, menu| {
                 let pick = cx.listener(|this, action: &MenuAction, _, cx| {

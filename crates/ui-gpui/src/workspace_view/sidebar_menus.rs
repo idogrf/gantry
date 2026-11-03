@@ -52,15 +52,19 @@ impl WorkspaceView {
             .border_1()
             .border_l_0()
             .border_color(rgb(theme.tokens.line))
-            .text_color(rgb(theme.tokens.muted))
             .cursor_pointer()
             .opacity(if shown { 1.0 } else { 0.0 })
-            .hover(|style| style.border_color(rgb(theme.tokens.accent)).text_color(rgb(theme.tokens.accent)))
+            .hover(|style| style.border_color(rgb(theme.tokens.accent)))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 this.toggle_hovered = *hovered;
                 cx.notify();
             }))
-            .child(svg().path(if compact { CHEVRON_RIGHT_ICON } else { CHEVRON_LEFT_ICON }).size(theme.ui(12.)))
+            .child(
+                svg()
+                    .path(if compact { CHEVRON_RIGHT_ICON } else { CHEVRON_LEFT_ICON })
+                    .size(theme.ui(12.))
+                    .text_color(rgb(if self.toggle_hovered { theme.tokens.accent } else { theme.tokens.muted })),
+            )
             .tooltip(hover_card::tooltip(HoverCard {
                 title: if compact { "Expand sidebar" } else { "Collapse sidebar" }.into(),
                 status: Some(shortcut_label(cx.global::<SettingsStore>().settings(), "toggleSidebar")),

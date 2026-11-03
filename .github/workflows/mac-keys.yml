@@ -2,6 +2,9 @@ name: macOS keys
 # By hand only (macOS minutes cost 10x). An experiment: does a real Cmd+Left / Cmd+Right reach a Gantry pane on macOS?
 on:
   workflow_dispatch:
+  # TEMPORARY: remove before the PR; a hand-started workflow needs its file on the default branch first.
+  push:
+    branches: [feat/mac-line-keys]
 
 permissions:
   contents: read

@@ -102,8 +102,8 @@ in a hand-editable `settings.json` that applies live.
 ## Privacy
 
 Gantry reads Claude's session files on your machine, read-only, to show status and search. It has no telemetry and
-sends nothing about you or your sessions anywhere. The only network call it makes itself is a daily check of this
-project's GitHub releases for a newer version; turn it off in Settings > Window > Updates. SSH connections go only to
+sends nothing about you or your sessions anywhere. The only network call it makes itself is a check of this
+project's GitHub releases for a newer version, when it opens and every few hours; turn it off in Settings > Window > Updates. SSH connections go only to
 the hosts you add.
 
 ## Install

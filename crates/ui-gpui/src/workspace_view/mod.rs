@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use app_core::attention::{AlertKind, AttentionTracker};
 use app_core::host_state::HostState;
@@ -415,15 +415,17 @@ pub struct WorkspaceView {
     update_error: Option<String>,
     /// Whether `checkForUpdates` is on.
     check_updates: bool,
-    /// A manual check found releases while the daily check is off: the notice still shows.
+    /// A manual check found releases while the scheduled check is off: the notice still shows.
     manual_found: bool,
     /// The published releases the last good check found, newest first.
     releases: Vec<Release>,
     /// The `ETag` of that answer.
     release_etag: Option<String>,
+    /// When the last release check succeeded; the next one is due `release::CHECK_EVERY` later.
+    last_release_check: Option<SystemTime>,
     /// The open release notes card; its focus handle takes Esc.
     release_card: Option<FocusHandle>,
-    /// The daily check's timer.
+    /// The release check's timer.
     release_task: Option<Task<()>>,
     /// What is known about the git repos on screen.
     git: GitRepos,
@@ -661,6 +663,7 @@ impl WorkspaceView {
             manual_found: false,
             releases: Vec::new(),
             release_etag: None,
+            last_release_check: None,
             release_card: None,
             release_task: None,
             git: GitRepos::default(),

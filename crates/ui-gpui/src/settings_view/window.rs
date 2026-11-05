@@ -177,7 +177,7 @@ impl SettingsView {
                     row(
                         theme,
                         "Check for updates",
-                        "Asks GitHub once a day whether a newer Gantry exists. Nothing else is sent.",
+                        "Asks GitHub when Gantry opens and every few hours whether a newer Gantry exists. Nothing else is sent.",
                         check_switch,
                         check_reset,
                     ),

@@ -420,7 +420,7 @@ pub struct Settings {
     pub animate_working: bool,
     /// Whether splits slide in and menus, overlays and cards fade in.
     pub animate_ui: bool,
-    /// Whether Gantry asks GitHub once a day for a newer release.
+    /// Whether Gantry asks GitHub for a newer release (when it opens, then every few hours).
     pub check_for_updates: bool,
     /// The first-run wizard has been answered (imported or skipped), so it does not open by itself.
     pub setup_done: bool,

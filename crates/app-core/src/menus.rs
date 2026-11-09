@@ -81,6 +81,18 @@ pub enum MenuAction {
         /// The host the folder is on.
         host: HostId,
     },
+    /// Start a new Claude session (opens the launcher with the project preset) or a shell (at once, in the home
+    /// directory of this machine) in the Gantry project `name`.
+    NewInProject {
+        /// The project's display name.
+        name: String,
+        /// Claude (else a shell).
+        claude: bool,
+    },
+    /// Rename a Gantry project inline in the sidebar.
+    RenameProject(String),
+    /// Delete a Gantry project.
+    DeleteProject(String),
     /// Open the recent sessions pop-up on a project.
     RecentsFor(PathBuf),
     /// Continue the session of an exited pane.
@@ -480,7 +492,11 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
             items.push(MenuItem::Separator);
             items.push(close_item(pane.leaf, alone));
         }
-        RowKind::Project { .. } | RowKind::Tab { .. } | RowKind::Detail { .. } | RowKind::TakeOver { .. } => {
+        RowKind::Project { .. }
+        | RowKind::Tab { .. }
+        | RowKind::Empty
+        | RowKind::Detail { .. }
+        | RowKind::TakeOver { .. } => {
             return None;
         }
     }
@@ -506,6 +522,23 @@ pub fn project_menu(path: &Path, container: Option<&ContainerPlace>, context: &M
         MenuItem::Separator,
     ]);
     items.extend(folder_items(&dir, vscode_args(&dir, container, None), &host));
+    tidy(items)
+}
+
+/// A Gantry project heading's menu: no folder, so no config dir, folder or VS Code entries. `name` is the project's
+/// display name, `key` its project key (colors and Recents use the key).
+pub fn gantry_project_menu(name: &str, key: &Path, context: &MenuContext) -> Vec<MenuItem> {
+    let new_in = |claude| MenuAction::NewInProject { name: name.to_string(), claude };
+    let mut items = vec![entry("New Claude here", new_in(true)), entry("New terminal here", new_in(false))];
+    if let Some(current) = context.project_color {
+        items.push(color_menu(key, current));
+    }
+    items.extend([
+        with_shortcut("Recent sessions here", Shortcut::Recents, MenuAction::RecentsFor(key.to_path_buf())),
+        MenuItem::Separator,
+        entry("Rename…", MenuAction::RenameProject(name.to_string())),
+        entry("Delete project", MenuAction::DeleteProject(name.to_string())),
+    ]);
     tidy(items)
 }
 
@@ -1022,6 +1055,28 @@ mod tests {
     }
 
     #[test]
+    fn gantry_project_menu_lists_only_project_entries() {
+        let context = MenuContext { project_color: Some(None), ..two_dirs(Some(0)) };
+        let items = gantry_project_menu("Billing", Path::new("gantry://billing"), &context);
+        assert_eq!(
+            labels(&items),
+            [
+                "New Claude here",
+                "New terminal here",
+                "Color ▸",
+                "Recent sessions here",
+                "│",
+                "Rename…",
+                "Delete project"
+            ]
+        );
+        assert!(items.iter().any(|item| matches!(item, MenuItem::Entry(e)
+            if e.action == MenuAction::NewInProject { name: "Billing".into(), claude: false })));
+        assert!(items.iter().any(|item| matches!(item, MenuItem::Entry(e)
+            if e.action == MenuAction::RecentsFor("gantry://billing".into()))));
+    }
+
+    #[test]
     fn project_color_menu_offers_custom() {
         let ctx = MenuContext { project_color: Some(None), ..MenuContext::default() };
         let items = project_menu(Path::new("/r/app"), None, &ctx);
@@ -1130,5 +1185,6 @@ mod tests {
         for key in ["/r/app", "ssh://devbox/r/app"] {
             clean(&project_menu(Path::new(key), None, &MenuContext::default()));
         }
+        clean(&gantry_project_menu("Billing", Path::new("gantry://billing"), &MenuContext::default()));
     }
 }

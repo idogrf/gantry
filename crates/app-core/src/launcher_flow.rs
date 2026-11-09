@@ -117,6 +117,8 @@ pub struct Flow {
     pub items: Vec<LauncherItem>,
     /// The highlighted folder row.
     pub selected: usize,
+    /// The Gantry project the new session goes into (shown as a chip; the user can remove it).
+    pub project: Option<String>,
 }
 
 impl Flow {
@@ -140,9 +142,24 @@ impl Flow {
             home,
             items: Vec::new(),
             selected: 0,
+            project: None,
         };
         flow.rebuild("");
         flow
+    }
+
+    /// Start for the Gantry project `project`: the new session goes into it, and the folder it last ran in (when its
+    /// host is connected) is shown and highlighted.
+    pub fn start_in_project(&mut self, project: &str, last: Option<(HostId, PathBuf)>) {
+        self.project = Some(project.to_string());
+        let Some((host, folder)) = last else { return };
+        if !self.connected(&host) {
+            return;
+        }
+        self.to_folders(host.clone());
+        if let Some(at) = self.items.iter().position(|item| *item.host() == host && *item.folder() == folder) {
+            self.selected = at;
+        }
     }
 
     /// There is a host to pick (an SSH host is listed).
@@ -713,5 +730,23 @@ mod tests {
         assert_eq!(browser.child_path(0).as_deref(), Some("/home/u/work"));
         assert_eq!(browser.parent_path().as_deref(), Some("/home"));
         assert_eq!(browser.open_here(), Some(PathBuf::from("/home/u")));
+    }
+
+    #[test]
+    fn a_project_start_shows_and_highlights_the_folder_it_last_ran_in() {
+        let devbox = HostId::named("devbox");
+        let recent = vec![recent(&devbox, "/d1", 9), recent(&devbox, "/d2", 1), recent(&HostId::local(), "/l", 5)];
+        let mut flow =
+            Flow::new(vec![local(), host("devbox", HostState::Connected)], Vec::new(), recent, Vec::new(), None);
+        flow.start_in_project("Billing", Some((devbox.clone(), "/d2".into())));
+        assert_eq!(flow.project.as_deref(), Some("Billing"));
+        assert!(matches!(&flow.step, Step::Folders(host) if *host == devbox));
+        assert_eq!(flow.items[flow.selected].folder(), &PathBuf::from("/d2"));
+        // A host that is away stays on the host step; the project is still set.
+        let mut away =
+            Flow::new(vec![local(), host("devbox", HostState::NotConnected)], Vec::new(), Vec::new(), Vec::new(), None);
+        away.start_in_project("Billing", Some((devbox, "/d2".into())));
+        assert!(matches!(away.step, Step::Hosts));
+        assert_eq!(away.project.as_deref(), Some("Billing"));
     }
 }

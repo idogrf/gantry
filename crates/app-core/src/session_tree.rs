@@ -451,6 +451,8 @@ pub enum RowKind {
         /// Its first leaf (top-left).
         first: NodeId,
     },
+    /// The line under an expanded Gantry project heading that has nothing in it.
+    Empty,
     /// Details of an external session.
     Detail {
         /// Session id.
@@ -480,6 +482,8 @@ pub enum RowKey {
     Leaf(NodeId),
     /// A tab heading, by the tab's first leaf.
     Tab(NodeId),
+    /// The "empty project" line under a Gantry project's heading, by the project's key.
+    Empty(PathBuf),
     /// Details of a session.
     Detail(String),
     /// "Take over…" of a session.
@@ -532,6 +536,7 @@ impl Row {
             RowKind::Session { session, .. } => RowKey::Session(session.id.clone()),
             RowKind::Pane { entry, .. } => RowKey::Leaf(entry.leaf),
             RowKind::Tab { first, .. } => RowKey::Tab(*first),
+            RowKind::Empty => RowKey::Empty(self.project.clone().unwrap_or_default()),
             RowKind::Detail { session, .. } => RowKey::Detail(session.clone()),
             RowKind::TakeOver { session, .. } => RowKey::TakeOver(session.clone()),
         }
@@ -539,7 +544,7 @@ impl Row {
 
     /// Whether keyboard selection can land here (details are skipped).
     pub fn selectable(&self) -> bool {
-        !matches!(self.kind, RowKind::Detail { .. })
+        !matches!(self.kind, RowKind::Detail { .. } | RowKind::Empty)
     }
 
     /// What activating this row does.
@@ -564,7 +569,7 @@ impl Row {
             RowKind::TakeOver { session, cwd, host } => {
                 Activation::TakeOver { session: session.clone(), cwd: cwd.clone(), host: host.clone() }
             }
-            RowKind::Detail { .. } => Activation::Nothing,
+            RowKind::Detail { .. } | RowKind::Empty => Activation::Nothing,
         }
     }
 }
@@ -883,9 +888,14 @@ pub fn active<'a>(input: &'a ActiveInput<'a>, arrivals: &mut Arrivals, order: &m
         let working = tones.contains(&Tone::Working);
         let mut heading =
             Row::new(RowKind::Project { label: labels[&path].clone(), path: path.clone(), expanded, urgent, working });
-        heading.project = Some(path);
+        let empty = rendered.is_empty() && gantry_project::is_key(&path);
+        heading.project = Some(path.clone());
         rows.push(heading);
-        if expanded {
+        if expanded && empty {
+            let mut line = Row::new(RowKind::Empty);
+            line.project = Some(path);
+            rows.push(line);
+        } else if expanded {
             for row in rendered {
                 let details = match &row.kind {
                     RowKind::Session { session, .. } if input.details == Some(session.id.as_str()) => {
@@ -1280,6 +1290,7 @@ mod tests {
                     }
                     RowKind::Session { session, note, .. } => format!("  {} ({note})", session.id),
                     RowKind::Pane { entry, note, .. } => format!("  leaf {} ({note})", entry.leaf),
+                    RowKind::Empty => "    (empty)".into(),
                     RowKind::Detail { text, .. } => format!("    ({text})"),
                     RowKind::TakeOver { .. } => "    Take over…".into(),
                     RowKind::Tab { index, title, panes, .. } => format!("  tab {} {title} ({panes} panes)", index + 1),
@@ -2164,7 +2175,10 @@ mod tests {
     fn empty_gantry_project_gets_a_heading() {
         let mut fixture = Fixture::of(vec![], vec![]);
         fixture.gantry_projects = vec!["Billing".into()];
-        assert_eq!(fixture.outline(), vec!["▾ Billing"]);
+        assert_eq!(fixture.outline(), vec!["▾ Billing", "    (empty)"]);
+        fixture.toggled.insert(PathBuf::from("gantry://billing"));
+        assert_eq!(fixture.outline(), vec!["▸ Billing"]);
+        fixture.toggled.clear();
         // A filter hides it, like any project with nothing matching.
         fixture.filter = "zzz".into();
         assert!(fixture.outline().is_empty());

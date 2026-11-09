@@ -580,6 +580,15 @@ pub enum DropCheck {
     Full,
 }
 
+/// The panes of a Gantry project that deleting it closes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeletePlan {
+    /// Leaves whose pane runs: the user is asked before they are stopped.
+    pub running: Vec<NodeId>,
+    /// Leaves whose pane ended (the pane bar shows): closed without asking.
+    pub dead: Vec<NodeId>,
+}
+
 /// All tabs of the window.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
@@ -863,6 +872,71 @@ impl Workspace {
         }
     }
 
+    /// Put what was dropped in the Gantry project `project` (made if missing), or, with `None`, take it out of its
+    /// Gantry project (back to its folder project). A pane of a split tab becomes a tab of its own first. False,
+    /// changing nothing, when it is already there, or the source is unknown.
+    pub fn assign_to_project(&mut self, source: &gantry_project::Assign, project: Option<&str>) -> bool {
+        use gantry_project::Assign;
+        let current = |name: Option<&String>| match (name, project) {
+            (Some(name), Some(project)) => gantry_project::same(name, project),
+            (None, None) => true,
+            _ => false,
+        };
+        match source {
+            Assign::Leaf(leaf) => {
+                let Some(found) = self.leaves.get(leaf) else { return false };
+                if current(found.project.as_ref())
+                    || project.is_some_and(|name| gantry_project::normalize(name).is_none())
+                {
+                    return false;
+                }
+                self.pull_out(*leaf);
+                self.set_leaf_project(*leaf, project)
+            }
+            Assign::Tab(first) => {
+                let Some(index) = self.tab_of(*first) else { return false };
+                if self.tabs[index].root.leaves().iter().all(|leaf| current(self.leaves[leaf].project.as_ref())) {
+                    return false;
+                }
+                self.set_tab_project(index, project)
+            }
+            Assign::Session(id) => {
+                if current(self.session_projects.get(id)) {
+                    return false;
+                }
+                self.set_session_project(id, project);
+                true
+            }
+        }
+    }
+
+    /// What deleting the Gantry project `name` closes: its leaves with a running pane and its dead ones.
+    pub fn delete_plan(&self, name: &str) -> DeletePlan {
+        let mut plan = DeletePlan::default();
+        for (id, leaf) in &self.leaves {
+            if leaf.project.as_deref().is_some_and(|project| gantry_project::same(project, name)) {
+                if leaf.pane.is_some() { plan.running.push(*id) } else { plan.dead.push(*id) }
+            }
+        }
+        plan
+    }
+
+    /// Remove the Gantry project `name` from the list and from the saved order. Its panes are closed by the caller
+    /// (`delete_plan`); closed sessions keep their label in `session_projects`.
+    pub fn remove_project(&mut self, name: &str) {
+        self.gantry_projects.retain(|known| !gantry_project::same(known, name));
+        let key = gantry_project::key(name);
+        self.sidebar_order.projects.retain(|project| *project != key);
+    }
+
+    /// The project session `session` goes back to when it is resumed: the one of its saved label, made fresh (top of
+    /// the list, no color) when it no longer exists, or the existing one of that name. `None` for a session without
+    /// a label.
+    pub fn resume_project_for(&mut self, session: &str) -> Option<String> {
+        let name = self.session_projects.get(session)?.clone();
+        self.ensure_project(&name)
+    }
+
     /// Make every project a leaf names exist (a layout may carry a leaf label for a project missing from the list).
     /// Names only in `session_projects` are deleted projects and stay labels.
     pub fn normalize_projects(&mut self) {
@@ -972,11 +1046,16 @@ impl Workspace {
             return None;
         }
         let target = self.focused()?;
+        let project = self.leaves.get(&target).and_then(|leaf| leaf.project.clone());
         let (split_id, leaf) = (self.alloc(), self.alloc());
         let tab = &mut self.tabs[self.active];
         tab.root.split(target, axis, split_id, leaf);
         tab.focused = leaf;
         self.leaves.insert(leaf, Leaf { host, ..Leaf::new(launch) });
+        // The new pane stays in the Gantry project of the one it split.
+        if let Some(project) = project {
+            self.set_leaf_project(leaf, Some(&project));
+        }
         Some(leaf)
     }
 
@@ -3673,5 +3752,155 @@ mod tests {
         assert_eq!(restored.gantry_projects, vec!["Billing".to_string()]);
         assert_eq!(restored.leaves[&leaf].project.as_deref(), Some("Billing"));
         assert!(restored.project_exists("Deleted").is_none());
+    }
+
+    #[test]
+    fn drop_pane_of_split_tab_on_gantry_heading_pulls_it_out_and_labels_it() {
+        use gantry_project::Assign;
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        let b = ws.split(Axis::Vertical, shell("/b")).unwrap();
+        assert!(ws.assign_to_project(&Assign::Leaf(b), Some("Billing")));
+        assert_eq!(ws.tabs.len(), 2);
+        assert_eq!(ws.tab_of(a), Some(0));
+        assert_eq!(ws.tab_of(b), Some(1));
+        assert_eq!(ws.leaves[&b].project.as_deref(), Some("Billing"));
+        assert_eq!(ws.leaves[&a].project, None);
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn drop_tab_heading_labels_every_pane() {
+        use gantry_project::Assign;
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        let b = ws.split(Axis::Vertical, shell("/b")).unwrap();
+        assert!(ws.assign_to_project(&Assign::Tab(a), Some("Billing")));
+        assert_eq!(ws.tabs.len(), 1);
+        assert_eq!(ws.leaves[&a].project.as_deref(), Some("Billing"));
+        assert_eq!(ws.leaves[&b].project.as_deref(), Some("Billing"));
+    }
+
+    #[test]
+    fn drop_on_folder_heading_removes_membership() {
+        use gantry_project::Assign;
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        ws.leaves.get_mut(&a).unwrap().session = Some("s".into());
+        ws.set_leaf_project(a, Some("Billing"));
+        assert!(ws.assign_to_project(&Assign::Leaf(a), None));
+        assert_eq!(ws.leaves[&a].project, None);
+        assert!(ws.session_projects.is_empty());
+        assert_eq!(ws.gantry_projects, vec!["Billing".to_string()], "the project stays");
+    }
+
+    #[test]
+    fn drop_on_own_project_changes_nothing() {
+        use gantry_project::Assign;
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        let b = ws.split(Axis::Vertical, shell("/b")).unwrap();
+        ws.set_leaf_project(b, Some("Billing"));
+        let before = ws.clone();
+        assert!(!ws.assign_to_project(&Assign::Leaf(b), Some("BILLING")), "no pull out either");
+        assert!(!ws.assign_to_project(&Assign::Leaf(a), None));
+        assert_eq!(ws, before);
+    }
+
+    #[test]
+    fn drop_external_session_records_session_map() {
+        use gantry_project::Assign;
+        let mut ws = Workspace::default();
+        assert!(ws.assign_to_project(&Assign::Session("e1".into()), Some(" Billing ")));
+        assert_eq!(ws.session_projects["e1"], "Billing");
+        assert_eq!(ws.gantry_projects, vec!["Billing".to_string()]);
+        assert!(!ws.assign_to_project(&Assign::Session("e1".into()), Some("billing")));
+        assert!(ws.assign_to_project(&Assign::Session("e1".into()), None));
+        assert!(ws.session_projects.is_empty());
+    }
+
+    #[test]
+    fn split_inherits_project_and_host() {
+        let mut ws = Workspace::default();
+        let a = ws.new_tab_on(shell("/a"), HostId::named("devbox"));
+        ws.set_leaf_project(a, Some("Billing"));
+        let b = ws.split_on(Axis::Vertical, shell("/b"), HostId::named("devbox")).unwrap();
+        assert_eq!(ws.leaves[&b].project.as_deref(), Some("Billing"));
+        assert_eq!(ws.leaves[&b].host, HostId::named("devbox"));
+        let c = ws.split(Axis::Horizontal, shell("/c")).unwrap();
+        assert_eq!(ws.leaves[&c].project.as_deref(), Some("Billing"));
+        assert!(ws.leaves[&c].host.is_local(), "the host is the caller's choice, as before");
+    }
+
+    #[test]
+    fn delete_plan_lists_running_and_dead_leaves_of_the_project_only() {
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        let b = ws.split(Axis::Vertical, shell("/b")).unwrap();
+        let c = ws.split(Axis::Vertical, shell("/c")).unwrap();
+        let d = ws.new_tab(shell("/d"));
+        for leaf in [a, c, d] {
+            ws.pane_started(leaf, leaf as u64 + 100, "/x".into());
+        }
+        ws.set_leaf_project(a, Some("Billing"));
+        ws.set_leaf_project(b, Some("billing"));
+        ws.set_leaf_project(c, Some("Other"));
+        ws.set_leaf_project(d, Some("Other"));
+        let plan = ws.delete_plan("BILLING");
+        assert_eq!(plan, DeletePlan { running: vec![a], dead: vec![b] });
+        // Closing only those leaves keeps the rest of the shared tab.
+        for leaf in plan.running.into_iter().chain(plan.dead) {
+            ws.close(leaf);
+        }
+        ws.remove_project("Billing");
+        assert_eq!(ws.tabs.len(), 2);
+        assert_eq!(ws.tabs[0].root.leaves(), vec![c]);
+        assert_eq!(ws.gantry_projects, vec!["Other".to_string()]);
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn remove_keeps_closed_session_names() {
+        let mut ws = Workspace::default();
+        ws.create_project("Billing").unwrap();
+        ws.session_projects.insert("old".into(), "Billing".into());
+        ws.sidebar_order.projects = vec!["gantry://billing".into(), "/a".into()];
+        ws.remove_project("billing");
+        assert!(ws.gantry_projects.is_empty());
+        assert_eq!(ws.session_projects["old"], "Billing");
+        assert_eq!(ws.sidebar_order.projects, vec![std::path::PathBuf::from("/a")]);
+    }
+
+    #[test]
+    fn resume_recreates_a_deleted_project_fresh() {
+        let mut ws = Workspace::default();
+        ws.create_project("Other").unwrap();
+        ws.session_projects.insert("old".into(), "Billing".into());
+        assert_eq!(ws.resume_project_for("old"), Some("Billing".into()));
+        assert_eq!(ws.gantry_projects, vec!["Billing".to_string(), "Other".to_string()]);
+        assert_eq!(ws.resume_project_for("unlabeled"), None);
+    }
+
+    #[test]
+    fn resume_joins_an_existing_project_of_that_name_ignoring_case() {
+        let mut ws = Workspace::default();
+        ws.create_project("Billing").unwrap();
+        ws.session_projects.insert("old".into(), "BILLING".into());
+        assert_eq!(ws.resume_project_for("old"), Some("Billing".into()));
+        assert_eq!(ws.gantry_projects.len(), 1);
+    }
+
+    #[test]
+    fn clear_keeps_the_leaf_in_its_project_and_labels_both_sessions() {
+        let mut ws = Workspace::default();
+        let leaf = ws.new_tab(shell("/a"));
+        ws.pane_started(leaf, 1, "/a".into());
+        let key = PaneKey::local(1);
+        ws.session_seen(&key, "old");
+        ws.set_leaf_project(leaf, Some("Billing"));
+        ws.session_seen(&key, "new");
+        assert_eq!(ws.leaves[&leaf].project.as_deref(), Some("Billing"));
+        assert_eq!(ws.session_projects["old"], "Billing", "the old one stays labeled for Recents");
+        assert_eq!(ws.session_projects["new"], "Billing");
     }
 }

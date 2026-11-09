@@ -1323,4 +1323,54 @@ mod tests {
         assert!(labels.contains(&"Billing"), "{labels:?}");
         assert!(labels.contains(&"app"), "{labels:?}");
     }
+
+    fn session_ids(fixture: &Fixture) -> Vec<String> {
+        fixture.with(|input| {
+            items(input)
+                .into_iter()
+                .filter_map(|item| match item {
+                    RecentItem::Session { session, .. } => Some(session.id.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn recents_for_gantry_key_selects_that_project_value() {
+        let mut fixture =
+            Fixture::of(vec![closed("a", "/r/app", 1), closed("b", "/r/app", 2), closed("c", "/r/app", 3)]);
+        fixture.gantry.insert("a".into(), "Billing".into());
+        fixture.gantry.insert("c".into(), "Other".into());
+        fixture.prefs.only_project(crate::gantry_project::key("Billing").to_string_lossy().into_owned());
+        assert_eq!(session_ids(&fixture), vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn renamed_project_relabels_closed_sessions() {
+        let mut ws = crate::workspace::Workspace::default();
+        ws.create_project("Billing").unwrap();
+        ws.session_projects.insert("a".into(), "Billing".into());
+        ws.rename_project("Billing", "Invoices").unwrap();
+        let membership = ws.membership();
+        let mut fixture = Fixture::of(vec![closed("a", "/r/app", 1), closed("b", "/r/other", 2)]);
+        fixture.gantry = membership.sessions.clone().into_iter().collect();
+        let sections = fixture.with(filter_sections);
+        let project = sections.iter().find(|section| section.facet == Facet::Project).expect("two projects");
+        let labels: Vec<&str> = project.shown.iter().map(|value| value.label.as_str()).collect();
+        assert!(labels.contains(&"Invoices"), "{labels:?}");
+        assert!(!labels.contains(&"Billing"), "{labels:?}");
+    }
+
+    #[test]
+    fn deleted_project_listed_like_a_folder_project_without_open_sessions() {
+        // Nothing of the project exists any more: its closed session still sits under its name, like a folder project
+        // whose sessions are all closed.
+        let mut fixture = Fixture::of(vec![closed("a", "/r/app", 1), closed("b", "/r/other", 2)]);
+        fixture.gantry.insert("a".into(), "Gone".into());
+        fixture.prefs.sort = Sort::Project;
+        let outline = fixture.outline();
+        assert!(outline.contains(&"# Gone".to_string()), "{outline:?}");
+        assert!(outline.contains(&"# other".to_string()), "{outline:?}");
+    }
 }

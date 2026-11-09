@@ -4,8 +4,21 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::split_tree::NodeId;
+
 /// The start of a Gantry project's key.
 pub const KEY_PREFIX: &str = "gantry://";
+
+/// What is dropped on a project heading to put it in (or take it out of) a Gantry project.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Assign {
+    /// A pane (a split tab's pane is pulled out into a tab of its own).
+    Leaf(NodeId),
+    /// A split tab, by the first leaf of its panes: every pane goes.
+    Tab(NodeId),
+    /// A session with no pane of ours (an external one), by id.
+    Session(String),
+}
 
 /// Why a project name was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -9,6 +9,7 @@ use protocol::message::{PaneId, PaneInfo, SessionInfo, SessionState, SessionStat
 use serde::{Deserialize, Serialize};
 
 use crate::attention::most_urgent;
+use crate::gantry_project::{self, ProjectError};
 use crate::launcher::HostFolder;
 use crate::sessions::SessionStore;
 use crate::settings::{Settings, ShellSettings, expand_home};
@@ -393,6 +394,9 @@ pub struct Leaf {
     /// Marked unread by hand: it keeps the mark, even in view, until Claude's status changes or the user marks it read.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unread: bool,
+    /// The Gantry project the user put the pane in (its display name); `None` = the pane's folder project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// Reads a saved pane color, treating anything unreadable as none.
@@ -405,7 +409,16 @@ impl Leaf {
     /// A leaf about to run `launch`.
     pub fn new(launch: PaneLaunch) -> Leaf {
         let session = launch.session().map(String::from);
-        Leaf { pane: None, host: HostId::local(), launch, session, name: None, color: None, unread: false }
+        Leaf {
+            pane: None,
+            host: HostId::local(),
+            launch,
+            session,
+            name: None,
+            color: None,
+            unread: false,
+            project: None,
+        }
     }
 
     /// The pane's host and id, while it runs.
@@ -588,6 +601,12 @@ pub struct Workspace {
     /// The order the user gave projects and tabs in the sidebar.
     #[serde(default, skip_serializing_if = "SidebarOrder::is_empty")]
     pub sidebar_order: SidebarOrder,
+    /// The Gantry projects that exist (display names), newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gantry_projects: Vec<String>,
+    /// The Gantry project (display name) each session was put in, kept for closed sessions and never pruned.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_projects: BTreeMap<String, String>,
     /// The tabs shown so far, for Back / Forward; never saved.
     #[serde(skip)]
     history: TabHistory,
@@ -750,6 +769,100 @@ impl Workspace {
     /// The panes marked unread by hand.
     pub fn unread_leaves(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.leaves.iter().filter(|(_, leaf)| leaf.unread).map(|(id, _)| *id)
+    }
+
+    /// The canonical display name of the Gantry project called `name` (ignoring case and spaces), if it exists.
+    pub fn project_exists(&self, name: &str) -> Option<&str> {
+        self.gantry_projects.iter().map(String::as_str).find(|existing| gantry_project::same(existing, name))
+    }
+
+    /// Make a Gantry project called `name` (trimmed) at the top of the list; returns the name kept.
+    pub fn create_project(&mut self, name: &str) -> Result<String, ProjectError> {
+        let name = gantry_project::validate_name(&self.gantry_projects, name, None)?;
+        self.gantry_projects.insert(0, name.clone());
+        Ok(name)
+    }
+
+    /// Rename the Gantry project `from` to `to`: the list, every leaf and every session label follow. A case-only
+    /// rename of itself is allowed; a name another project has is refused.
+    pub fn rename_project(&mut self, from: &str, to: &str) -> Result<String, ProjectError> {
+        let to = gantry_project::validate_name(&self.gantry_projects, to, Some(from))?;
+        for name in self.gantry_projects.iter_mut().filter(|name| gantry_project::same(name, from)) {
+            *name = to.clone();
+        }
+        let labels = self.leaves.values_mut().filter_map(|leaf| leaf.project.as_mut());
+        for name in labels.chain(self.session_projects.values_mut()) {
+            if gantry_project::same(name, from) {
+                *name = to.clone();
+            }
+        }
+        Ok(to)
+    }
+
+    /// The display name `project` goes by: the existing project of that name, else a new one made now. `None` for an
+    /// empty name.
+    fn ensure_project(&mut self, project: &str) -> Option<String> {
+        if let Some(existing) = self.project_exists(project) {
+            return Some(existing.to_string());
+        }
+        self.create_project(project).ok()
+    }
+
+    /// Put a pane in the Gantry project `project` (made if missing), or back in its folder project with `None`. The
+    /// leaf's session is labeled too. False, changing nothing, for a missing leaf or an empty name.
+    pub fn set_leaf_project(&mut self, leaf: NodeId, project: Option<&str>) -> bool {
+        if !self.leaves.contains_key(&leaf) {
+            return false;
+        }
+        let name = match project {
+            Some(project) => match self.ensure_project(project) {
+                Some(name) => Some(name),
+                None => return false,
+            },
+            None => None,
+        };
+        let found = self.leaves.get_mut(&leaf).expect("checked above");
+        found.project = name.clone();
+        if let Some(session) = found.session.clone() {
+            match name {
+                Some(name) => self.session_projects.insert(session, name),
+                None => self.session_projects.remove(&session),
+            };
+        }
+        true
+    }
+
+    /// `set_leaf_project` for every pane of tab `index`. False for a missing or Settings tab.
+    pub fn set_tab_project(&mut self, index: usize, project: Option<&str>) -> bool {
+        let Some(tab) = self.tabs.get(index).filter(|tab| !tab.settings) else { return false };
+        let leaves = tab.root.leaves();
+        leaves.into_iter().fold(false, |any, leaf| self.set_leaf_project(leaf, project) || any)
+    }
+
+    /// Label a session that has no pane of ours (an external or closed one) with a Gantry project (made if
+    /// missing), or clear its label with `None`.
+    pub fn set_session_project(&mut self, session: &str, project: Option<&str>) {
+        match project {
+            Some(project) => {
+                if let Some(name) = self.ensure_project(project) {
+                    self.session_projects.insert(session.into(), name);
+                }
+            }
+            None => {
+                self.session_projects.remove(session);
+            }
+        }
+    }
+
+    /// Make every project a leaf names exist (a layout may carry a leaf label for a project missing from the list).
+    /// Names only in `session_projects` are deleted projects and stay labels.
+    pub fn normalize_projects(&mut self) {
+        let named: Vec<String> = self.leaves.values().filter_map(|leaf| leaf.project.clone()).collect();
+        for name in named {
+            if self.project_exists(&name).is_none() {
+                self.create_project(&name).ok();
+            }
+        }
     }
 
     /// The color the user gave a pane, if any.
@@ -1163,6 +1276,9 @@ impl Workspace {
             return false;
         }
         leaf.session = Some(session.into());
+        if let Some(project) = leaf.project.clone() {
+            self.session_projects.insert(session.into(), project);
+        }
         true
     }
 
@@ -1295,6 +1411,7 @@ pub fn restore(
     keep: &HashSet<NodeId>,
 ) -> Restored {
     let mut workspace = saved.unwrap_or_default();
+    workspace.normalize_projects();
     // A host that is not connected keeps its leaves as saved (pane and instance): `reconcile` decides when it connects.
     let connected: HashSet<&HostId> = hosts.iter().map(|live| &live.host).collect();
     let mut attach = Vec::new();
@@ -2307,6 +2424,7 @@ mod tests {
             session: session.map(Into::into),
             name: None,
             unread: false,
+            project: None,
         }
     }
 
@@ -3427,5 +3545,124 @@ mod tests {
         assert_eq!(ws.host_folders[&box2].len(), 1);
         ws.remove_host(&box2);
         assert!(ws.host_folders.is_empty());
+    }
+
+    #[test]
+    fn create_project_refuses_duplicates_ignoring_case() {
+        let mut ws = Workspace::default();
+        assert_eq!(ws.create_project("  Billing "), Ok("Billing".into()));
+        assert_eq!(ws.create_project("BILLING"), Err(ProjectError::Exists));
+        assert_eq!(ws.create_project("  billing"), Err(ProjectError::Exists));
+        assert_eq!(ws.create_project("   "), Err(ProjectError::Empty));
+        assert_eq!(ws.gantry_projects, vec!["Billing".to_string()]);
+    }
+
+    #[test]
+    fn create_puts_new_project_first() {
+        let mut ws = Workspace::default();
+        ws.create_project("A").unwrap();
+        ws.create_project("B").unwrap();
+        assert_eq!(ws.gantry_projects, vec!["B".to_string(), "A".to_string()]);
+    }
+
+    #[test]
+    fn rename_updates_leaves_and_session_map() {
+        let mut ws = Workspace::default();
+        let leaf = ws.new_tab(shell("/a"));
+        ws.leaves.get_mut(&leaf).unwrap().session = Some("s1".into());
+        ws.set_leaf_project(leaf, Some("Billing"));
+        ws.set_session_project("s2", Some("billing"));
+        assert_eq!(ws.rename_project("billing", " Invoices "), Ok("Invoices".into()));
+        assert_eq!(ws.gantry_projects, vec!["Invoices".to_string()]);
+        assert_eq!(ws.leaves[&leaf].project.as_deref(), Some("Invoices"));
+        assert_eq!(ws.session_projects["s1"], "Invoices");
+        assert_eq!(ws.session_projects["s2"], "Invoices");
+    }
+
+    #[test]
+    fn rename_to_own_name_in_other_case_is_allowed() {
+        let mut ws = Workspace::default();
+        ws.create_project("billing").unwrap();
+        assert_eq!(ws.rename_project("billing", "BILLING"), Ok("BILLING".into()));
+        assert_eq!(ws.gantry_projects, vec!["BILLING".to_string()]);
+    }
+
+    #[test]
+    fn rename_onto_another_project_is_refused() {
+        let mut ws = Workspace::default();
+        ws.create_project("A").unwrap();
+        ws.create_project("B").unwrap();
+        assert_eq!(ws.rename_project("A", "b"), Err(ProjectError::Exists));
+        assert_eq!(ws.rename_project("A", " "), Err(ProjectError::Empty));
+        assert_eq!(ws.gantry_projects, vec!["B".to_string(), "A".to_string()]);
+    }
+
+    #[test]
+    fn set_leaf_project_creates_missing_project_and_records_session() {
+        let mut ws = Workspace::default();
+        let leaf = ws.new_tab(shell("/a"));
+        ws.leaves.get_mut(&leaf).unwrap().session = Some("s1".into());
+        assert!(ws.set_leaf_project(leaf, Some("  Billing ")));
+        assert_eq!(ws.gantry_projects, vec!["Billing".to_string()]);
+        assert_eq!(ws.leaves[&leaf].project.as_deref(), Some("Billing"));
+        assert_eq!(ws.session_projects["s1"], "Billing");
+        // The same name in another case joins the project instead of making a second one.
+        assert!(ws.set_leaf_project(leaf, Some("BILLING")));
+        assert_eq!(ws.gantry_projects.len(), 1);
+        assert_eq!(ws.leaves[&leaf].project.as_deref(), Some("Billing"));
+        assert!(ws.set_leaf_project(leaf, None));
+        assert_eq!(ws.leaves[&leaf].project, None);
+        assert!(ws.session_projects.is_empty());
+        assert!(!ws.set_leaf_project(99, Some("x")));
+        assert!(!ws.set_leaf_project(leaf, Some("  ")));
+    }
+
+    #[test]
+    fn set_tab_project_labels_every_leaf() {
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        let b = ws.split(Axis::Vertical, shell("/b")).unwrap();
+        assert!(ws.set_tab_project(0, Some("P")));
+        assert_eq!(ws.leaves[&a].project.as_deref(), Some("P"));
+        assert_eq!(ws.leaves[&b].project.as_deref(), Some("P"));
+        assert!(!ws.set_tab_project(5, Some("P")));
+    }
+
+    #[test]
+    fn session_seen_labels_the_new_session_and_keeps_the_old_one() {
+        let mut ws = Workspace::default();
+        let leaf = ws.new_tab(shell("/a"));
+        ws.pane_started(leaf, 1, "/a".into());
+        let key = PaneKey::local(1);
+        ws.session_seen(&key, "old");
+        ws.set_leaf_project(leaf, Some("Billing"));
+        assert!(ws.session_seen(&key, "new"));
+        assert_eq!(ws.session_projects["old"], "Billing");
+        assert_eq!(ws.session_projects["new"], "Billing");
+    }
+
+    #[test]
+    fn layout_without_new_fields_loads_and_resaves_unchanged() {
+        let mut ws = Workspace::default();
+        ws.new_tab(shell("/a"));
+        let json = serde_json::to_string(&ws).unwrap();
+        for key in ["gantry_projects", "session_projects", "project"] {
+            assert!(!json.contains(key), "{key} must not be written when empty");
+        }
+        let loaded: Workspace = serde_json::from_str(&json).unwrap();
+        assert!(loaded.gantry_projects.is_empty());
+        assert_eq!(serde_json::to_string(&loaded).unwrap(), json);
+    }
+
+    #[test]
+    fn leaf_project_missing_from_list_is_recreated_on_load() {
+        let mut ws = Workspace::default();
+        let leaf = ws.new_tab(shell("/a"));
+        ws.leaves.get_mut(&leaf).unwrap().project = Some("Billing".into());
+        ws.session_projects.insert("old".into(), "Deleted".into());
+        let restored = restore(Some(ws), &[], &launch(), true, &HashSet::new()).workspace;
+        assert_eq!(restored.gantry_projects, vec!["Billing".to_string()]);
+        assert_eq!(restored.leaves[&leaf].project.as_deref(), Some("Billing"));
+        assert!(restored.project_exists("Deleted").is_none());
     }
 }

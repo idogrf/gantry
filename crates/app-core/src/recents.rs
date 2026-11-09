@@ -13,6 +13,130 @@ use protocol::message::{SearchHit, SessionInfo, SessionState, Speaker};
 use crate::fuzzy::Fuzzy;
 use crate::session_tree::{age, display_path, keep, keep_text, labels, newest_first, session_title};
 
+/// How the pop-up orders its sessions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sort {
+    /// Newest first.
+    #[default]
+    Recent,
+    /// By title, A to Z.
+    Name,
+    /// Under project headings.
+    Project,
+}
+
+impl Sort {
+    /// Every sort, in the order the sort bar shows them.
+    pub const ALL: [Sort; 3] = [Sort::Recent, Sort::Name, Sort::Project];
+
+    /// The sort bar's text.
+    pub fn label(self) -> &'static str {
+        match self {
+            Sort::Recent => "Recent",
+            Sort::Name => "Name",
+            Sort::Project => "Project",
+        }
+    }
+
+    /// The next (or previous) sort, wrapping around.
+    pub fn cycle(self, forward: bool) -> Sort {
+        let at = Sort::ALL.iter().position(|&sort| sort == self).unwrap_or(0);
+        let len = Sort::ALL.len();
+        Sort::ALL[if forward { (at + 1) % len } else { (at + len - 1) % len }]
+    }
+}
+
+/// A group of values the sidebar filters by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Facet {
+    /// The session's project.
+    Project,
+    /// The host it ran on.
+    Host,
+    /// The Claude config dir it belongs to.
+    Dir,
+}
+
+impl Facet {
+    /// Every facet, in the order the sidebar shows them.
+    pub const ALL: [Facet; 3] = [Facet::Project, Facet::Host, Facet::Dir];
+
+    /// The section's heading.
+    pub fn title(self) -> &'static str {
+        match self {
+            Facet::Project => "Project",
+            Facet::Host => "Host",
+            Facet::Dir => "Config dir",
+        }
+    }
+}
+
+/// What lasts between openings of the pop-up while Gantry runs: the sort and the filter selections. Selections are
+/// keys: a project's key (as text), a host's name, a config dir's name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Prefs {
+    /// The order of the list.
+    pub sort: Sort,
+    /// Whether the order is reversed.
+    pub reverse: bool,
+    projects: HashSet<String>,
+    hosts: HashSet<String>,
+    dirs: HashSet<String>,
+}
+
+impl Prefs {
+    /// The keys selected in `facet` (none selected = the facet does not filter).
+    pub fn selected(&self, facet: Facet) -> &HashSet<String> {
+        match facet {
+            Facet::Project => &self.projects,
+            Facet::Host => &self.hosts,
+            Facet::Dir => &self.dirs,
+        }
+    }
+
+    fn selected_mut(&mut self, facet: Facet) -> &mut HashSet<String> {
+        match facet {
+            Facet::Project => &mut self.projects,
+            Facet::Host => &mut self.hosts,
+            Facet::Dir => &mut self.dirs,
+        }
+    }
+
+    /// Select `key` in `facet`, or unselect it when it is selected.
+    pub fn toggle(&mut self, facet: Facet, key: &str) {
+        let set = self.selected_mut(facet);
+        if !set.remove(key) {
+            set.insert(key.to_string());
+        }
+    }
+
+    /// Unselect everything in `facet`.
+    pub fn clear(&mut self, facet: Facet) {
+        self.selected_mut(facet).clear();
+    }
+
+    /// Unselect everything; the sort stays.
+    pub fn clear_all(&mut self) {
+        Facet::ALL.into_iter().for_each(|facet| self.clear(facet));
+    }
+
+    /// Whether any filter narrows the list.
+    pub fn is_filtering(&self) -> bool {
+        Facet::ALL.into_iter().any(|facet| !self.selected(facet).is_empty())
+    }
+
+    /// Pick a sort; the order is no longer reversed.
+    pub fn set_sort(&mut self, sort: Sort) {
+        self.sort = sort;
+        self.reverse = false;
+    }
+
+    /// Select only the project `key` (the other facets stay as they are).
+    pub fn only_project(&mut self, key: String) {
+        self.projects = HashSet::from([key]);
+    }
+}
+
 /// Everything the pop-up is built from.
 pub struct RecentsInput<'a> {
     /// Claude sessions.
@@ -893,5 +1017,64 @@ mod tests {
         assert_eq!(offline_hosts(&configured, up), ["down", "lab"]);
         // This machine is never offline, even when it is configured or nothing is connected.
         assert_eq!(offline_hosts(&["local".to_string(), "".to_string()], |_| false), Vec::<String>::new());
+    }
+
+    #[test]
+    fn sort_cycles_and_wraps() {
+        assert_eq!(Sort::Recent.cycle(true), Sort::Name);
+        assert_eq!(Sort::Project.cycle(true), Sort::Recent);
+        assert_eq!(Sort::Recent.cycle(false), Sort::Project);
+        assert_eq!(Sort::default(), Sort::Recent);
+        assert_eq!(Sort::ALL.map(Sort::label), ["Recent", "Name", "Project"]);
+    }
+
+    #[test]
+    fn toggle_adds_then_removes() {
+        let mut prefs = Prefs::default();
+        prefs.toggle(Facet::Host, "devbox");
+        assert!(prefs.selected(Facet::Host).contains("devbox"));
+        prefs.toggle(Facet::Host, "devbox");
+        assert!(prefs.selected(Facet::Host).is_empty());
+    }
+
+    #[test]
+    fn set_sort_clears_reverse() {
+        let mut prefs = Prefs { reverse: true, ..Prefs::default() };
+        prefs.set_sort(Sort::Name);
+        assert_eq!((prefs.sort, prefs.reverse), (Sort::Name, false));
+    }
+
+    #[test]
+    fn clear_all_empties_every_facet_but_keeps_sort() {
+        let mut prefs = Prefs::default();
+        prefs.set_sort(Sort::Project);
+        for facet in Facet::ALL {
+            prefs.toggle(facet, "x");
+        }
+        assert!(prefs.is_filtering());
+        prefs.clear_all();
+        assert!(!prefs.is_filtering());
+        assert_eq!(prefs.sort, Sort::Project);
+        prefs.toggle(Facet::Dir, "Work");
+        prefs.clear(Facet::Dir);
+        assert!(!prefs.is_filtering());
+    }
+
+    #[test]
+    fn only_project_replaces_the_project_selection_only() {
+        let mut prefs = Prefs::default();
+        prefs.toggle(Facet::Project, "/r/a");
+        prefs.toggle(Facet::Host, "devbox");
+        prefs.only_project("/r/b".into());
+        assert_eq!(prefs.selected(Facet::Project).iter().collect::<Vec<_>>(), ["/r/b"]);
+        assert!(prefs.selected(Facet::Host).contains("devbox"));
+    }
+
+    #[test]
+    fn is_filtering_follows_the_selections() {
+        let mut prefs = Prefs::default();
+        assert!(!prefs.is_filtering());
+        prefs.toggle(Facet::Project, "/r/a");
+        assert!(prefs.is_filtering());
     }
 }

@@ -1084,16 +1084,15 @@ impl SidebarView {
         let target = self.rows[heading].project.as_ref()?;
         let project = self.items.iter().position(|items| &items.path == target)?;
         let at = hover_at(&self.items, project, index, fraction)?;
-        let (current, real, pullable) = self.drag_facts(source)?;
-        match drop_cue(&self.items, source, &current, &real, pullable, at) {
+        let (current, real) = self.drag_facts(source)?;
+        match drop_cue(&self.items, source, &current, &real, at) {
             DropCue::Neutral => None,
-            cue => Some(DropHint { row: index, target: target.clone(), cue }),
+            DropCue::Land(at) => Some(DropHint { row: index, target: target.clone(), at }),
         }
     }
 
-    /// The project `source` is listed in, the folder project of its pane, and whether a drop elsewhere pulls it out of
-    /// its split tab.
-    fn drag_facts(&self, source: DragSource) -> Option<(PathBuf, PathBuf, bool)> {
+    /// The project `source` is listed in and the folder project of its pane.
+    fn drag_facts(&self, source: DragSource) -> Option<(PathBuf, PathBuf)> {
         let current = self.rows.iter().find_map(|row| match (&row.kind, source) {
             (RowKind::Session { leaf: Some(leaf), .. }, DragSource::Pane(pane)) if *leaf == pane => row.project.clone(),
             (RowKind::Pane { entry, .. }, DragSource::Pane(pane)) if entry.leaf == pane => row.project.clone(),
@@ -1102,9 +1101,7 @@ impl SidebarView {
         })?;
         let (DragSource::Pane(leaf) | DragSource::Tab(leaf)) = source;
         let pane = self.panes.iter().find(|pane| pane.leaf == leaf)?;
-        let pullable =
-            matches!(source, DragSource::Pane(_)) && session_tree::pullable_leaves(&self.panes).contains(&leaf);
-        Some((current, self.roots.of(&pane.host, &pane.cwd), pullable))
+        Some((current, self.roots.of(&pane.host, &pane.cwd)))
     }
 
     /// A pane or split tab is over row `index`: keep the drop hint in step with the pointer.
@@ -1136,9 +1133,8 @@ impl SidebarView {
     /// A pane or split tab was dropped on a row: it goes where the hint showed; with no hint a pane of a split tab
     /// becomes a tab of its own.
     fn drop_item(&mut self, source: DragSource, cx: &mut Context<Self>) {
-        match self.drop_hint.take().map(|hint| hint.cue) {
-            Some(DropCue::Land(at)) => self.land(source, at, cx),
-            Some(_) => cx.notify(),
+        match self.drop_hint.take() {
+            Some(hint) => self.land(source, hint.at, cx),
             None => {
                 cx.notify();
                 if let DragSource::Pane(leaf) = source
@@ -1300,7 +1296,7 @@ impl SidebarView {
     }
 
     /// Row `index`'s part of the drop cue while a pane or split tab is dragged: the box around the target project's
-    /// group in segments (accent, or danger when the drop does nothing) and, where it lands, the accent line.
+    /// group in segments and, where it lands, the line.
     fn drop_cue_parts(&self, index: usize, theme: &Theme, cx: &App) -> Vec<gpui::Div> {
         let Some(hint) = self.drop_hint.as_ref().filter(|_| cx.has_active_drag()) else { return Vec::new() };
         let Some(heading) = self.rows[..=index].iter().rposition(|row| matches!(row.kind, RowKind::Project { .. }))
@@ -1312,10 +1308,7 @@ impl SidebarView {
         }
         let edges = session_tree::group_edges(&self.rows, index);
         let faded = 1.0 - self.amount;
-        let (color, line) = match hint.cue {
-            DropCue::Land(at) => (theme.tokens.accent, Some(at)),
-            _ => (theme.tokens.danger, None),
-        };
+        let color = theme.tokens.accent;
         let boxed = div()
             .absolute()
             .left(theme.ui(6. * faded))
@@ -1330,7 +1323,7 @@ impl SidebarView {
             .when(edges.first, |boxed| boxed.border_t_2().rounded_t(px(RADIUS)))
             .when(edges.last, |boxed| boxed.border_b_2().rounded_b(px(RADIUS)));
         let mut parts = vec![boxed];
-        let Some(at) = line else { return parts };
+        let at = hint.at;
         let blocks = &self.items.iter().find(|items| items.path == hint.target).map(|items| &items.blocks);
         let (above, below) = match (at, blocks) {
             (DropAt::Before { block, .. }, Some(blocks)) => {
@@ -1986,8 +1979,8 @@ struct DropHint {
     row: usize,
     /// The project it would go to (its key).
     target: PathBuf,
-    /// [`DropCue::Deny`] or [`DropCue::Land`].
-    cue: DropCue,
+    /// Where the item lands.
+    at: DropAt,
 }
 
 /// A split tab's heading being dragged to a new place inside its project.

@@ -471,30 +471,20 @@ pub fn placed_order(projects: &[ProjectItems], source: DragSource, at: DropAt) -
 /// What the sidebar shows while an item is dragged over a row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DropCue {
-    /// Nothing: the drop is not for this target (it may still pull a pane out of its split tab).
+    /// Nothing: the drop is not for this target or would change nothing (it may still pull a pane out of its split
+    /// tab).
     Neutral,
-    /// The drop would do nothing: the target's box in the danger color, no line.
-    Deny,
     /// The item lands at this place: the target's box and a line there.
     Land(DropAt),
 }
 
 /// The cue for dropping `source` at `at`. `current` is the project the item is listed in now and `real` the folder
-/// project its pane belongs to without a Gantry project; `pullable` says a drop elsewhere pulls the pane out of its
-/// split tab.
-pub fn drop_cue(
-    projects: &[ProjectItems],
-    source: DragSource,
-    current: &Path,
-    real: &Path,
-    pullable: bool,
-    at: DropAt,
-) -> DropCue {
+/// project its pane belongs to without a Gantry project.
+pub fn drop_cue(projects: &[ProjectItems], source: DragSource, current: &Path, real: &Path, at: DropAt) -> DropCue {
     let (DropAt::Before { project, .. } | DropAt::End { project }) = at;
     let Some(target) = projects.get(project).map(|items| items.path.as_path()) else { return DropCue::Neutral };
-    let nothing = if pullable { DropCue::Neutral } else { DropCue::Deny };
     if current == target {
-        return if reorder(projects, source, at).is_some() { DropCue::Land(at) } else { nothing };
+        return if reorder(projects, source, at).is_some() { DropCue::Land(at) } else { DropCue::Neutral };
     }
     if gantry_project::is_key(target) {
         return DropCue::Land(at);
@@ -502,7 +492,7 @@ pub fn drop_cue(
     if gantry_project::is_key(current) {
         return if target == real { DropCue::Land(at) } else { DropCue::Neutral };
     }
-    nothing
+    DropCue::Neutral
 }
 
 /// Where a drop at `fraction` (0 = top, 1 = bottom) of row `row`, listed in project `project`, lands: before the block
@@ -2020,36 +2010,28 @@ mod tests {
     }
 
     #[test]
-    fn drop_cue_decides_land_deny_or_neutral() {
+    fn drop_cue_decides_land_or_neutral() {
         let projects = drop_fixture();
         let app = Path::new("/r/app");
         let web = Path::new("/r/web");
         let work = gantry_project::key("Work");
         let at = |project, block| DropAt::Before { project, block };
-        let cue = |source, current: &Path, real: &Path, pullable, at| {
-            drop_cue(&projects, source, current, real, pullable, at)
-        };
-        // (a) the item's own project: a real move lands, no change is denied.
-        assert_eq!(cue(DragSource::Pane(2), app, app, false, at(0, 0)), DropCue::Land(at(0, 0)));
-        assert_eq!(cue(DragSource::Pane(3), app, app, false, at(0, 1)), DropCue::Deny);
-        assert_eq!(cue(DragSource::Pane(5), app, app, true, at(0, 2)), DropCue::Neutral, "pulled out instead");
+        let cue = |source, current: &Path, real: &Path, at| drop_cue(&projects, source, current, real, at);
+        // (a) the item's own project: a real move lands, no change shows nothing.
+        assert_eq!(cue(DragSource::Pane(2), app, app, at(0, 0)), DropCue::Land(at(0, 0)));
+        assert_eq!(cue(DragSource::Pane(3), app, app, at(0, 1)), DropCue::Neutral);
         // (b) a Gantry project the item is not in.
-        assert_eq!(cue(DragSource::Pane(3), app, app, false, at(1, 0)), DropCue::Land(at(1, 0)));
+        assert_eq!(cue(DragSource::Pane(3), app, app, at(1, 0)), DropCue::Land(at(1, 0)));
         assert_eq!(
-            cue(DragSource::Pane(3), app, app, false, DropAt::End { project: 2 }),
+            cue(DragSource::Pane(3), app, app, DropAt::End { project: 2 }),
             DropCue::Land(DropAt::End { project: 2 })
         );
         // (c) a folder project: only the item's real one takes it back from a Gantry project.
-        assert_eq!(cue(DragSource::Pane(1), &work, app, false, at(0, 1)), DropCue::Land(at(0, 1)));
-        assert_eq!(cue(DragSource::Pane(1), &work, web, false, at(0, 1)), DropCue::Neutral);
-        // (d) anything else: denied, or neutral when the drop pulls a pane out.
-        assert_eq!(cue(DragSource::Pane(6), web, web, false, at(0, 1)), DropCue::Deny);
-        assert_eq!(
-            cue(DragSource::Pane(5), app, app, true, at(1, 0)),
-            DropCue::Land(at(1, 0)),
-            "a Gantry project takes it"
-        );
-        assert_eq!(cue(DragSource::Pane(3), app, app, false, at(7, 0)), DropCue::Neutral);
+        assert_eq!(cue(DragSource::Pane(1), &work, app, at(0, 1)), DropCue::Land(at(0, 1)));
+        assert_eq!(cue(DragSource::Pane(1), &work, web, at(0, 1)), DropCue::Neutral);
+        // (d) anything else: nothing.
+        assert_eq!(cue(DragSource::Pane(6), web, web, at(0, 1)), DropCue::Neutral);
+        assert_eq!(cue(DragSource::Pane(3), app, app, at(7, 0)), DropCue::Neutral);
     }
 
     #[test]

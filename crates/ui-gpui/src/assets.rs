@@ -19,6 +19,9 @@ pub(crate) const SPLIT_RIGHT_ICON: &str = "icons/split-right.svg";
 /// The split down button's icon (a window with its bottom half filled).
 pub(crate) const SPLIT_DOWN_ICON: &str = "icons/split-down.svg";
 
+/// The Gantry project's icon (three stacked layers), drawn by `sidebar_view`, `launcher_view` and `recents_view`.
+pub(crate) const LAYERS_ICON: &str = "icons/layers.svg";
+
 /// The close pane button's icon (an X).
 pub(crate) const CLOSE_ICON: &str = "icons/close.svg";
 
@@ -64,6 +67,7 @@ impl AssetSource for Assets {
             SPLIT_RIGHT_ICON => Some(include_bytes!("../assets/icons/split-right.svg")),
             SPLIT_DOWN_ICON => Some(include_bytes!("../assets/icons/split-down.svg")),
             CLOSE_ICON => Some(include_bytes!("../assets/icons/close.svg")),
+            LAYERS_ICON => Some(include_bytes!("../assets/icons/layers.svg")),
             ARROW_DOWN_ICON => Some(include_bytes!("../assets/icons/arrow-down.svg")),
             CHEVRON_DOWN_ICON => Some(include_bytes!("../assets/icons/chevron-down.svg")),
             CHEVRON_RIGHT_ICON => Some(include_bytes!("../assets/icons/chevron-right.svg")),
@@ -86,6 +90,7 @@ impl AssetSource for Assets {
             SPLIT_RIGHT_ICON.into(),
             SPLIT_DOWN_ICON.into(),
             CLOSE_ICON.into(),
+            LAYERS_ICON.into(),
             ARROW_DOWN_ICON.into(),
             CHEVRON_DOWN_ICON.into(),
             CHEVRON_RIGHT_ICON.into(),
@@ -111,6 +116,7 @@ mod tests {
             SPLIT_RIGHT_ICON,
             SPLIT_DOWN_ICON,
             CLOSE_ICON,
+            LAYERS_ICON,
             ARROW_DOWN_ICON,
             CHEVRON_DOWN_ICON,
             CHEVRON_RIGHT_ICON,

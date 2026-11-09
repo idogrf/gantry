@@ -19,12 +19,12 @@ use app_core::workspace::ClaudeDirs;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, EventEmitter, FocusHandle, Focusable, FontWeight,
     IntoElement, KeyDownEvent, MouseButton, Render, ScrollStrategy, Stateful, UniformListScrollHandle, Window, div,
-    prelude::*, px, rgb, uniform_list,
+    prelude::*, px, rgb, rgba, svg, uniform_list,
 };
 use protocol::host::{HostId, split_project_key};
 use protocol::message::DirEntry;
 
-use crate::assets::FOLDER_ICON;
+use crate::assets::{CLOSE_ICON, FOLDER_ICON, LAYERS_ICON};
 use crate::context_menu::host_dot_color;
 use crate::field;
 use crate::settings_store::SettingsStore;
@@ -54,11 +54,15 @@ pub enum LauncherEvent {
         claude: bool,
         /// The Claude config dir (by name) chosen with the badge, when it differs from the one the folder resolves to.
         dir_pick: Option<String>,
+        /// The Gantry project the session goes into, when the launcher was opened for one and it was not removed.
+        project: Option<String>,
     },
     /// Pick a directory of this machine with the system dialog, then open it.
     Browse {
         /// Claude (true) or a terminal.
         claude: bool,
+        /// The Gantry project the session goes into.
+        project: Option<String>,
     },
     /// Do what the host's pane card button does (connect, retry, cancel, install, update); the launcher stays open.
     HostAction {
@@ -452,6 +456,14 @@ impl LauncherView {
         Some(self.dirs.dirs[pick].name.clone())
     }
 
+    /// Start for the Gantry project `name`: the session goes into it, and the folder it last ran in is shown.
+    pub fn set_project(&mut self, name: &str, last: Option<(HostId, PathBuf)>, cx: &mut Context<Self>) {
+        self.flow.start_in_project(name, last);
+        self.entered_folders();
+        self.scroll.scroll_to_item(self.flow.selected, ScrollStrategy::Center);
+        cx.notify();
+    }
+
     /// Open the typed path (or the highlighted completion row) on its host.
     fn open_typed(&mut self, alt: bool, cx: &mut Context<Self>) {
         let Some((host, path)) = self.path_mode() else { return };
@@ -465,7 +477,7 @@ impl LauncherView {
         };
         let dir = self.launch_path(&host, if typed.len() > 1 { typed.trim_end_matches('/') } else { typed.as_str() });
         let dir_pick = self.dir_pick_for(&host, &dir, claude);
-        cx.emit(LauncherEvent::Open { host, dir, claude, dir_pick });
+        cx.emit(LauncherEvent::Open { host, dir, claude, dir_pick, project: self.flow.project.clone() });
     }
 
     fn choose(&mut self, index: usize, alt: bool, cx: &mut Context<Self>) {
@@ -476,7 +488,7 @@ impl LauncherView {
             _ => return,
         };
         let dir_pick = self.dir_pick_for(&host, &folder, claude);
-        cx.emit(LauncherEvent::Open { host, dir: folder, claude, dir_pick });
+        cx.emit(LauncherEvent::Open { host, dir: folder, claude, dir_pick, project: self.flow.project.clone() });
     }
 
     /// Browse… (button or Ctrl+O): this machine's system folder dialog, or the folder browser on an SSH host,
@@ -487,7 +499,7 @@ impl LauncherView {
         }
         let host = self.folder_host();
         if host.is_local() {
-            cx.emit(LauncherEvent::Browse { claude: self.claude_first });
+            cx.emit(LauncherEvent::Browse { claude: self.claude_first, project: self.flow.project.clone() });
             return;
         }
         self.flow.to_browse(host);
@@ -520,7 +532,7 @@ impl LauncherView {
         else {
             return;
         };
-        cx.emit(LauncherEvent::Open { host, dir, claude, dir_pick: None });
+        cx.emit(LauncherEvent::Open { host, dir, claude, dir_pick: None, project: self.flow.project.clone() });
     }
 
     /// Back from the browser to the host's folders.
@@ -1265,6 +1277,41 @@ impl LauncherView {
             )
     }
 
+    /// The removable chip that says the session goes into the Gantry project `name`.
+    fn render_project_chip(&self, name: String, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex_none()
+            .h(theme.ui(24.))
+            .pl(theme.ui(8.))
+            .pr(theme.ui(4.))
+            .flex()
+            .items_center()
+            .gap(theme.ui(4.))
+            .rounded(px(RADIUS_SMALL))
+            .border_1()
+            .border_color(rgb(theme.tokens.accent))
+            .text_xs()
+            .text_color(rgb(theme.tokens.accent))
+            .child(svg().path(LAYERS_ICON).size(theme.ui(12.)).text_color(rgb(theme.tokens.accent)))
+            .child(name)
+            .child(
+                div()
+                    .id("launcher-project-clear")
+                    .size(theme.ui(16.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(RADIUS_SMALL))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgba((theme.tokens.accent << 8) | 0x30)))
+                    .child(svg().path(CLOSE_ICON).size(theme.ui(12.)).text_color(rgb(theme.tokens.accent)))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.flow.project = None;
+                        cx.notify();
+                    })),
+            )
+    }
+
     /// The folder step: the host line, the field with Browse…, the notice and the host's folders (or the typed path's).
     fn render_folders(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let badge = self.badge().filter(|_| self.badge_open);
@@ -1272,6 +1319,17 @@ impl LauncherView {
             .flex()
             .flex_col()
             .when(self.flow.has_host_step(), |card| card.child(self.render_host_bar(theme, cx)))
+            .when(self.flow.project.is_some(), |card| {
+                let what = if self.claude_first { "Claude session" } else { "terminal" };
+                card.child(
+                    div()
+                        .px_4()
+                        .pt(theme.ui(10.))
+                        .text_xs()
+                        .text_color(rgb(theme.tokens.muted))
+                        .child(format!("In which folder should the {what} open?")),
+                )
+            })
             .child(
                 div()
                     .h(theme.ui(46.))
@@ -1281,6 +1339,7 @@ impl LauncherView {
                     .border_b_1()
                     .border_color(rgb(theme.tokens.line))
                     .gap(theme.ui(10.))
+                    .children(self.flow.project.clone().map(|name| self.render_project_chip(name, theme, cx)))
                     .child(div().flex_1().min_w_0().child(field::render(
                         &self.query,
                         self.placeholder(),

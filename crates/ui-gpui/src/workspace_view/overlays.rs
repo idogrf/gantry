@@ -195,19 +195,21 @@ impl WorkspaceView {
 
     /// Start a session in `dir` of `host` in a new tab: through the lazy connect on an SSH host, with the config dir
     /// pick on this machine.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn open_folder(
         &mut self,
         host: HostId,
         dir: PathBuf,
         claude: bool,
         dir_pick: Option<String>,
+        project: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if host.is_local() {
-            self.open_launcher_pick(claude, dir, dir_pick, cx);
+            self.open_launcher_pick(claude, dir, dir_pick, project, cx);
         } else {
-            self.open_on_host(&host, claude, dir, window, cx);
+            self.open_on_host(&host, claude, dir, project, window, cx);
         }
     }
 
@@ -296,18 +298,23 @@ impl WorkspaceView {
                 }
             }
             DialogAction::DevContainer(open) => {
-                let DevContainerOpen { claude, pick, cwd, axis, cwd_from, host, host_folder } = *open;
+                let DevContainerOpen { claude, pick, cwd, axis, cwd_from, host, project, host_folder } = *open;
                 match index {
                     0 => {
                         // Splits of a container pane start in the session's directory, not the docker client's.
                         let launch = self.new_launch(claude, cwd, pick.as_deref(), Some(host_folder), cx);
-                        self.open_launch(launch, axis, None, HostId::local(), window, cx)
+                        self.open_launch(launch, axis, None, HostId::local(), project, window, cx)
                     }
                     1 => {
                         let launch = self.new_launch(claude, cwd, pick.as_deref(), None, cx);
-                        self.open_launch(launch, axis, cwd_from, host, window, cx)
+                        self.open_launch(launch, axis, cwd_from, host, project, window, cx)
                     }
                     _ => {}
+                }
+            }
+            DialogAction::DeleteProject(name) => {
+                if index == 0 {
+                    self.remove_project(&name, window, cx);
                 }
             }
             DialogAction::Ack => {}
@@ -553,10 +560,10 @@ impl WorkspaceView {
         }
         self.launcher = None;
         match event {
-            LauncherEvent::Open { host, dir, claude, dir_pick } => {
-                self.open_folder(host, dir, claude, dir_pick, window, cx)
+            LauncherEvent::Open { host, dir, claude, dir_pick, project } => {
+                self.open_folder(host, dir, claude, dir_pick, project, window, cx)
             }
-            LauncherEvent::Browse { claude } => {
+            LauncherEvent::Browse { claude, project } => {
                 let picked = cx.prompt_for_paths(PathPromptOptions {
                     files: false,
                     directories: true,
@@ -569,7 +576,7 @@ impl WorkspaceView {
                         _ => None,
                     };
                     let _ = this.update_in(cx, |this, window, cx| match dir {
-                        Some(dir) => this.open_launcher_pick(claude, dir, None, cx),
+                        Some(dir) => this.open_launcher_pick(claude, dir, None, project, cx),
                         None => this.focus_current(window, cx),
                     });
                 })

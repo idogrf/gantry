@@ -1,13 +1,14 @@
 //! The sidebar's Active list as plain rows: every pane of the layout and every Claude session running outside
 //! Gantry, under the project it belongs to. Closed sessions live in the recent sessions pop-up (`recents`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use protocol::host::{HostId, PaneKey, project_key, split_project_key};
 use protocol::message::{SessionInfo, SessionState, SessionStatus};
 
 use crate::fuzzy::Fuzzy;
+use crate::gantry_project;
 use crate::sidebar_order::SidebarOrder;
 use crate::split_tree::NodeId;
 use crate::theme_colors::Tint;
@@ -56,6 +57,8 @@ pub struct PaneEntry {
     pub container: Option<PathBuf>,
     /// The color the user gave the pane.
     pub color: Option<Tint>,
+    /// The Gantry project the user put the pane in (display name).
+    pub project: Option<String>,
 }
 
 /// What keeps an Active entry's place in the list: its leaf, or (outside Gantry) its session.
@@ -111,11 +114,11 @@ impl ProjectOrder {
         self.started = true;
     }
 
-    /// The order to save: every project in its place, but only those in `shown` and those of SSH hosts (which may only
-    /// be away); a local project that is gone for good is forgotten.
+    /// The order to save: every project in its place, but only those in `shown`, those of SSH hosts (which may only
+    /// be away) and Gantry projects (which may be empty); a local project that is gone for good is forgotten.
     pub fn to_save(&self, shown: &[PathBuf]) -> Vec<PathBuf> {
-        let ssh = |path: &PathBuf| path.to_string_lossy().starts_with("ssh://");
-        self.order.iter().filter(|path| shown.contains(path) || ssh(path)).cloned().collect()
+        let kept = |path: &PathBuf| path.to_string_lossy().starts_with("ssh://") || gantry_project::is_key(path);
+        self.order.iter().filter(|path| shown.contains(path) || kept(path)).cloned().collect()
     }
 
     /// The projects in order, top to bottom (including kept ones that are not listed).
@@ -149,6 +152,22 @@ impl ProjectOrder {
         let to =
             before.and_then(|before| self.order.iter().position(|path| path == before)).unwrap_or(self.order.len());
         self.order.insert(to, moved);
+    }
+
+    /// A project's key changed (a Gantry project was renamed): it keeps its place.
+    pub fn rename(&mut self, from: &Path, to: &Path) {
+        for known in self.order.iter_mut().filter(|known| known.as_path() == from) {
+            *known = to.to_path_buf();
+        }
+        if self.kept.remove(from) {
+            self.kept.insert(to.to_path_buf());
+        }
+    }
+
+    /// Forget a project for good (a Gantry project was deleted), kept or not.
+    pub fn forget(&mut self, root: &Path) {
+        self.order.retain(|known| known.as_path() != root);
+        self.kept.remove(root);
     }
 
     /// Where `root` sits (unknown = after every known project).
@@ -192,6 +211,10 @@ pub struct ActiveInput<'a> {
     pub tabs: &'a [TabEntry],
     /// The project a directory belongs to (see [`project_root`]).
     pub project_of: &'a dyn Fn(&HostId, &Path) -> PathBuf,
+    /// The Gantry project (display name) each session was put in, for sessions without a pane of ours.
+    pub session_projects: &'a BTreeMap<String, String>,
+    /// The Gantry projects that exist: each is listed, even with nothing in it.
+    pub gantry_projects: &'a [String],
     /// The order the user gave the tabs inside their projects.
     pub saved_order: &'a SidebarOrder,
     /// Current time, ms since the Unix epoch.
@@ -206,6 +229,14 @@ pub struct ProjectRoots {
 }
 
 impl ProjectRoots {
+    /// The project of something in the Gantry project `gantry` (its key), else of the folder `cwd` as [`Self::of`].
+    pub fn of_member(&self, host: &HostId, cwd: &Path, gantry: Option<&str>) -> PathBuf {
+        match gantry {
+            Some(name) => gantry_project::key(name),
+            None => self.of(host, cwd),
+        }
+    }
+
     /// Roots below `home`.
     pub fn new(home: Option<PathBuf>) -> ProjectRoots {
         ProjectRoots { home, cache: Default::default() }
@@ -371,6 +402,125 @@ pub fn shown_order(projects: &[ProjectItems], moved: Option<(usize, &[Vec<NodeId
     (paths, items)
 }
 
+/// The leaves a drag of `source` carries, when it names an item of `projects`.
+fn moved_leaves(projects: &[ProjectItems], source: DragSource) -> Option<Vec<NodeId>> {
+    projects.iter().flat_map(|items| items.blocks.iter()).find_map(|block| match source {
+        DragSource::Pane(leaf) => block.leaves.contains(&leaf).then(|| vec![leaf]),
+        DragSource::Tab(first) => (block.group && block.leaves.first() == Some(&first)).then(|| block.leaves.clone()),
+    })
+}
+
+/// The items of the project `at` names after `source` is dropped there (its index and its blocks of leaves): the
+/// source's leaves leave their old block (a pane of a split tab becomes a block of its own) and go in at `at`, which
+/// counts the blocks as listed before the move. `None` for an unknown item or project.
+pub fn place_in(projects: &[ProjectItems], source: DragSource, at: DropAt) -> Option<(usize, Vec<Vec<NodeId>>)> {
+    let (project, before) = match at {
+        DropAt::Before { project, block } => (project, Some(block)),
+        DropAt::End { project } => (project, None),
+    };
+    let moved = moved_leaves(projects, source)?;
+    let mut blocks: Vec<Vec<NodeId>> = projects.get(project)?.blocks.iter().map(|block| block.leaves.clone()).collect();
+    let mut position = before.unwrap_or(blocks.len()).min(blocks.len());
+    let from = blocks.iter().position(|block| block.iter().any(|leaf| moved.contains(leaf)));
+    if let Some(from) = from {
+        match source {
+            DragSource::Tab(_) => {
+                blocks.remove(from);
+                if from < position {
+                    position -= 1;
+                }
+            }
+            DragSource::Pane(leaf) => {
+                blocks[from].retain(|other| *other != leaf);
+                if blocks[from].is_empty() {
+                    blocks.remove(from);
+                    if from < position {
+                        position -= 1;
+                    }
+                }
+            }
+        }
+    }
+    blocks.insert(position, moved);
+    Some((project, blocks))
+}
+
+/// What [`shown_order`] lists after `source` is dropped at `at`: the source's leaves are taken out of every project
+/// and listed in the target project at `at`. `None` when [`place_in`] is.
+pub fn placed_order(projects: &[ProjectItems], source: DragSource, at: DropAt) -> Option<(Vec<PathBuf>, Vec<NodeId>)> {
+    let (target, blocks) = place_in(projects, source, at)?;
+    let moved = moved_leaves(projects, source)?;
+    let paths = projects.iter().map(|project| project.path.clone()).collect();
+    let mut leaves = Vec::new();
+    for (index, project) in projects.iter().enumerate() {
+        if index == target {
+            leaves.extend(blocks.iter().flatten().copied());
+        } else {
+            leaves.extend(
+                project
+                    .blocks
+                    .iter()
+                    .flat_map(|block| block.leaves.iter().copied())
+                    .filter(|leaf| !moved.contains(leaf)),
+            );
+        }
+    }
+    Some((paths, leaves))
+}
+
+/// What the sidebar shows while an item is dragged over a row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropCue {
+    /// Nothing: the drop is not for this target or would change nothing (it may still pull a pane out of its split
+    /// tab).
+    Neutral,
+    /// The item lands at this place: the target's box and a line there.
+    Land(DropAt),
+}
+
+/// The cue for dropping `source` at `at`. `current` is the project the item is listed in now and `real` the folder
+/// project its pane belongs to without a Gantry project.
+pub fn drop_cue(projects: &[ProjectItems], source: DragSource, current: &Path, real: &Path, at: DropAt) -> DropCue {
+    let (DropAt::Before { project, .. } | DropAt::End { project }) = at;
+    let Some(target) = projects.get(project).map(|items| items.path.as_path()) else { return DropCue::Neutral };
+    if current == target {
+        return if reorder(projects, source, at).is_some() { DropCue::Land(at) } else { DropCue::Neutral };
+    }
+    if gantry_project::is_key(target) {
+        return DropCue::Land(at);
+    }
+    if gantry_project::is_key(current) {
+        return if target == real { DropCue::Land(at) } else { DropCue::Neutral };
+    }
+    DropCue::Neutral
+}
+
+/// The folder project to offer as a drop-in zone while an item is dragged: `real` when the item is listed in a Gantry
+/// project (`current`) and its folder has no heading among `projects` (so the heading itself cannot take it back).
+pub fn zone_folder(projects: &[ProjectItems], current: &Path, real: &Path) -> Option<PathBuf> {
+    let due = gantry_project::is_key(current)
+        && !gantry_project::is_key(real)
+        && !projects.iter().any(|items| items.path == real);
+    due.then(|| real.to_path_buf())
+}
+
+/// Where a drop at `fraction` (0 = top, 1 = bottom) of row `row`, listed in project `project`, lands: before the block
+/// the row is in (its first half of rows) or before the next one (its second half); on the heading, before the first
+/// block. `End` when no block follows.
+pub fn hover_at(projects: &[ProjectItems], project: usize, row: usize, fraction: f32) -> Option<DropAt> {
+    let blocks = &projects.get(project)?.blocks;
+    let inside = blocks.iter().position(|block| (block.row..=block.last_row).contains(&row));
+    let block = match inside {
+        None => 0,
+        Some(index) => {
+            let item = &blocks[index];
+            let rows = (item.last_row - item.row + 1) as f32;
+            if ((row - item.row) as f32 + fraction.clamp(0., 1.)) / rows < 0.5 { index } else { index + 1 }
+        }
+    };
+    Some(if block < blocks.len() { DropAt::Before { project, block } } else { DropAt::End { project } })
+}
+
 /// The group edges of `rows[index]`.
 pub fn group_edges(rows: &[Row], index: usize) -> GroupEdges {
     let heading = |row: &Row| matches!(row.kind, RowKind::Project { .. });
@@ -436,6 +586,8 @@ pub enum RowKind {
         /// Its first leaf (top-left).
         first: NodeId,
     },
+    /// The line under an expanded Gantry project heading that has nothing in it.
+    Empty,
     /// Details of an external session.
     Detail {
         /// Session id.
@@ -465,6 +617,8 @@ pub enum RowKey {
     Leaf(NodeId),
     /// A tab heading, by the tab's first leaf.
     Tab(NodeId),
+    /// The "empty project" line under a Gantry project's heading, by the project's key.
+    Empty(PathBuf),
     /// Details of a session.
     Detail(String),
     /// "Take over…" of a session.
@@ -517,6 +671,7 @@ impl Row {
             RowKind::Session { session, .. } => RowKey::Session(session.id.clone()),
             RowKind::Pane { entry, .. } => RowKey::Leaf(entry.leaf),
             RowKind::Tab { first, .. } => RowKey::Tab(*first),
+            RowKind::Empty => RowKey::Empty(self.project.clone().unwrap_or_default()),
             RowKind::Detail { session, .. } => RowKey::Detail(session.clone()),
             RowKind::TakeOver { session, .. } => RowKey::TakeOver(session.clone()),
         }
@@ -524,7 +679,7 @@ impl Row {
 
     /// Whether keyboard selection can land here (details are skipped).
     pub fn selectable(&self) -> bool {
-        !matches!(self.kind, RowKind::Detail { .. })
+        !matches!(self.kind, RowKind::Detail { .. } | RowKind::Empty)
     }
 
     /// What activating this row does.
@@ -549,7 +704,7 @@ impl Row {
             RowKind::TakeOver { session, cwd, host } => {
                 Activation::TakeOver { session: session.clone(), cwd: cwd.clone(), host: host.clone() }
             }
-            RowKind::Detail { .. } => Activation::Nothing,
+            RowKind::Detail { .. } | RowKind::Empty => Activation::Nothing,
         }
     }
 }
@@ -655,6 +810,8 @@ struct Entry<'a> {
     key: EntryKey,
     host: &'a HostId,
     cwd: &'a Path,
+    /// The Gantry project it was put in; it wins over the folder.
+    gantry: Option<&'a str>,
     title: &'a str,
     /// `last_active_ms`; panes the session list does not know count as active now.
     activity: u64,
@@ -667,9 +824,10 @@ enum EntryKind<'a> {
 }
 
 /// The Active list.
-pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut ProjectOrder) -> Vec<Row> {
+pub fn active<'a>(input: &'a ActiveInput<'a>, arrivals: &mut Arrivals, order: &mut ProjectOrder) -> Vec<Row> {
     let by_id: HashMap<(&HostId, &str), &SessionInfo> =
         input.sessions.iter().map(|s| ((&s.host, s.id.as_str()), *s)).collect();
+    let member = |pane: &'a PaneEntry, session: Option<&str>| member_project(input, pane, session);
     let mut entries: Vec<Entry<'_>> = Vec::new();
     let mut in_leaves: HashSet<(&HostId, &str)> = HashSet::new();
     for pane in input.panes {
@@ -682,6 +840,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
                     key: EntryKey::Leaf(pane.leaf),
                     host: &session.host,
                     cwd: &session.cwd,
+                    gantry: member(pane, Some(&session.id)),
                     title,
                     activity: session.last_active_ms,
                     kind,
@@ -693,6 +852,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
                     key: EntryKey::Leaf(pane.leaf),
                     host: &pane.host,
                     cwd: &pane.cwd,
+                    gantry: member(pane, pane.session.as_deref()),
                     title,
                     activity: u64::MAX,
                     kind: EntryKind::Pane(pane),
@@ -709,6 +869,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
             key: EntryKey::Session(session.id.clone()),
             host: &session.host,
             cwd: &session.cwd,
+            gantry: None,
             title: session_title(session),
             activity: session.last_active_ms,
             kind,
@@ -727,18 +888,22 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
     arrivals.update(&keys.into_iter().map(|(key, _)| key.clone()).collect::<Vec<_>>());
 
     // A tab with several panes is one item, placed in the project of its first leaf that has an entry.
-    let leaf_cwd: HashMap<NodeId, (&HostId, &Path)> =
-        entries.iter().filter_map(|entry| Some((leaf_of(&entry.key)?, (entry.host, entry.cwd)))).collect();
+    let project_of_entry = |entry: &Entry<'_>| match entry.gantry {
+        Some(name) => gantry_project::key(name),
+        None => (input.project_of)(entry.host, entry.cwd),
+    };
+    let leaf_project: HashMap<NodeId, PathBuf> =
+        entries.iter().filter_map(|entry| Some((leaf_of(&entry.key)?, project_of_entry(entry)))).collect();
     let leaf_titles: HashMap<NodeId, &str> =
         entries.iter().filter_map(|entry| Some((leaf_of(&entry.key)?, entry.title))).collect();
     let mut groups: Vec<Group<'_>> = Vec::new();
     let mut group_of: HashMap<NodeId, usize> = HashMap::new();
     for tab in input.tabs.iter().filter(|tab| tab.leaves.len() >= 2) {
-        let Some((host, cwd)) = tab.leaves.iter().find_map(|leaf| leaf_cwd.get(leaf).copied()) else { continue };
+        let Some(project) = tab.leaves.iter().find_map(|leaf| leaf_project.get(leaf).cloned()) else { continue };
         let place = tab
             .leaves
             .iter()
-            .filter(|leaf| leaf_cwd.contains_key(leaf))
+            .filter(|leaf| leaf_project.contains_key(leaf))
             .map(|leaf| arrivals.of(&EntryKey::Leaf(*leaf)))
             .min()
             .unwrap_or(0);
@@ -746,19 +911,22 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
             group_of.insert(*leaf, groups.len());
         }
         let first_title = tab.leaves.iter().find_map(|leaf| leaf_titles.get(leaf).copied());
-        groups.push(Group { tab, project: (input.project_of)(host, cwd), place, first_title, members: Vec::new() });
+        groups.push(Group { tab, project, place, first_title, members: Vec::new() });
     }
 
-    let mut fuzzy = Fuzzy::new(input.filter, entries.iter().map(|entry| keep_text(entry.title, entry.cwd, input.home)));
+    let mut fuzzy = Fuzzy::new(
+        input.filter,
+        entries.iter().map(|entry| keep_text(entry.title, entry.cwd, entry.gantry, input.home)),
+    );
     let filtering = fuzzy.is_some();
     let mut by_project: HashMap<PathBuf, Vec<Entry<'_>>> = HashMap::new();
     for entry in entries {
-        if !keep(&mut fuzzy, entry.title, entry.cwd, input.home) {
+        if !keep(&mut fuzzy, entry.title, entry.cwd, entry.gantry, input.home) {
             continue;
         }
         match leaf_of(&entry.key).and_then(|leaf| group_of.get(&leaf)) {
             Some(&group) => groups[group].members.push(entry),
-            None => by_project.entry((input.project_of)(entry.host, entry.cwd)).or_default().push(entry),
+            None => by_project.entry(project_of_entry(&entry)).or_default().push(entry),
         }
     }
     let mut items_of: HashMap<PathBuf, Vec<Item<'_>>> = HashMap::new();
@@ -769,6 +937,11 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
         let position = |entry: &Entry<'_>| group.tab.leaves.iter().position(|leaf| Some(*leaf) == leaf_of(&entry.key));
         group.members.sort_by_key(position);
         items_of.entry(group.project.clone()).or_default().push(Item::Group(group));
+    }
+    if !filtering {
+        for name in input.gantry_projects {
+            items_of.entry(gantry_project::key(name)).or_default();
+        }
     }
     let mut projects: Vec<(PathBuf, Vec<Item<'_>>)> = items_of.into_iter().collect();
     // Tabs the user placed come below the new ones (newest first), in their saved order; outside sessions have no
@@ -797,13 +970,13 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
     let mut paths: Vec<PathBuf> = projects.iter().map(|(path, _)| path.clone()).collect();
     for (_, items) in &projects {
         for entry in items.iter().flat_map(Item::entries) {
-            let own = (input.project_of)(entry.host, entry.cwd);
+            let own = project_of_entry(entry);
             if !paths.contains(&own) {
                 paths.push(own);
             }
         }
     }
-    let labels = labels(&paths, input.home);
+    let labels = labels(&paths, input.home, input.gantry_projects);
 
     let mut rows = Vec::new();
     for (path, items) in projects {
@@ -812,7 +985,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
             match item {
                 Item::Single(entry) => {
                     let mut row = entry_row(entry, input);
-                    row.project = Some((input.project_of)(entry.host, entry.cwd));
+                    row.project = Some(project_of_entry(entry));
                     rendered.push(row);
                 }
                 Item::Group(group) => {
@@ -833,7 +1006,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
                     for entry in &group.members {
                         let mut row = entry_row(entry, input);
                         row.in_tab = true;
-                        let own = (input.project_of)(entry.host, entry.cwd);
+                        let own = project_of_entry(entry);
                         row.project_label = (own != path).then(|| labels[&own].clone());
                         row.project = Some(own);
                         rendered.push(row);
@@ -853,9 +1026,14 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
         let working = tones.contains(&Tone::Working);
         let mut heading =
             Row::new(RowKind::Project { label: labels[&path].clone(), path: path.clone(), expanded, urgent, working });
-        heading.project = Some(path);
+        let empty = rendered.is_empty() && gantry_project::is_key(&path);
+        heading.project = Some(path.clone());
         rows.push(heading);
-        if expanded {
+        if expanded && empty {
+            let mut line = Row::new(RowKind::Empty);
+            line.project = Some(path);
+            rows.push(line);
+        } else if expanded {
             for row in rendered {
                 let details = match &row.kind {
                     RowKind::Session { session, .. } if input.details == Some(session.id.as_str()) => {
@@ -871,6 +1049,16 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
         }
     }
     rows
+}
+
+/// The Gantry project a pane was put in: its own label wins; its session's label counts only while its project
+/// exists (a deleted one lives on in Recents only). A session running outside Gantry is never in a project.
+fn member_project<'a>(input: &'a ActiveInput<'a>, pane: &'a PaneEntry, session: Option<&str>) -> Option<&'a str> {
+    pane.project.as_deref().or_else(|| {
+        let name = input.session_projects.get(session?)?;
+        let exists = input.gantry_projects.iter().any(|known| gantry_project::same(known, name));
+        exists.then_some(name.as_str())
+    })
 }
 
 /// A split tab and its kept entries, to be listed together.
@@ -1051,10 +1239,13 @@ pub fn project_label(rows: &[Row], root: &Path) -> Option<String> {
     })
 }
 
-/// Project names: the folder's name, or its whole displayed path where two projects share a name. A remote project
+/// Project names: a Gantry project's name, else the folder's name, or its whole displayed path where two projects share a name. A remote project
 /// is `<host> - <name>`.
-pub(crate) fn labels(paths: &[PathBuf], home: Option<&Path>) -> HashMap<PathBuf, String> {
+pub fn labels(paths: &[PathBuf], home: Option<&Path>, gantry: &[String]) -> HashMap<PathBuf, String> {
     let name = |path: &Path, whole: bool| {
+        if let Some(name) = gantry_project::display_name(path, gantry, None) {
+            return name;
+        }
         let (host, root) = split_project_key(path);
         let home = home.filter(|_| host.is_local());
         let text = match root.file_name() {
@@ -1080,14 +1271,23 @@ pub(crate) fn labels(paths: &[PathBuf], home: Option<&Path>) -> HashMap<PathBuf,
         .collect()
 }
 
-/// Whether an entry passes the filter (matched against its title and displayed directory).
-pub(crate) fn keep(fuzzy: &mut Option<Fuzzy>, title: &str, cwd: &Path, home: Option<&Path>) -> bool {
-    fuzzy.as_mut().is_none_or(|fuzzy| fuzzy.score(&keep_text(title, cwd, home)).is_some())
+/// Whether an entry passes the filter (matched against its title, displayed directory and Gantry project name).
+pub(crate) fn keep(
+    fuzzy: &mut Option<Fuzzy>,
+    title: &str,
+    cwd: &Path,
+    gantry: Option<&str>,
+    home: Option<&Path>,
+) -> bool {
+    fuzzy.as_mut().is_none_or(|fuzzy| fuzzy.score(&keep_text(title, cwd, gantry, home)).is_some())
 }
 
-/// The text `keep` matches: the title and the displayed directory.
-pub(crate) fn keep_text(title: &str, cwd: &Path, home: Option<&Path>) -> String {
-    format!("{title} {}", display_path(cwd, home))
+/// The text `keep` matches: the title, the displayed directory and the Gantry project name, if any.
+pub(crate) fn keep_text(title: &str, cwd: &Path, gantry: Option<&str>, home: Option<&Path>) -> String {
+    match gantry {
+        Some(name) => format!("{title} {} {name}", display_path(cwd, home)),
+        None => format!("{title} {}", display_path(cwd, home)),
+    }
 }
 
 fn detail_text(session: &SessionInfo) -> Option<String> {
@@ -1173,6 +1373,7 @@ mod tests {
             alone: true,
             container: None,
             color: None,
+            project: None,
         }
     }
 
@@ -1193,6 +1394,8 @@ mod tests {
         arrivals: Arrivals,
         order: ProjectOrder,
         saved: crate::sidebar_order::SidebarOrder,
+        session_projects: BTreeMap<String, String>,
+        gantry_projects: Vec<String>,
     }
 
     impl Fixture {
@@ -1213,6 +1416,8 @@ mod tests {
                 marked: &self.marked,
                 tabs: &self.tabs,
                 project_of: &project_of,
+                session_projects: &self.session_projects,
+                gantry_projects: &self.gantry_projects,
                 saved_order: &self.saved,
                 now_ms: NOW,
             };
@@ -1228,6 +1433,7 @@ mod tests {
                     }
                     RowKind::Session { session, note, .. } => format!("  {} ({note})", session.id),
                     RowKind::Pane { entry, note, .. } => format!("  leaf {} ({note})", entry.leaf),
+                    RowKind::Empty => "    (empty)".into(),
                     RowKind::Detail { text, .. } => format!("    ({text})"),
                     RowKind::TakeOver { .. } => "    Take over…".into(),
                     RowKind::Tab { index, title, panes, .. } => format!("  tab {} {title} ({panes} panes)", index + 1),
@@ -1730,6 +1936,126 @@ mod tests {
         assert_eq!(reorder(&projects, DragSource::Pane(99), at(1)), None, "an unknown leaf");
     }
 
+    /// /r/app: tab [4, 5] (rows 1..=3), 3 (row 4), 2 (row 5); gantry://work: 1 (row 7); gantry://empty: nothing.
+    fn drop_fixture() -> Vec<ProjectItems> {
+        let block =
+            |row, last_row, leaves: &[NodeId], group| ItemBlock { row, last_row, leaves: leaves.to_vec(), group };
+        vec![
+            ProjectItems {
+                path: PathBuf::from("/r/app"),
+                blocks: vec![block(1, 3, &[4, 5], true), block(4, 4, &[3], false), block(5, 5, &[2], false)],
+            },
+            ProjectItems { path: gantry_project::key("Work"), blocks: vec![block(7, 7, &[1], false)] },
+            ProjectItems { path: gantry_project::key("Empty"), blocks: vec![] },
+        ]
+    }
+
+    #[test]
+    fn zone_folder_is_due_for_a_gantry_item_whose_folder_has_no_heading() {
+        let projects = drop_fixture();
+        let work = gantry_project::key("Work");
+        let gone = Path::new("/r/gone");
+        assert_eq!(zone_folder(&projects, &work, gone), Some(gone.to_path_buf()));
+        // The folder has a heading: the heading takes the drop.
+        assert_eq!(zone_folder(&projects, &work, Path::new("/r/app")), None);
+        // A folder project's item has nothing to leave.
+        assert_eq!(zone_folder(&projects, Path::new("/r/app"), gone), None);
+        assert_eq!(zone_folder(&[], &work, gone), Some(gone.to_path_buf()));
+    }
+
+    #[test]
+    fn place_in_inserts_into_another_project_and_leaves_the_old_one() {
+        let projects = drop_fixture();
+        let before = |project, block| DropAt::Before { project, block };
+        let placed = |source, at| place_in(&projects, source, at).unwrap();
+        assert_eq!(placed(DragSource::Pane(3), before(1, 0)), (1, vec![vec![3], vec![1]]));
+        assert_eq!(placed(DragSource::Pane(2), DropAt::End { project: 1 }), (1, vec![vec![1], vec![2]]));
+        assert_eq!(placed(DragSource::Pane(2), DropAt::End { project: 2 }), (2, vec![vec![2]]));
+        assert_eq!(placed(DragSource::Pane(1), before(0, 1)), (0, vec![vec![4, 5], vec![1], vec![3], vec![2]]));
+    }
+
+    #[test]
+    fn place_in_moves_a_split_tab_whole_and_a_pane_of_it_alone() {
+        let projects = drop_fixture();
+        assert_eq!(
+            place_in(&projects, DragSource::Tab(4), DropAt::Before { project: 1, block: 0 }),
+            Some((1, vec![vec![4, 5], vec![1]]))
+        );
+        assert_eq!(
+            place_in(&projects, DragSource::Pane(5), DropAt::End { project: 1 }),
+            Some((1, vec![vec![1], vec![5]])),
+            "a pane of a split tab becomes a block of its own"
+        );
+        // Inside one project the blocks are counted before the move.
+        assert_eq!(
+            place_in(&projects, DragSource::Pane(3), DropAt::End { project: 0 }),
+            Some((0, vec![vec![4, 5], vec![2], vec![3]]))
+        );
+        assert_eq!(
+            place_in(&projects, DragSource::Pane(2), DropAt::Before { project: 0, block: 0 }),
+            Some((0, vec![vec![2], vec![4, 5], vec![3]]))
+        );
+    }
+
+    #[test]
+    fn place_in_refuses_unknown_items_and_projects() {
+        let projects = drop_fixture();
+        assert_eq!(place_in(&projects, DragSource::Pane(99), DropAt::End { project: 1 }), None);
+        assert_eq!(place_in(&projects, DragSource::Tab(3), DropAt::End { project: 1 }), None, "a pane is no tab");
+        assert_eq!(place_in(&projects, DragSource::Pane(3), DropAt::End { project: 9 }), None);
+    }
+
+    #[test]
+    fn placed_order_lists_the_moved_leaves_once_at_their_new_place() {
+        let projects = drop_fixture();
+        let (paths, leaves) =
+            placed_order(&projects, DragSource::Pane(3), DropAt::Before { project: 1, block: 0 }).unwrap();
+        assert_eq!(paths.len(), 3);
+        assert_eq!(leaves, vec![4, 5, 2, 3, 1]);
+        let (_, leaves) = placed_order(&projects, DragSource::Pane(5), DropAt::End { project: 2 }).unwrap();
+        assert_eq!(leaves, vec![4, 3, 2, 1, 5]);
+    }
+
+    #[test]
+    fn hover_at_picks_the_block_edge_nearest_the_pointer() {
+        let projects = drop_fixture();
+        let before = |project, block| Some(DropAt::Before { project, block });
+        assert_eq!(hover_at(&projects, 0, 0, 0.9), before(0, 0), "the heading");
+        assert_eq!(hover_at(&projects, 0, 4, 0.2), before(0, 1), "a single row, upper half");
+        assert_eq!(hover_at(&projects, 0, 4, 0.8), before(0, 2), "a single row, lower half");
+        assert_eq!(hover_at(&projects, 0, 5, 0.8), Some(DropAt::End { project: 0 }), "the last block, lower half");
+        assert_eq!(hover_at(&projects, 0, 1, 0.9), before(0, 0), "a split tab's first row, upper half of the block");
+        assert_eq!(hover_at(&projects, 0, 2, 0.5), before(0, 1), "a split tab's middle row, lower half of the block");
+        assert_eq!(hover_at(&projects, 0, 3, 0.1), before(0, 1));
+        assert_eq!(hover_at(&projects, 2, 9, 0.5), Some(DropAt::End { project: 2 }), "an empty project");
+        assert_eq!(hover_at(&projects, 5, 0, 0.5), None);
+    }
+
+    #[test]
+    fn drop_cue_decides_land_or_neutral() {
+        let projects = drop_fixture();
+        let app = Path::new("/r/app");
+        let web = Path::new("/r/web");
+        let work = gantry_project::key("Work");
+        let at = |project, block| DropAt::Before { project, block };
+        let cue = |source, current: &Path, real: &Path, at| drop_cue(&projects, source, current, real, at);
+        // (a) the item's own project: a real move lands, no change shows nothing.
+        assert_eq!(cue(DragSource::Pane(2), app, app, at(0, 0)), DropCue::Land(at(0, 0)));
+        assert_eq!(cue(DragSource::Pane(3), app, app, at(0, 1)), DropCue::Neutral);
+        // (b) a Gantry project the item is not in.
+        assert_eq!(cue(DragSource::Pane(3), app, app, at(1, 0)), DropCue::Land(at(1, 0)));
+        assert_eq!(
+            cue(DragSource::Pane(3), app, app, DropAt::End { project: 2 }),
+            DropCue::Land(DropAt::End { project: 2 })
+        );
+        // (c) a folder project: only the item's real one takes it back from a Gantry project.
+        assert_eq!(cue(DragSource::Pane(1), &work, app, at(0, 1)), DropCue::Land(at(0, 1)));
+        assert_eq!(cue(DragSource::Pane(1), &work, web, at(0, 1)), DropCue::Neutral);
+        // (d) anything else: nothing.
+        assert_eq!(cue(DragSource::Pane(6), web, web, at(0, 1)), DropCue::Neutral);
+        assert_eq!(cue(DragSource::Pane(3), app, app, at(7, 0)), DropCue::Neutral);
+    }
+
     #[test]
     fn shown_order_lists_projects_and_tabs_top_to_bottom_with_a_moved_project() {
         let rows = app_fixture().rows();
@@ -2067,7 +2393,7 @@ mod tests {
             project_key(&devbox, Path::new("/home/u/app")),
             project_key(&devbox, Path::new("/home/u/api")),
         ];
-        let labels = labels(&paths, Some(Path::new("/home/me")));
+        let labels = labels(&paths, Some(Path::new("/home/me")), &[]);
         assert_eq!(labels[&paths[0]], "app");
         assert_eq!(labels[&paths[1]], "devbox - app");
         assert_eq!(labels[&paths[2]], "devbox - api");
@@ -2077,8 +2403,111 @@ mod tests {
     fn two_remote_folders_with_one_name_show_their_paths() {
         let devbox = HostId::named("devbox");
         let paths = vec![project_key(&devbox, Path::new("/srv/a/app")), project_key(&devbox, Path::new("/srv/b/app"))];
-        let labels = labels(&paths, None);
+        let labels = labels(&paths, None, &[]);
         assert_eq!(labels[&paths[0]], "devbox - /srv/a/app");
         assert_eq!(labels[&paths[1]], "devbox - /srv/b/app");
+    }
+
+    fn gantry_pane(leaf: NodeId, cwd: &str, project: &str) -> PaneEntry {
+        PaneEntry { project: Some(project.into()), ..shell_pane(leaf, cwd) }
+    }
+
+    #[test]
+    fn pane_with_project_is_listed_under_its_gantry_heading_only() {
+        let mut fixture = Fixture::of(vec![], vec![gantry_pane(1, "/r/alpha", "Billing"), shell_pane(2, "/r/alpha")]);
+        fixture.gantry_projects = vec!["Billing".into()];
+        let rows = fixture.rows();
+        let headings: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::Project { label, path, .. } => Some((label.clone(), path.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headings.len(), 2);
+        assert!(headings.contains(&("Billing".into(), PathBuf::from("gantry://billing"))));
+        assert!(headings.contains(&("alpha".into(), PathBuf::from("/r/alpha"))));
+        let at = |key: RowKey| find(&rows, &key).unwrap();
+        let billing = at(RowKey::Project("gantry://billing".into()));
+        assert_eq!(at(RowKey::Leaf(1)), billing + 1);
+        assert_eq!(rows[billing + 1].project, Some(PathBuf::from("gantry://billing")));
+        assert_eq!(rows.iter().filter(|row| row.key() == RowKey::Leaf(1)).count(), 1);
+    }
+
+    #[test]
+    fn empty_gantry_project_gets_a_heading() {
+        let mut fixture = Fixture::of(vec![], vec![]);
+        fixture.gantry_projects = vec!["Billing".into()];
+        assert_eq!(fixture.outline(), vec!["▾ Billing", "    (empty)"]);
+        fixture.toggled.insert(PathBuf::from("gantry://billing"));
+        assert_eq!(fixture.outline(), vec!["▸ Billing"]);
+        fixture.toggled.clear();
+        // A filter hides it, like any project with nothing matching.
+        fixture.filter = "zzz".into();
+        assert!(fixture.outline().is_empty());
+    }
+
+    #[test]
+    fn the_filter_matches_a_gantry_project_name() {
+        let mut fixture = Fixture::of(vec![], vec![gantry_pane(1, "/r/alpha", "Billing"), shell_pane(2, "/r/beta")]);
+        fixture.gantry_projects = vec!["Billing".into()];
+        fixture.filter = "billing".into();
+        let rows = fixture.rows();
+        assert!(find(&rows, &RowKey::Leaf(1)).is_some());
+        assert!(find(&rows, &RowKey::Leaf(2)).is_none());
+    }
+
+    #[test]
+    fn split_tab_sits_under_first_panes_project() {
+        let mut fixture = Fixture::of(vec![], vec![gantry_pane(1, "/r/alpha", "Billing"), shell_pane(2, "/r/beta")]);
+        fixture.gantry_projects = vec!["Billing".into()];
+        fixture.tabs = vec![tab(0, 1, &[1, 2])];
+        let rows = fixture.rows();
+        assert_eq!(
+            keys(&rows),
+            vec![RowKey::Project("gantry://billing".into()), RowKey::Tab(1), RowKey::Leaf(1), RowKey::Leaf(2)]
+        );
+        assert_eq!(rows[2].project_label, None);
+        assert_eq!(rows[3].project_label.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn an_external_session_is_never_listed_in_a_gantry_project() {
+        let external = session("e1", "/r/alpha", SessionState::External { pid: Some(5) }, NOW - HOUR_MS);
+        let mut fixture = Fixture::of(vec![external], vec![]);
+        fixture.session_projects.insert("e1".into(), "Billing".into());
+        fixture.gantry_projects = vec!["Billing".into()];
+        let rows = fixture.rows();
+        let heading = |name: &str| {
+            rows.iter().position(|row| matches!(&row.kind, RowKind::Project { label, .. } if label == name))
+        };
+        let (alpha, billing) = (heading("alpha").unwrap(), heading("Billing").unwrap());
+        assert!(rows[alpha + 1..].iter().any(|row| matches!(&row.kind, RowKind::Session { .. })), "under its folder");
+        assert!(
+            !rows[billing + 1..]
+                .iter()
+                .take_while(|row| !matches!(&row.kind, RowKind::Project { .. }))
+                .any(|row| matches!(&row.kind, RowKind::Session { .. })),
+            "the project stays empty"
+        );
+    }
+
+    #[test]
+    fn a_renamed_project_keeps_its_place_and_a_deleted_one_is_forgotten() {
+        let mut order = ProjectOrder::default();
+        order.seed(&paths(&["/a", "gantry://billing", "/b"]));
+        order.rename(Path::new("gantry://billing"), Path::new("gantry://invoices"));
+        assert_eq!(order.projects(), paths(&["/a", "gantry://invoices", "/b"]));
+        order.forget(Path::new("gantry://invoices"));
+        assert_eq!(order.projects(), paths(&["/a", "/b"]));
+        assert_eq!(order.to_save(&paths(&["/a", "/b"])), paths(&["/a", "/b"]));
+    }
+
+    #[test]
+    fn to_save_keeps_gantry_keys_even_when_empty() {
+        let mut order = ProjectOrder::default();
+        order.seed(&paths(&["gantry://billing", "/gone", "/a"]));
+        order.update(&paths(&["/a"]), false);
+        assert_eq!(order.to_save(&paths(&["/a"])), paths(&["gantry://billing", "/a"]));
     }
 }

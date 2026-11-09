@@ -112,6 +112,8 @@ pub(super) enum DialogAction {
     Disconnect(HostId),
     /// Close these leaves: 0 closes.
     ClosePanes(Vec<NodeId>),
+    /// Delete the Gantry project of this name: 0 stops its running sessions and closes its panes.
+    DeleteProject(String),
     /// Take over `session` on `host`: 0 asks the daemon to stop it and remembers where to resume.
     TakeOver { host: HostId, session: String, target: TakeOverTarget },
     /// The session ignored the stop request: 0 force quits it, any other choice gives up the take over.
@@ -130,6 +132,8 @@ pub(super) struct DevContainerOpen {
     axis: Option<Axis>,
     cwd_from: Option<PaneKey>,
     host: HostId,
+    /// The Gantry project the new session goes into.
+    project: Option<String>,
     /// The folder the container mounts, on the host.
     host_folder: PathBuf,
 }
@@ -236,6 +240,8 @@ struct PendingOpen {
     cwd_from: Option<PaneKey>,
     /// The host a split runs on (the source pane's); `local` otherwise.
     host: HostId,
+    /// The Gantry project the new session goes into.
+    project: Option<String>,
 }
 
 /// One connected host's daemon.

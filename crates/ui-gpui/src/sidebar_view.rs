@@ -1,19 +1,20 @@
 //! The sidebar: the Active list (every pane and every Claude session running outside Gantry, by project), colored
 //! by what each needs, with a fuzzy filter.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use app_core::gantry_project::{self, Assign, ProjectError};
 use app_core::host_state::{HostDot, hosts_summary};
 use app_core::hosts_fold::HostsFold;
 use app_core::menus::{self, MenuAction, MenuContext};
 use app_core::session_tree::{
-    self, Activation, ActiveInput, Arrivals, DragSource, DropAt, GroupEdges, PaneEntry, ProjectItems, ProjectOrder,
-    ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, display_path, project_items, reorder, session_title,
-    shown_order,
+    self, Activation, ActiveInput, Arrivals, DragSource, DropAt, DropCue, GroupEdges, PaneEntry, ProjectItems,
+    ProjectOrder, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, display_path, drop_cue, hover_at, labels,
+    placed_order, project_items, reorder, session_title, shown_order, zone_folder,
 };
 use app_core::sessions::SessionStore;
 use app_core::sidebar_compact::tile_letter;
@@ -22,15 +23,15 @@ use app_core::split_tree::NodeId;
 use app_core::text_field::TextField;
 use app_core::theme_colors::ToneColors;
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task,
+    AnyElement, App, Bounds, ClickEvent, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task,
     UniformListDecoration, UniformListScrollHandle, Window, div, prelude::*, px, relative, rgb, rgba, svg,
     uniform_list,
 };
-use protocol::host::HostId;
+use protocol::host::{HostId, split_project_key};
 use protocol::message::SessionInfo;
 
-use crate::assets::{CHEVRON_DOWN_ICON, CHEVRON_RIGHT_ICON, CLOSE_ICON};
+use crate::assets::{CHEVRON_DOWN_ICON, CHEVRON_RIGHT_ICON, CLOSE_ICON, FOLDER_ICON, LAYERS_ICON};
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::git_scrollbar::Extent;
@@ -78,6 +79,15 @@ pub enum RenameTarget {
     Tab(usize),
 }
 
+/// The inline name field of a Gantry project.
+struct ProjectEdit {
+    /// The project being renamed (its display name); `None` = a new project.
+    from: Option<String>,
+    field: TextField,
+    /// Why the name was refused, while the field still holds it.
+    error: Option<ProjectError>,
+}
+
 /// What the sidebar asks the workspace to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SidebarEvent {
@@ -111,6 +121,27 @@ pub enum SidebarEvent {
     },
     /// A pane of a split tab was dropped on the sidebar: make it a tab of its own.
     PullOut(NodeId),
+    /// The new project button was pressed: show the sidebar with its name field open.
+    StartProject,
+    /// A name was confirmed for a new Gantry project.
+    NewProject(String),
+    /// A Gantry project's inline rename was confirmed.
+    RenameProject {
+        /// The project's display name before.
+        from: String,
+        /// The new name (checked: not empty, not another project's).
+        to: String,
+    },
+    /// The × of a Gantry project heading was pressed.
+    DeleteProject(String),
+    /// A pane, tab or session was dropped on a project heading (or inside a Gantry project): `project` is the
+    /// Gantry project it goes into, `None` = back to its folder project.
+    AssignToProject {
+        /// What was dropped.
+        source: Assign,
+        /// The target Gantry project's display name.
+        project: Option<String>,
+    },
     /// The user moved a project or a tab: this is the order to save in the layout.
     OrderChanged(SidebarOrder),
     /// Open the recent sessions pop-up.
@@ -171,9 +202,15 @@ pub struct SidebarView {
     saved_order: SidebarOrder,
     /// The movable items of the listed projects (none while a filter is typed).
     items: Rc<Vec<ProjectItems>>,
+    /// What a dragged pane or split tab shows over the row it is on.
+    drop_hint: Option<DropHint>,
+    /// The drop-in zone offered while a pane or split tab is dragged (see `update_zone`).
+    zone: Option<Zone>,
     filter: TextField,
     /// The row being renamed and its text field.
     renaming: Option<(RenameTarget, TextField)>,
+    /// The Gantry project name being typed: a new project's, or the rename of one.
+    project_edit: Option<ProjectEdit>,
     toggled: HashSet<PathBuf>,
     details: Option<String>,
     /// Sessions with an alert the user has not seen.
@@ -193,6 +230,8 @@ pub struct SidebarView {
     home: Option<PathBuf>,
     /// Project of each directory seen (it stats parent directories; cleared on every refresh).
     roots: ProjectRoots,
+    gantry_projects: Vec<String>,
+    session_projects: BTreeMap<String, String>,
     /// The Settings tab is open (a row above the list), and is the visible tab.
     settings_open: bool,
     settings_active: bool,
@@ -242,8 +281,11 @@ impl SidebarView {
             order: ProjectOrder::default(),
             saved_order: SidebarOrder::default(),
             items: Rc::new(Vec::new()),
+            drop_hint: None,
+            zone: None,
             filter: TextField::default(),
             renaming: None,
+            project_edit: None,
             toggled: HashSet::new(),
             details: None,
             unseen: HashSet::new(),
@@ -257,6 +299,8 @@ impl SidebarView {
             scroll: UniformListScrollHandle::new(),
             home: std::env::home_dir(),
             roots: ProjectRoots::new(std::env::home_dir()),
+            gantry_projects: Vec::new(),
+            session_projects: BTreeMap::new(),
             settings_open: false,
             settings_active: false,
             git_row: None,
@@ -325,9 +369,24 @@ impl SidebarView {
             .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SidebarEvent::New { claude: false })))
     }
 
-    /// The project a directory belongs to (its git repository, else the directory).
-    pub(crate) fn project_of(&self, host: &HostId, cwd: &Path) -> PathBuf {
-        self.roots.of(host, cwd)
+    /// The project a pane belongs to: the Gantry project `gantry` when given, else its directory's (its git
+    /// repository, else the directory).
+    pub(crate) fn project_of(&self, host: &HostId, cwd: &Path, gantry: Option<&str>) -> PathBuf {
+        self.roots.of_member(host, cwd, gantry)
+    }
+
+    /// The Gantry projects and the projects sessions were put in.
+    pub fn set_projects(
+        &mut self,
+        projects: Vec<String>,
+        session_projects: BTreeMap<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if projects != self.gantry_projects || session_projects != self.session_projects {
+            self.gantry_projects = projects;
+            self.session_projects = session_projects;
+            self.rebuild(cx);
+        }
     }
 
     /// Every Gantry leaf in sidebar order, whatever the filter or collapsed projects hide.
@@ -641,6 +700,24 @@ impl SidebarView {
         self.rebuild(cx);
     }
 
+    /// A Gantry project was renamed: its heading keeps its place and its fold; `saved` is the workspace's order now.
+    pub fn project_renamed(&mut self, from: &Path, to: &Path, saved: SidebarOrder, cx: &mut Context<Self>) {
+        self.order.rename(from, to);
+        if self.toggled.remove(from) {
+            self.toggled.insert(to.to_path_buf());
+        }
+        self.saved_order = saved;
+        self.rebuild(cx);
+    }
+
+    /// A Gantry project was deleted: its place is forgotten; `saved` is the workspace's order now.
+    pub fn project_removed(&mut self, key: &Path, saved: SidebarOrder, cx: &mut Context<Self>) {
+        self.order.forget(key);
+        self.toggled.remove(key);
+        self.saved_order = saved;
+        self.rebuild(cx);
+    }
+
     /// The workspace's panes and tabs.
     pub fn set_panes(&mut self, panes: Vec<PaneEntry>, tabs: Vec<TabEntry>, cx: &mut Context<Self>) {
         if panes != self.panes || tabs != self.tabs {
@@ -668,6 +745,57 @@ impl SidebarView {
         self.focus_handle.focus(window, cx);
         cx.notify();
         true
+    }
+
+    /// Open the name field of a new Gantry project at the top of the list.
+    pub fn start_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.renaming = None;
+        self.project_edit = Some(ProjectEdit { from: None, field: TextField::default(), error: None });
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Edit the name of the Gantry project `name` in place on its heading. False, changing nothing, when its
+    /// heading is not in the drawn list (collapsed sidebar, filter).
+    pub fn start_project_rename(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let key = gantry_project::key(name);
+        let Some(index) =
+            self.rows.iter().position(|row| matches!(&row.kind, RowKind::Project { path, .. } if *path == key))
+        else {
+            return false;
+        };
+        self.scroll.scroll_to_item(index, ScrollStrategy::Center);
+        let mut field = TextField::default();
+        field.insert(name);
+        field.select_all();
+        self.renaming = None;
+        self.project_edit = Some(ProjectEdit { from: Some(name.to_string()), field, error: None });
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+        true
+    }
+
+    /// The project name field: the text, with a red line under it while the name is refused.
+    fn project_field(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let edit = self.project_edit.as_ref()?;
+        let press = field::on_press(cx, |this, offset, clicks, _, cx| {
+            if let Some(edit) = &mut this.project_edit {
+                edit.field.press(offset, clicks);
+            }
+            cx.notify();
+        });
+        let line = if edit.error.is_some() { theme.tokens.danger } else { theme.tokens.line };
+        Some(
+            div()
+                .flex_1()
+                .min_w_0()
+                // A press in the field must not activate the row.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .border_b_1()
+                .border_color(rgb(line))
+                .child(field::render(&edit.field, "Project name", true, theme, press)),
+        )
     }
 
     /// The inline field standing in for the title of the row of `target`, while it is being renamed.
@@ -711,6 +839,8 @@ impl SidebarView {
                     marked: &self.marked,
                     tabs: &self.tabs,
                     project_of: &project_of,
+                    session_projects: &self.session_projects,
+                    gantry_projects: &self.gantry_projects,
                     saved_order: &self.saved_order,
                     now_ms,
                 };
@@ -790,6 +920,36 @@ impl SidebarView {
 
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
+        if let Some(edit) = &mut self.project_edit {
+            match keystroke.key.as_str() {
+                "enter" => {
+                    let (from, name) = (edit.from.clone(), edit.field.text().to_string());
+                    match gantry_project::validate_name(&self.gantry_projects, &name, from.as_deref()) {
+                        Ok(to) => {
+                            self.project_edit = None;
+                            cx.emit(match from {
+                                Some(from) => SidebarEvent::RenameProject { from, to },
+                                None => SidebarEvent::NewProject(to),
+                            });
+                            cx.emit(SidebarEvent::Dismiss);
+                        }
+                        Err(error) => edit.error = Some(error).filter(|error| error.message().is_some()),
+                    }
+                }
+                "escape" => {
+                    self.project_edit = None;
+                    cx.emit(SidebarEvent::Dismiss);
+                }
+                _ => {
+                    if field::edit(&mut edit.field, keystroke, cx) {
+                        edit.error = None;
+                    }
+                }
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if let Some((target, field)) = &mut self.renaming {
             match keystroke.key.as_str() {
                 "enter" => {
@@ -880,7 +1040,7 @@ impl SidebarView {
             .map(|pane| (pane.leaf, pane.color));
         let alone = |leaf: NodeId| self.panes.iter().find(|pane| pane.leaf == leaf).is_none_or(|pane| pane.alone);
         let items = match &row.kind {
-            RowKind::Project { path, .. } => {
+            RowKind::Project { path, label, .. } => {
                 // The dev container one of its listed sessions runs in.
                 let container = self.rows[index + 1..]
                     .iter()
@@ -893,7 +1053,10 @@ impl SidebarView {
                         }
                         _ => None,
                     });
-                Some(menus::project_menu(path, container, &context))
+                match gantry_project::is_key(path) {
+                    true => Some(menus::gantry_project_menu(label, path, &context)),
+                    false => Some(menus::project_menu(path, container, &context)),
+                }
             }
             _ => menus::row_menu(row, &alone, &context),
         };
@@ -914,52 +1077,258 @@ impl SidebarView {
         }
     }
 
-    /// Half a row that takes a dragged tab (a pane's row or a split tab's heading) to `at`: it draws a line at its top
-    /// or bottom edge while an item that can go there is over it.
-    fn landing(&self, at: DropAt, top: bool, cx: &mut Context<Self>) -> gpui::Div {
-        let theme = theme(cx).clone();
-        let half = theme.ui(ROW_HEIGHT / 2.);
-        let accent = rgb(theme.tokens.accent);
-        let (pane_items, tab_items) = (self.items.clone(), self.items.clone());
-        let line = move |style: gpui::StyleRefinement| {
-            if top { style.border_t_2().border_color(accent) } else { style.border_b_2().border_color(accent) }
-        };
-        div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .when(top, |half_row| half_row.top_0())
-            .when(!top, |half_row| half_row.bottom_0())
-            .h(half)
-            .drag_over::<DraggedPane>(move |style, dragged, _, _| {
-                if reorder(&pane_items, DragSource::Pane(dragged.leaf), at).is_some() { line(style) } else { style }
-            })
-            .drag_over::<DraggedTab>(move |style, dragged, _, _| {
-                if reorder(&tab_items, DragSource::Tab(dragged.first), at).is_some() { line(style) } else { style }
-            })
-            .on_drop(cx.listener(move |this, dragged: &DraggedPane, _, cx| {
-                this.drop_item(DragSource::Pane(dragged.leaf), at, cx)
-            }))
-            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
-                this.drop_item(DragSource::Tab(dragged.first), at, cx)
-            }))
+    /// What dragging `source` over row `index` shows, from where the pointer is in the row (`fraction`: 0 = top,
+    /// 1 = bottom). `None` = nothing (the drop is not for this row's project).
+    fn hint_for(&self, index: usize, source: DragSource, fraction: f32) -> Option<DropHint> {
+        if matches!(self.rows[index].kind, RowKind::Detail { .. }) {
+            return None;
+        }
+        let heading = self.rows[..=index].iter().rposition(|row| matches!(row.kind, RowKind::Project { .. }))?;
+        let target = self.rows[heading].project.as_ref()?;
+        let project = self.items.iter().position(|items| &items.path == target)?;
+        let at = hover_at(&self.items, project, index, fraction)?;
+        let (current, real) = self.drag_facts(source)?;
+        match drop_cue(&self.items, source, &current, &real, at) {
+            DropCue::Neutral => None,
+            DropCue::Land(at) => Some(DropHint { row: index, target: target.clone(), at }),
+        }
     }
 
-    /// A tab was dropped at `at`: move it inside its project and save the new order. A drop that is no move leaves
-    /// the drop to the list (a pane of a split tab becomes a tab of its own).
-    fn drop_item(&mut self, source: DragSource, at: DropAt, cx: &mut Context<Self>) {
-        let Some((project, blocks)) = reorder(&self.items, source, at) else {
-            if let DragSource::Pane(leaf) = source
-                && session_tree::pullable_leaves(&self.panes).contains(&leaf)
-            {
-                cx.emit(SidebarEvent::PullOut(leaf));
+    /// The project `source` is listed in and the folder project of its pane.
+    fn drag_facts(&self, source: DragSource) -> Option<(PathBuf, PathBuf)> {
+        let current = self.rows.iter().find_map(|row| match (&row.kind, source) {
+            (RowKind::Session { leaf: Some(leaf), .. }, DragSource::Pane(pane)) if *leaf == pane => row.project.clone(),
+            (RowKind::Pane { entry, .. }, DragSource::Pane(pane)) if entry.leaf == pane => row.project.clone(),
+            (RowKind::Tab { first, .. }, DragSource::Tab(tab)) if *first == tab => row.project.clone(),
+            _ => None,
+        })?;
+        let (DragSource::Pane(leaf) | DragSource::Tab(leaf)) = source;
+        let pane = self.panes.iter().find(|pane| pane.leaf == leaf)?;
+        Some((current, self.roots.of(&pane.host, &pane.cwd)))
+    }
+
+    /// A pane or split tab is being dragged, `inside` the sidebar or not (`bounds`: the sidebar, `position`: the
+    /// pointer): offer the drop-in zone of its folder while the pointer is over the sidebar, the item is in a Gantry
+    /// project and the folder has no heading. Never with a filter typed or the compact column. A new zone is not armed
+    /// until the pointer has been outside its box once.
+    fn update_zone(
+        &mut self,
+        source: DragSource,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let offered = bounds.contains(&position) && self.amount < 0.5 && self.filter_text().is_empty();
+        let zone = offered
+            .then(|| {
+                let (current, real) = self.drag_facts(source)?;
+                let folder = zone_folder(&self.items, &current, &real)?;
+                let project = gantry_project::display_name(&current, &self.gantry_projects, None)?;
+                let armed = self.zone.as_ref().is_some_and(|old| {
+                    old.armed && old.source == source && old.folder == folder && old.project == project
+                });
+                Some(Zone { source, folder, project, armed, hovered: false })
+            })
+            .flatten();
+        if self.zone != zone {
+            self.zone = zone;
+            cx.notify();
+        }
+    }
+
+    /// A drag that is not a pane or split tab: no drop-in zone.
+    fn clear_zone(&mut self, cx: &mut Context<Self>) {
+        if self.zone.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// A pane or split tab moved, `bounds` being the drop-in zone's box: no row shows a drop hint while the pointer is
+    /// in it, and once it has been outside the box the zone is armed.
+    fn drag_over_zone(&mut self, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let inside = bounds.contains(&position);
+        if inside && self.drop_hint.take().is_some() {
+            cx.notify();
+        }
+        if let Some(zone) = self.zone.as_mut() {
+            let armed = zone.armed || !inside;
+            let hovered = inside && armed;
+            if zone.armed != armed || zone.hovered != hovered {
+                zone.armed = armed;
+                zone.hovered = hovered;
+                cx.notify();
             }
-            return;
-        };
+        }
+    }
+
+    /// `source` was dropped on the drop-in zone's box: when the zone is armed it leaves its Gantry project for its
+    /// folder; the drop is taken either way.
+    fn drop_on_zone(&mut self, source: DragSource, cx: &mut Context<Self>) {
+        self.drop_hint = None;
+        if self.zone.take().is_some_and(|zone| zone.armed && zone.source == source) {
+            let source = match source {
+                DragSource::Pane(leaf) => Assign::Leaf(leaf),
+                DragSource::Tab(first) => Assign::Tab(first),
+            };
+            cx.emit(SidebarEvent::AssignToProject { source, project: None });
+        }
+        cx.notify();
+    }
+
+    /// The drop-in zone: a dashed box for the folder, drawn below the list while one is offered.
+    fn render_zone(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<Stateful<gpui::Div>> {
+        let zone = self.zone.as_ref().filter(|_| cx.has_active_drag() && self.amount < 0.5)?;
+        let hovered = zone.hovered;
+        let (host, root) = split_project_key(&zone.folder);
+        let home = self.home.as_deref().filter(|_| host.is_local());
+        let mut paths: Vec<PathBuf> = self.items.iter().map(|items| items.path.clone()).collect();
+        paths.push(zone.folder.clone());
+        let name = labels(&paths, home, &self.gantry_projects).remove(&zone.folder).unwrap_or_default();
+        let color = theme.tokens.accent;
+        Some(
+            div()
+                .id("drop-in-zone")
+                .flex_none()
+                .flex()
+                .flex_col()
+                .mx(theme.ui(12.))
+                .mt(theme.ui(4.))
+                .mb(theme.ui(6.))
+                .gap(theme.ui(4.))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.tokens.muted))
+                        .child("BACK TO ITS FOLDER"),
+                )
+                .child(
+                    div()
+                        .id("drop-in-zone-box")
+                        .flex()
+                        .flex_col()
+                        .gap(theme.ui(2.))
+                        .px(theme.ui(10.))
+                        .py(theme.ui(8.))
+                        .rounded(px(RADIUS))
+                        .border_2()
+                        .border_dashed()
+                        .border_color(rgb(color))
+                        .bg(rgba((color << 8) | if hovered { 0x40 } else { 0x1a }))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(theme.ui(6.))
+                                .child(
+                                    svg()
+                                        .path(FOLDER_ICON)
+                                        .flex_none()
+                                        .size(theme.ui(14.))
+                                        .text_color(rgb(theme.tokens.muted)),
+                                )
+                                .when(!host.is_local(), |line| line.child(ssh_icon(theme.tokens.muted, theme)))
+                                .child(
+                                    div().flex_1().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(name),
+                                ),
+                        )
+                        .child(if hovered {
+                            div()
+                                .text_xs()
+                                .text_color(rgb(color))
+                                .child(format!("Drop to take it out of {}", zone.project))
+                        } else {
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(rgba((theme.tokens.muted << 8) | 0xb3))
+                                .child(display_path(&root, home))
+                        })
+                        .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DraggedPane>, _, cx| {
+                            this.drag_over_zone(event.bounds, event.event.position, cx)
+                        }))
+                        .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DraggedTab>, _, cx| {
+                            this.drag_over_zone(event.bounds, event.event.position, cx)
+                        }))
+                        // Taking the drop here keeps the sidebar's own pull-out from also firing.
+                        .on_drop(cx.listener(|this, dragged: &DraggedPane, _, cx| {
+                            this.drop_on_zone(DragSource::Pane(dragged.leaf), cx)
+                        }))
+                        .on_drop(cx.listener(|this, dragged: &DraggedTab, _, cx| {
+                            this.drop_on_zone(DragSource::Tab(dragged.first), cx)
+                        })),
+                ),
+        )
+    }
+
+    /// A pane or split tab is over row `index`: keep the drop hint in step with the pointer.
+    fn drag_over_row(
+        &mut self,
+        index: usize,
+        source: DragSource,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let next = bounds.contains(&position).then(|| {
+            let fraction = f32::from(position.y - bounds.origin.y) / f32::from(bounds.size.height).max(1.);
+            self.hint_for(index, source, fraction)
+        });
+        match next {
+            Some(hint) if self.drop_hint != hint => {
+                self.drop_hint = hint;
+                cx.notify();
+            }
+            None if self.drop_hint.as_ref().is_some_and(|hint| hint.row == index) => {
+                self.drop_hint = None;
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    /// A pane or split tab was dropped on a row: it goes where the hint showed; with no hint a pane of a split tab
+    /// becomes a tab of its own.
+    fn drop_item(&mut self, source: DragSource, cx: &mut Context<Self>) {
+        match self.drop_hint.take() {
+            Some(hint) => self.land(source, hint.at, cx),
+            None => {
+                cx.notify();
+                if let DragSource::Pane(leaf) = source
+                    && session_tree::pullable_leaves(&self.panes).contains(&leaf)
+                {
+                    cx.emit(SidebarEvent::PullOut(leaf));
+                }
+            }
+        }
+    }
+
+    /// Put `source` at `at`: a move inside its project saves the new order; into another project, the order with the
+    /// item at that place is saved first and then the workspace gives it the project.
+    fn land(&mut self, source: DragSource, at: DropAt, cx: &mut Context<Self>) {
+        let (DropAt::Before { project, .. } | DropAt::End { project }) = at;
+        let Some(target) = self.items.get(project).map(|items| items.path.clone()) else { return };
         let all = project_items(&self.all_rows);
-        let Some(shown) = all.iter().position(|items| items.path == self.items[project].path) else { return };
-        let (projects, leaves) = shown_order(&all, Some((shown, &blocks)));
-        self.record_order(&projects, &leaves, cx);
+        let Some(shown) = all.iter().position(|items| items.path == target) else { return };
+        if self.drag_facts(source).is_some_and(|(current, ..)| current == target) {
+            let Some((_, blocks)) = reorder(&self.items, source, at) else { return };
+            let (projects, leaves) = shown_order(&all, Some((shown, &blocks)));
+            self.record_order(&projects, &leaves, cx);
+            return;
+        }
+        let at = match at {
+            DropAt::Before { block, .. } if block < all[shown].blocks.len() => DropAt::Before { project: shown, block },
+            _ => DropAt::End { project: shown },
+        };
+        if let Some((projects, leaves)) = placed_order(&all, source, at) {
+            self.record_order(&projects, &leaves, cx);
+        }
+        let name = gantry_project::display_name(&target, &self.gantry_projects, None);
+        let source = match source {
+            DragSource::Pane(leaf) => Assign::Leaf(leaf),
+            DragSource::Tab(first) => Assign::Tab(first),
+        };
+        cx.emit(SidebarEvent::AssignToProject { source, project: name });
     }
 
     /// Save the order shown now (the user just changed it) and tell the workspace.
@@ -988,31 +1357,8 @@ impl SidebarView {
             _ => None,
         };
         let content = self.render_row_content(index, window, cx);
-        // A dragged tab lands before this item (upper half of its first row) or before the next one (lower half of
-        // its last row); there is no landing outside the item's own project.
-        let place = self.items.iter().enumerate().find_map(|(project, items)| {
-            items.blocks.iter().enumerate().find_map(|(block, item)| {
-                (item.row..=item.last_row).contains(&index).then_some((
-                    project,
-                    block,
-                    item.row == index,
-                    item.last_row == index,
-                    items.blocks.len(),
-                ))
-            })
-        });
-        let landings = place.map(|(project, block, first, last, count)| {
-            let upper = first.then(|| self.landing(DropAt::Before { project, block }, true, cx));
-            let lower = last.then(|| {
-                let at = if block + 1 < count {
-                    DropAt::Before { project, block: block + 1 }
-                } else {
-                    DropAt::End { project }
-                };
-                self.landing(at, false, cx)
-            });
-            (upper, lower)
-        });
+        // The drop cue of a pane or split tab being dragged: this row's part of the target's box, and the line.
+        let cue = self.drop_cue_parts(index, &theme, cx);
         let group_name = format!("row-{index}");
         let marker = div().absolute().left(theme.ui(14.)).right(theme.ui(14.)).h(px(3.)).rounded(px(2.));
         let marker = if edges.first { marker.top(px(0.)) } else { marker.bottom(px(0.)) };
@@ -1077,7 +1423,7 @@ impl SidebarView {
                         .bg(rgba(with_opacity(theme.tokens.line, amount))),
                 )
             })
-            .when_some(landings, |row, (upper, lower)| row.children(upper).children(lower))
+            .children(cue)
             .when(target.is_some(), |row| {
                 row.child(
                     marker.group_drag_over::<DraggedProject>(group_name, |style| style.bg(rgb(theme.tokens.accent))),
@@ -1089,6 +1435,83 @@ impl SidebarView {
                     this.drop_project(&dragged.root, before.as_deref(), cx);
                 }
             }))
+            // Every row takes a dragged pane or split tab, where the hint says it lands.
+            .on_drag_move(cx.listener(move |this, event: &DragMoveEvent<DraggedPane>, _, cx| {
+                let leaf = event.drag(cx).leaf;
+                this.drag_over_row(index, DragSource::Pane(leaf), event.bounds, event.event.position, cx)
+            }))
+            .on_drag_move(cx.listener(move |this, event: &DragMoveEvent<DraggedTab>, _, cx| {
+                let first = event.drag(cx).first;
+                this.drag_over_row(index, DragSource::Tab(first), event.bounds, event.event.position, cx)
+            }))
+            .on_drop(
+                cx.listener(|this, dragged: &DraggedPane, _, cx| this.drop_item(DragSource::Pane(dragged.leaf), cx)),
+            )
+            .on_drop(
+                cx.listener(|this, dragged: &DraggedTab, _, cx| this.drop_item(DragSource::Tab(dragged.first), cx)),
+            )
+    }
+
+    /// Row `index`'s part of the drop cue while a pane or split tab is dragged: the box around the target project's
+    /// group in segments and, where it lands, the line.
+    fn drop_cue_parts(&self, index: usize, theme: &Theme, cx: &App) -> Vec<gpui::Div> {
+        let Some(hint) = self.drop_hint.as_ref().filter(|_| cx.has_active_drag()) else { return Vec::new() };
+        let Some(heading) = self.rows[..=index].iter().rposition(|row| matches!(row.kind, RowKind::Project { .. }))
+        else {
+            return Vec::new();
+        };
+        if self.rows[heading].project.as_ref() != Some(&hint.target) {
+            return Vec::new();
+        }
+        let edges = session_tree::group_edges(&self.rows, index);
+        let faded = 1.0 - self.amount;
+        let color = theme.tokens.accent;
+        let boxed = div()
+            .absolute()
+            .left(theme.ui(6. * faded))
+            .right(theme.ui(6. * faded))
+            .top(if edges.first { theme.ui(8.) } else { px(0.) })
+            .bottom(px(0.))
+            .border_l_2()
+            .border_r_2()
+            .border_dashed()
+            .border_color(rgb(color))
+            .bg(rgba((color << 8) | 0x2e))
+            .when(edges.first, |boxed| boxed.border_t_2().rounded_t(px(RADIUS)))
+            .when(edges.last, |boxed| boxed.border_b_2().rounded_b(px(RADIUS)));
+        let mut parts = vec![boxed];
+        let at = hint.at;
+        let blocks = &self.items.iter().find(|items| items.path == hint.target).map(|items| &items.blocks);
+        let (above, below) = match (at, blocks) {
+            (DropAt::Before { block, .. }, Some(blocks)) => {
+                (blocks.get(block).is_some_and(|item| item.row == index), false)
+            }
+            (DropAt::End { .. }, Some(blocks)) => {
+                (false, blocks.last().map_or(index == heading, |item| item.last_row == index))
+            }
+            _ => (false, false),
+        };
+        if above || below {
+            let line = div()
+                .absolute()
+                .left(theme.ui(6. * faded + 8.))
+                .right(theme.ui(6. * faded + 8.))
+                .h(px(2.))
+                .bg(rgb(theme.tokens.accent))
+                .when(above, |line| line.top(px(0.)))
+                .when(below, |line| line.bottom(px(0.)))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(-3.))
+                        .top(px(-2.))
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(rgb(theme.tokens.accent)),
+                );
+            parts.push(line);
+        }
+        parts
     }
 
     /// The close button of row `index`, in the slot of its right-most mark. It replaces `badge` while the row is
@@ -1291,6 +1714,11 @@ impl SidebarView {
                 let glow = *working && sweeping(Tone::Working, self.animate, true);
                 let band = theme.tone(urgent.unwrap_or(Tone::Working)).dot;
                 let color = theme.project(path);
+                let gantry = gantry_project::is_key(path);
+                let editing = self.project_edit.as_ref().is_some_and(|edit| {
+                    gantry && edit.from.as_deref().is_some_and(|from| gantry_project::same(from, label))
+                });
+                let mark = color.unwrap_or(theme.tokens.muted);
                 let dragged = DraggedProject { root: path.clone(), label: label.clone() };
                 // The hairline needs room: with less than `MIN_RULE` left between the name and the dot it is not drawn
                 // and the name takes the space, so no stub is left. The width is the list's of the last frame.
@@ -1311,16 +1739,26 @@ impl SidebarView {
                             .pl(theme.ui(8.))
                             .pr(theme.ui(6.))
                             .gap(theme.ui(6.))
-                            .child(
-                                div()
+                            .children(gantry.then(|| {
+                                svg()
+                                    .path(LAYERS_ICON)
+                                    .flex_none()
+                                    .size(theme.ui(14.))
+                                    .opacity(faded)
+                                    .text_color(rgb(mark))
+                            }))
+                            .child(match editing.then(|| self.project_field(&theme, cx)).flatten() {
+                                Some(field) => field.into_any_element(),
+                                None => div()
                                     .min_w_0()
                                     .truncate()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .when_some(color, |name, color| name.text_color(rgb(color)))
                                     .when(!rule, |name| name.flex_1())
                                     .opacity(faded)
-                                    .child(label.clone()),
-                            )
+                                    .child(label.clone())
+                                    .into_any_element(),
+                            })
                             // A hairline in the project color joins the name to the dot and the chevron.
                             .when(rule, |pill| {
                                 pill.child(
@@ -1343,6 +1781,55 @@ impl SidebarView {
                                     .opacity(faded)
                                     .text_color(rgb(theme.tokens.muted)),
                             )
+                            // Compact: a Gantry project's layers icon takes the place of the pill.
+                            .when(gantry && amount > 0.0, |pill| {
+                                pill.child(
+                                    svg()
+                                        .path(LAYERS_ICON)
+                                        .absolute()
+                                        .right(theme.ui(26. - (PILL_WIDTH - 8.) * amount + PILL_WIDTH / 2. - 7.))
+                                        .top(relative(0.5))
+                                        .mt(theme.ui(-7.))
+                                        .size(theme.ui(14.))
+                                        .opacity(amount)
+                                        .text_color(rgb(dot)),
+                                )
+                            })
+                            // Expanded: a Gantry project's × deletes it, in the pill's place while the heading is hovered.
+                            .when(gantry && close_slot_shown(amount), |pill| {
+                                let danger = theme.tokens.danger;
+                                let name = label.clone();
+                                pill.child(
+                                    div()
+                                        .id(("delete-project", index))
+                                        .absolute()
+                                        .right(theme.ui(26. + PILL_WIDTH / 2. - 8.))
+                                        .top(relative(0.5))
+                                        .mt(theme.ui(-8.))
+                                        .size(theme.ui(16.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(5.))
+                                        .cursor_pointer()
+                                        .opacity(0.)
+                                        .group_hover(format!("row-{index}"), |style| style.opacity(1.))
+                                        .hover(|style| style.bg(rgba((danger << 8) | 0x24)))
+                                        .child(
+                                            svg()
+                                                .path(CLOSE_ICON)
+                                                .size(theme.ui(12.))
+                                                .text_color(rgba((danger << 8) | 0xc7)),
+                                        )
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                                                cx.emit(SidebarEvent::DeleteProject(name.clone()));
+                                                cx.stop_propagation();
+                                            }),
+                                        ),
+                                )
+                            })
                             .child(
                                 div()
                                     .absolute()
@@ -1353,6 +1840,11 @@ impl SidebarView {
                                     .h(theme.ui(8.))
                                     .rounded(px(3.))
                                     .bg(rgb(dot))
+                                    // A Gantry project's pill gives way to its × while hovered, and to its icon when compact.
+                                    .when(gantry && close_slot_shown(amount), |pill| {
+                                        pill.group_hover(format!("row-{index}"), |style| style.opacity(0.))
+                                    })
+                                    .when(gantry && amount > 0.0, |pill| pill.opacity(1. - amount))
                                     .when(glow, |pill| {
                                         pill.child(pill_sweep(("pill-sweep", index), theme.ui(3.), band))
                                     }),
@@ -1539,6 +2031,18 @@ impl SidebarView {
                         }),
                 )
             }
+            RowKind::Empty => base.child(
+                div()
+                    .pl(theme.ui(39.))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_xs()
+                    .italic()
+                    .opacity(faded)
+                    .text_color(rgb(theme.tokens.muted))
+                    .child("Empty. Drag a session here."),
+            ),
             RowKind::Detail { text, .. } => base.child(
                 div()
                     .pl(theme.ui(39.))
@@ -1625,6 +2129,32 @@ fn renames(kind: &RowKind, target: RenameTarget) -> bool {
     }
 }
 
+/// The drop cue of a dragged pane or split tab, from the row the pointer is over.
+#[derive(Clone, Debug, PartialEq)]
+struct DropHint {
+    /// The row the pointer is over.
+    row: usize,
+    /// The project it would go to (its key).
+    target: PathBuf,
+    /// Where the item lands.
+    at: DropAt,
+}
+
+/// The drop-in zone offered for the item being dragged.
+#[derive(Clone, Debug, PartialEq)]
+struct Zone {
+    /// The dragged pane or split tab.
+    source: DragSource,
+    /// The folder project it goes back to (its key).
+    folder: PathBuf,
+    /// The display name of the Gantry project it is in now.
+    project: String,
+    /// The pointer has been outside the zone's box since it appeared: only then does it take a drop.
+    armed: bool,
+    /// The pointer is in the zone's box and the zone is armed: the drop cue shows.
+    hovered: bool,
+}
+
 /// A split tab's heading being dragged to a new place inside its project.
 #[derive(Clone)]
 struct DraggedTab {
@@ -1698,13 +2228,20 @@ impl Render for SidebarView {
         // Clicking elsewhere (focus left the sidebar) cancels a rename.
         if !focused {
             self.renaming = None;
+            self.project_edit = None;
         }
         // The rename field has the focus then, not the filter.
-        let focused = focused && self.renaming.is_none();
+        let focused = focused && self.renaming.is_none() && self.project_edit.is_none();
         // The sessions list started to scroll (or fits again): the SSH hosts block may fold by itself.
         // Not while compact: the column's own bottom rows are taller, and a fold made then would still be there when
         // the sidebar expands.
+        // A drag that ended (dropped elsewhere, cancelled) leaves no zone behind.
+        if self.zone.is_some() && !cx.has_active_drag() {
+            self.zone = None;
+        }
+        // Not while the drop-in zone is shown: it shrinks the list, which is no scrolling to react to.
         if follows_list_scroll(self.amount)
+            && self.zone.is_none()
             && let Some(extent) = Extent::of(&self.scroll)
         {
             self.hosts_fold.observe(extent.contents.1 > extent.viewport.1 + 0.5);
@@ -1728,7 +2265,19 @@ impl Render for SidebarView {
                 let tint = rgba((theme.tokens.accent << 8) | 0x2e);
                 move |style, dragged, _, _| if pullable.contains(&dragged.leaf) { style.bg(tint) } else { style }
             })
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DraggedPane>, _, cx| {
+                let source = DragSource::Pane(event.drag(cx).leaf);
+                this.update_zone(source, event.bounds, event.event.position, cx)
+            }))
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DraggedTab>, _, cx| {
+                let source = DragSource::Tab(event.drag(cx).first);
+                this.update_zone(source, event.bounds, event.event.position, cx)
+            }))
+            // Any other drag (a project heading, files) shows no zone.
+            .on_drag_move(cx.listener(|this, _: &DragMoveEvent<DraggedProject>, _, cx| this.clear_zone(cx)))
+            .on_drag_move(cx.listener(|this, _: &DragMoveEvent<gpui::ExternalPaths>, _, cx| this.clear_zone(cx)))
             .on_drop(cx.listener(|this, dragged: &DraggedPane, _, cx| {
+                this.drop_hint = None;
                 if session_tree::pullable_leaves(&this.panes).contains(&dragged.leaf) {
                     cx.emit(SidebarEvent::PullOut(dragged.leaf));
                 }
@@ -1776,7 +2325,50 @@ impl Render for SidebarView {
                                     }),
                                 )),
                         )
-                    }),
+                    })
+                    // New project: the layers icon with a small plus; also the first tile of the compact column.
+                    .child(
+                        div()
+                            .id("new-project")
+                            .relative()
+                            .flex_none()
+                            .size(theme.ui(36.))
+                            .when(self.amount < 1.0, |button| button.ml(theme.ui(6.) * (1.0 - self.amount)))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(RADIUS))
+                            .bg(rgb(theme.tokens.raised))
+                            .border_1()
+                            .border_color(rgb(theme.tokens.line))
+                            .cursor_pointer()
+                            .hover(|style| style.border_color(rgb(theme.tokens.accent)))
+                            .tooltip(hover_card::tooltip(HoverCard {
+                                title: "New project".into(),
+                                status: None,
+                                dir: None,
+                                container: false,
+                                host: None,
+                                folder: None,
+                            }))
+                            .child(svg().path(LAYERS_ICON).size(theme.ui(18.)).text_color(rgb(theme.tokens.muted)))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .right(theme.ui(3.))
+                                    .bottom(theme.ui(3.))
+                                    .size(theme.ui(11.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(rgb(theme.tokens.accent))
+                                    .text_color(rgb(theme.tokens.on_accent))
+                                    .text_size(theme.ui(10.))
+                                    .child("+"),
+                            )
+                            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SidebarEvent::StartProject))),
+                    ),
             )
             .when(self.settings_open, |this| {
                 let out = RING + RING_GAP;
@@ -1951,6 +2543,47 @@ impl Render for SidebarView {
                     .on_drop(
                         cx.listener(|this, dragged: &DraggedProject, _, cx| this.drop_project(&dragged.root, None, cx)),
                     )
+                    // The name field of a project being made: an empty heading at the top of the list.
+                    .children(
+                        self.project_edit.as_ref().filter(|edit| edit.from.is_none() || edit.error.is_some()).map(
+                            |edit| {
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .flex_col()
+                                    .mx(theme.ui(12.))
+                                    .mb(theme.ui(4.))
+                                    .when(edit.from.is_none(), |card| {
+                                        card.child(
+                                            div()
+                                                .h(theme.ui(34.))
+                                                .px(theme.ui(10.))
+                                                .flex()
+                                                .items_center()
+                                                .gap(theme.ui(6.))
+                                                .rounded(px(RADIUS))
+                                                .border_1()
+                                                .border_color(rgb(theme.tokens.accent))
+                                                .child(
+                                                    svg()
+                                                        .path(LAYERS_ICON)
+                                                        .size(theme.ui(14.))
+                                                        .text_color(rgb(theme.tokens.muted)),
+                                                )
+                                                .children(self.project_field(&theme, cx)),
+                                        )
+                                    })
+                                    .children(edit.error.and_then(ProjectError::message).map(|message| {
+                                        div()
+                                            .px(theme.ui(10.))
+                                            .pt(theme.ui(2.))
+                                            .text_xs()
+                                            .text_color(rgb(theme.tokens.danger))
+                                            .child(message)
+                                    }))
+                            },
+                        ),
+                    )
                     .child(
                         uniform_list(
                             "session-rows",
@@ -1975,7 +2608,8 @@ impl Render for SidebarView {
                         // Room under the last row for its ring.
                         .pb(px(RING + RING_GAP))
                         .flex_1(),
-                    ),
+                    )
+                    .children(self.render_zone(&theme, cx)),
             )
             .child(self.render_hosts(&theme, cx))
             .child(

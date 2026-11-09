@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use protocol::host::HostId;
 use protocol::message::{SearchHit, SessionInfo, SessionState, Speaker};
 
+use crate::gantry_project;
 use crate::session_tree::{age, display_path, labels, session_title};
 
 /// How the pop-up orders its sessions.
@@ -149,8 +150,11 @@ pub struct RecentsInput<'a> {
     pub prefs: &'a Prefs,
     /// A session's config dir name (`None` = it has none, like a session on another host).
     pub dir_name: &'a dyn Fn(&SessionInfo) -> Option<String>,
-    /// The project a directory belongs to.
-    pub project_of: &'a dyn Fn(&HostId, &Path) -> PathBuf,
+    /// The project a session belongs to: the Gantry project it was put in, else the project of its folder.
+    pub project_of: &'a dyn Fn(&SessionInfo) -> PathBuf,
+    /// Every Gantry project name (existing ones first, then those only closed sessions remember): the display names
+    /// of `gantry://` keys.
+    pub gantry_names: &'a [String],
     /// Current time, ms since the Unix epoch.
     pub now_ms: u64,
     /// Conversation search hits for `query`, best first (the latest reply; may be for a slightly older query).
@@ -306,7 +310,7 @@ pub fn items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
                 by_project.entry(row.project.clone()).or_default().push(row);
             }
             let paths: Vec<PathBuf> = by_project.keys().cloned().collect();
-            let labels = labels(&paths, input.home);
+            let labels = labels(&paths, input.home, input.gantry_names);
             let mut projects: Vec<(PathBuf, Vec<Listed<'_>>)> = by_project.into_iter().collect();
             projects.sort_by(|(a, _), (b, _)| {
                 labels[a].to_lowercase().cmp(&labels[b].to_lowercase()).then_with(|| a.cmp(b))
@@ -318,7 +322,11 @@ pub fn items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
                 sessions.sort_by(|a, b| newest(a.session, b.session));
                 items.push(RecentItem::Heading {
                     label: labels[&path].clone(),
-                    display: display_path(&path, input.home),
+                    display: if gantry_project::is_key(&path) {
+                        String::new()
+                    } else {
+                        display_path(&path, input.home)
+                    },
                     path,
                 });
                 items.extend(sessions.iter().map(session_item));
@@ -387,7 +395,7 @@ fn title_marks(input: &RecentsInput<'_>, words: &[String], session: &SessionInfo
 
 /// The project key of `session`, as text (what a project filter selects).
 pub fn project_key_of(input: &RecentsInput<'_>, session: &SessionInfo) -> String {
-    (input.project_of)(&session.host, &session.cwd).to_string_lossy().into_owned()
+    (input.project_of)(session).to_string_lossy().into_owned()
 }
 
 /// The key of `session` in `facet`, or `None` when it has none.
@@ -444,7 +452,7 @@ fn listed<'a>(input: &RecentsInput<'a>, skip: Option<Facet>) -> Vec<Listed<'a>> 
                 None => continue,
             }
         };
-        rows.push(Listed { session, project: (input.project_of)(&session.host, &session.cwd), marks, hit });
+        rows.push(Listed { session, project: (input.project_of)(session), marks, hit });
     }
     rows
 }
@@ -530,7 +538,7 @@ pub fn filter_sections(input: &RecentsInput<'_>) -> Vec<FilterSection> {
             let mut found: HashMap<String, (u64, PathBuf)> = HashMap::new();
             for session in &closed {
                 if let Some(key) = key_of(input, facet, session) {
-                    let project = (input.project_of)(&session.host, &session.cwd);
+                    let project = (input.project_of)(session);
                     let entry = found.entry(key).or_insert((0, project));
                     entry.0 = entry.0.max(session.last_active_ms);
                 }
@@ -539,7 +547,7 @@ pub fn filter_sections(input: &RecentsInput<'_>) -> Vec<FilterSection> {
                 return None;
             }
             let paths: Vec<PathBuf> = found.values().map(|(_, project)| project.clone()).collect();
-            let project_labels = labels(&paths, input.home);
+            let project_labels = labels(&paths, input.home, input.gantry_names);
             let mut counted: HashMap<String, usize> = HashMap::new();
             for row in listed(input, Some(facet)) {
                 if let Some(key) = key_of(input, facet, row.session) {
@@ -639,7 +647,7 @@ mod tests {
         }
     }
 
-    fn project_of(host: &HostId, cwd: &Path) -> PathBuf {
+    fn folder_project(host: &HostId, cwd: &Path) -> PathBuf {
         let root = cwd.ancestors().find(|dir| dir.parent() == Some(Path::new("/r"))).unwrap_or(cwd);
         project_key(host, root)
     }
@@ -652,6 +660,8 @@ mod tests {
         dirs: HashMap<PathBuf, String>,
         hits: Vec<SearchHit>,
         content: ContentState,
+        /// Session id -> Gantry project name.
+        gantry: HashMap<String, String>,
     }
 
     impl Default for Fixture {
@@ -664,6 +674,7 @@ mod tests {
                 dirs: HashMap::new(),
                 hits: Vec::new(),
                 content: ContentState::Waiting,
+                gantry: HashMap::new(),
             }
         }
     }
@@ -677,6 +688,11 @@ mod tests {
             let refs: Vec<&SessionInfo> = self.sessions.iter().collect();
             let dir_name =
                 |session: &SessionInfo| session.claude_dir.as_ref().and_then(|dir| self.dirs.get(dir).cloned());
+            let project_of = |session: &SessionInfo| match self.gantry.get(&session.id) {
+                Some(name) => crate::gantry_project::key(name),
+                None => folder_project(&session.host, &session.cwd),
+            };
+            let names: Vec<String> = self.gantry.values().cloned().collect();
             f(&RecentsInput {
                 sessions: &refs,
                 open: &self.open,
@@ -685,6 +701,7 @@ mod tests {
                 prefs: &self.prefs,
                 dir_name: &dir_name,
                 project_of: &project_of,
+                gantry_names: &names,
                 now_ms: NOW,
                 hits: &self.hits,
                 content: self.content,
@@ -1271,5 +1288,94 @@ mod tests {
         assert!(!prefs.is_filtering());
         prefs.toggle(Facet::Project, "/r/a");
         assert!(prefs.is_filtering());
+    }
+
+    #[test]
+    fn closed_session_with_gantry_name_is_keyed_gantry() {
+        let mut fixture = Fixture::of(vec![closed("a", "/r/app", 1), closed("b", "/r/app", 2)]);
+        fixture.gantry.insert("a".into(), "Billing".into());
+        fixture.with(|input| {
+            assert_eq!(project_key_of(input, input.sessions[0]), "gantry://billing");
+            assert_eq!(project_key_of(input, input.sessions[1]), "/r/app");
+        });
+    }
+
+    #[test]
+    fn deleted_project_name_still_filters() {
+        // The name lives only in the session map: no project exists, the session is still keyed and filterable.
+        let mut fixture = Fixture::of(vec![closed("a", "/r/app", 1), closed("b", "/r/app", 2)]);
+        fixture.gantry.insert("a".into(), "Gone".into());
+        fixture.prefs.toggle(Facet::Project, "gantry://gone");
+        let shown = fixture.with(|input| {
+            items(input)
+                .into_iter()
+                .filter_map(|item| match item {
+                    RecentItem::Session { session, .. } => Some(session.id.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(shown, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn project_filter_label_is_the_name_not_a_path() {
+        let mut fixture = Fixture::of(vec![closed("a", "/r/app", 1), closed("b", "/r/app", 2)]);
+        fixture.gantry.insert("a".into(), "Billing".into());
+        let sections = fixture.with(filter_sections);
+        let project = sections.iter().find(|section| section.facet == Facet::Project).expect("two projects");
+        let labels: Vec<&str> = project.shown.iter().map(|value| value.label.as_str()).collect();
+        assert!(labels.contains(&"Billing"), "{labels:?}");
+        assert!(labels.contains(&"app"), "{labels:?}");
+    }
+
+    fn session_ids(fixture: &Fixture) -> Vec<String> {
+        fixture.with(|input| {
+            items(input)
+                .into_iter()
+                .filter_map(|item| match item {
+                    RecentItem::Session { session, .. } => Some(session.id.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn recents_for_gantry_key_selects_that_project_value() {
+        let mut fixture =
+            Fixture::of(vec![closed("a", "/r/app", 1), closed("b", "/r/app", 2), closed("c", "/r/app", 3)]);
+        fixture.gantry.insert("a".into(), "Billing".into());
+        fixture.gantry.insert("c".into(), "Other".into());
+        fixture.prefs.only_project(crate::gantry_project::key("Billing").to_string_lossy().into_owned());
+        assert_eq!(session_ids(&fixture), vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn renamed_project_relabels_closed_sessions() {
+        let mut ws = crate::workspace::Workspace::default();
+        ws.create_project("Billing").unwrap();
+        ws.session_projects.insert("a".into(), "Billing".into());
+        ws.rename_project("Billing", "Invoices").unwrap();
+        let membership = ws.membership();
+        let mut fixture = Fixture::of(vec![closed("a", "/r/app", 1), closed("b", "/r/other", 2)]);
+        fixture.gantry = membership.sessions.clone().into_iter().collect();
+        let sections = fixture.with(filter_sections);
+        let project = sections.iter().find(|section| section.facet == Facet::Project).expect("two projects");
+        let labels: Vec<&str> = project.shown.iter().map(|value| value.label.as_str()).collect();
+        assert!(labels.contains(&"Invoices"), "{labels:?}");
+        assert!(!labels.contains(&"Billing"), "{labels:?}");
+    }
+
+    #[test]
+    fn deleted_project_listed_like_a_folder_project_without_open_sessions() {
+        // Nothing of the project exists any more: its closed session still sits under its name, like a folder project
+        // whose sessions are all closed.
+        let mut fixture = Fixture::of(vec![closed("a", "/r/app", 1), closed("b", "/r/other", 2)]);
+        fixture.gantry.insert("a".into(), "Gone".into());
+        fixture.prefs.sort = Sort::Project;
+        let outline = fixture.outline();
+        assert!(outline.contains(&"# Gone".to_string()), "{outline:?}");
+        assert!(outline.contains(&"# other".to_string()), "{outline:?}");
     }
 }

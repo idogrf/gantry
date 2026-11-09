@@ -7,6 +7,7 @@ pub mod dialogs;
 pub mod dir_complete;
 pub mod folder_browser;
 pub mod fuzzy;
+pub mod gantry_project;
 pub mod git_diff;
 pub mod git_view;
 pub mod host_install;

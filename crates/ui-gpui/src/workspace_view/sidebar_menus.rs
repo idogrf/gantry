@@ -6,6 +6,7 @@ use super::{
 
 use app_core::attention::AlertKind;
 use app_core::dialogs;
+use app_core::gantry_project::Assign;
 use app_core::sidebar_compact;
 use gpui::{
     ClipboardItem, Context, Focusable, IntoElement, MouseButton, MouseMoveEvent, Pixels, Point, Window, div,
@@ -17,6 +18,7 @@ use std::time::Instant;
 
 use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortcut};
 use app_core::session_tree::{Activation, Tone, Unseen, status_tone};
+use app_core::workspace::PaneLaunch;
 
 use crate::assets::{CHEVRON_LEFT_ICON, CHEVRON_RIGHT_ICON};
 use crate::context_menu::OpenMenu;
@@ -128,13 +130,32 @@ impl WorkspaceView {
             MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
             MenuAction::CloseTab(index) => self.close_tab_at(index, window, cx),
             MenuAction::NewHere { dir, claude, host } if host.is_local() => {
-                self.open_new(claude, dir, None, None, host, None)
+                self.open_new(claude, dir, None, None, host, None, None)
             }
-            MenuAction::NewHere { dir, claude, host } => self.open_on_host(&host, claude, dir, window, cx),
+            MenuAction::NewHere { dir, claude, host } => self.open_on_host(&host, claude, dir, None, window, cx),
             MenuAction::NewClaudeWith { dir, dir_name } => {
                 self.remember_pick(&dir, &dir_name, cx);
-                self.open_new(true, dir, None, None, HostId::local(), Some(dir_name));
+                self.open_new(true, dir, None, None, HostId::local(), Some(dir_name), None);
             }
+            MenuAction::NewInProject { name, claude: true } => self.new_claude_in_project(&name, window, cx),
+            MenuAction::NewInProject { name, claude: false } => {
+                // A shell at once, in the home directory of this machine.
+                let home = std::env::home_dir().unwrap_or_else(|| self.default_cwd.clone());
+                let shell = cx.global::<SettingsStore>().settings().shell.clone();
+                self.open_launch(PaneLaunch::shell(home, &shell), None, None, HostId::local(), Some(name), window, cx);
+            }
+            MenuAction::RemoveFromProject(leaf) => {
+                self.on_sidebar_event(
+                    SidebarEvent::AssignToProject { source: Assign::Leaf(leaf), project: None },
+                    window,
+                    cx,
+                );
+            }
+            MenuAction::RenameProject(name) => {
+                self.set_sidebar_compact(false, window, cx);
+                self.sidebar.update(cx, |sidebar, cx| sidebar.start_project_rename(&name, window, cx));
+            }
+            MenuAction::DeleteProject(name) => self.delete_project(&name, window, cx),
             MenuAction::SetProjectColor { root, color } => SettingsStore::update(cx, |settings| match color {
                 Some(color) => {
                     settings.project_colors.folders.insert(root, color);
@@ -274,6 +295,36 @@ impl WorkspaceView {
                 }
             }
             SidebarEvent::CloseGit => self.close_git_page(window, cx),
+            SidebarEvent::StartProject => {
+                self.set_sidebar_compact(false, window, cx);
+                self.sidebar.update(cx, |sidebar, cx| sidebar.start_new_project(window, cx));
+            }
+            SidebarEvent::NewProject(name) => {
+                if self.workspace.create_project(&name).is_ok() {
+                    self.save(cx);
+                    cx.notify();
+                }
+            }
+            SidebarEvent::RenameProject { from, to } => self.rename_project(&from, &to, cx),
+            SidebarEvent::DeleteProject(name) => self.delete_project(&name, window, cx),
+            SidebarEvent::AssignToProject { source, project } => {
+                let assigned = self.workspace.assign_to_project(&source, project.as_deref());
+                match (assigned, &source, &project) {
+                    (true, ..) => {
+                        self.focus_current(window, cx);
+                        self.save(cx);
+                        cx.notify();
+                    }
+                    // Dropped on a folder heading with nothing to take it out of: as on any sidebar space, a
+                    // pane of a split tab becomes a tab of its own.
+                    (false, Assign::Leaf(leaf), None) if self.workspace.pull_out(*leaf) => {
+                        self.focus_current(window, cx);
+                        self.save(cx);
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+            }
             SidebarEvent::TabMenu { index, position } => self.open_tab_menu(index, position, window, cx),
             SidebarEvent::New { claude } => self.show_launcher(claude, window, cx),
             SidebarEvent::PullOut(leaf) => {

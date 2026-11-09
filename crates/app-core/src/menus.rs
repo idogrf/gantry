@@ -600,7 +600,8 @@ mod tests {
                 path: "/r/app".into(),
                 label: "app".into(),
                 expanded: true,
-                urgent: None
+                urgent: None,
+                working: false
             })),
             None
         );
@@ -833,8 +834,13 @@ mod tests {
             (recents.action.clone(), recents.shortcut),
             (MenuAction::RecentsFor("/r/app".into()), Some(Shortcut::Recents))
         );
-        let row =
-            Row::new(RowKind::Project { path: "/r/app".into(), label: "app".into(), expanded: true, urgent: None });
+        let row = Row::new(RowKind::Project {
+            path: "/r/app".into(),
+            label: "app".into(),
+            expanded: true,
+            urgent: None,
+            working: false,
+        });
         assert_eq!(
             row_menu(&row, ALONE, &MenuContext::default()),
             None,

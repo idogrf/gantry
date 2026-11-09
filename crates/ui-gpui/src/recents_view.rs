@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use app_core::gantry_project::Membership;
 use app_core::recents::{
     self, ContentState, Facet, FilterSection, FilterValue, Prefs, RecentItem, RecentsInput, Snippet, Sort,
     searches_content,
@@ -71,6 +72,12 @@ pub enum RecentsEvent {
 pub struct RecentsPrefs(pub Prefs);
 
 impl Global for RecentsPrefs {}
+
+/// Which Gantry project each session is in, published by the workspace on every layout change.
+#[derive(Default)]
+pub struct ProjectMembership(pub Membership);
+
+impl Global for ProjectMembership {}
 
 /// The "More…" popup of one filter section.
 struct More {
@@ -174,7 +181,10 @@ impl RecentsView {
         let sessions: Vec<&SessionInfo> = self.sessions.iter().collect();
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         let roots = &self.roots;
-        let project_of = |host: &HostId, cwd: &Path| roots.of(host, cwd);
+        let membership = cx.try_global::<ProjectMembership>().map(|global| global.0.clone()).unwrap_or_default();
+        let names = membership.names();
+        let project_of =
+            |session: &SessionInfo| membership.key_of(&session.id, || roots.of(&session.host, &session.cwd));
         let settings = cx.global::<SettingsStore>().settings();
         let dir_name = |session: &SessionInfo| {
             dir_badge_for(settings, session.claude_dir.as_deref(), &session.host).map(|badge| badge.name)
@@ -190,6 +200,7 @@ impl RecentsView {
                 prefs: &prefs,
                 dir_name: &dir_name,
                 project_of: &project_of,
+                gantry_names: &names,
                 now_ms,
                 hits: &self.hits,
                 content: self.content_state(),

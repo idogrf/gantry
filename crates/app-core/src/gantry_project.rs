@@ -1,6 +1,7 @@
 //! Gantry projects: projects the user makes by hand, identified by their name (unique ignoring case), keyed
 //! `gantry://<lowercased name>` where a folder project is keyed by its path.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The start of a Gantry project's key.
@@ -53,6 +54,28 @@ pub fn display_name(key: &Path, existing: &[String], fallback: Option<&str>) -> 
         .or(Some(lowered))
 }
 
+/// Which Gantry project each session is in, as the workspace holds it, for the lists that show sessions without a pane
+/// (Recents).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Membership {
+    /// The projects that exist (display names).
+    pub projects: Vec<String>,
+    /// Session id -> the project (display name) it was put in, deleted projects included.
+    pub sessions: BTreeMap<String, String>,
+}
+
+impl Membership {
+    /// The project key of session `id`: its Gantry project when it has one (even a deleted one), else `folder()`.
+    pub fn key_of(&self, id: &str, folder: impl FnOnce() -> PathBuf) -> PathBuf {
+        self.sessions.get(id).map_or_else(folder, |name| key(name))
+    }
+
+    /// Every name a `gantry://` key may need to be shown as: the existing projects, then those only sessions keep.
+    pub fn names(&self) -> Vec<String> {
+        self.projects.iter().chain(self.sessions.values()).cloned().collect()
+    }
+}
+
 /// The name to use for a project called `name` among `existing`: trimmed. `own` is the project being renamed, which
 /// may keep its name (also in another case). `Empty` or `Exists` otherwise.
 pub fn validate_name(existing: &[String], name: &str, own: Option<&str>) -> Result<String, ProjectError> {
@@ -88,6 +111,17 @@ mod tests {
         assert_eq!(display_name(&key("gone"), &list, Some("Gone")), Some("Gone".into()));
         assert_eq!(display_name(&key("gone"), &list, None), Some("gone".into()));
         assert_eq!(display_name(Path::new("/a"), &list, None), None);
+    }
+
+    #[test]
+    fn membership_keys_sessions_and_lists_every_name() {
+        let membership = Membership {
+            projects: vec!["Billing".into()],
+            sessions: BTreeMap::from([("a".to_string(), "Gone".to_string())]),
+        };
+        assert_eq!(membership.key_of("a", || PathBuf::from("/r")), PathBuf::from("gantry://gone"));
+        assert_eq!(membership.key_of("b", || PathBuf::from("/r")), PathBuf::from("/r"));
+        assert_eq!(membership.names(), vec!["Billing".to_string(), "Gone".to_string()]);
     }
 
     #[test]

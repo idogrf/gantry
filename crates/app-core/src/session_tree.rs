@@ -1,13 +1,14 @@
 //! The sidebar's Active list as plain rows: every pane of the layout and every Claude session running outside
 //! Gantry, under the project it belongs to. Closed sessions live in the recent sessions pop-up (`recents`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use protocol::host::{HostId, PaneKey, project_key, split_project_key};
 use protocol::message::{SessionInfo, SessionState, SessionStatus};
 
 use crate::fuzzy::Fuzzy;
+use crate::gantry_project;
 use crate::sidebar_order::SidebarOrder;
 use crate::split_tree::NodeId;
 use crate::theme_colors::Tint;
@@ -56,6 +57,8 @@ pub struct PaneEntry {
     pub container: Option<PathBuf>,
     /// The color the user gave the pane.
     pub color: Option<Tint>,
+    /// The Gantry project the user put the pane in (display name).
+    pub project: Option<String>,
 }
 
 /// What keeps an Active entry's place in the list: its leaf, or (outside Gantry) its session.
@@ -111,11 +114,11 @@ impl ProjectOrder {
         self.started = true;
     }
 
-    /// The order to save: every project in its place, but only those in `shown` and those of SSH hosts (which may only
-    /// be away); a local project that is gone for good is forgotten.
+    /// The order to save: every project in its place, but only those in `shown`, those of SSH hosts (which may only
+    /// be away) and Gantry projects (which may be empty); a local project that is gone for good is forgotten.
     pub fn to_save(&self, shown: &[PathBuf]) -> Vec<PathBuf> {
-        let ssh = |path: &PathBuf| path.to_string_lossy().starts_with("ssh://");
-        self.order.iter().filter(|path| shown.contains(path) || ssh(path)).cloned().collect()
+        let kept = |path: &PathBuf| path.to_string_lossy().starts_with("ssh://") || gantry_project::is_key(path);
+        self.order.iter().filter(|path| shown.contains(path) || kept(path)).cloned().collect()
     }
 
     /// The projects in order, top to bottom (including kept ones that are not listed).
@@ -192,6 +195,10 @@ pub struct ActiveInput<'a> {
     pub tabs: &'a [TabEntry],
     /// The project a directory belongs to (see [`project_root`]).
     pub project_of: &'a dyn Fn(&HostId, &Path) -> PathBuf,
+    /// The Gantry project (display name) each session was put in, for sessions without a pane of ours.
+    pub session_projects: &'a BTreeMap<String, String>,
+    /// The Gantry projects that exist: each is listed, even with nothing in it.
+    pub gantry_projects: &'a [String],
     /// The order the user gave the tabs inside their projects.
     pub saved_order: &'a SidebarOrder,
     /// Current time, ms since the Unix epoch.
@@ -206,6 +213,14 @@ pub struct ProjectRoots {
 }
 
 impl ProjectRoots {
+    /// The project of something in the Gantry project `gantry` (its key), else of the folder `cwd` as [`Self::of`].
+    pub fn of_member(&self, host: &HostId, cwd: &Path, gantry: Option<&str>) -> PathBuf {
+        match gantry {
+            Some(name) => gantry_project::key(name),
+            None => self.of(host, cwd),
+        }
+    }
+
     /// Roots below `home`.
     pub fn new(home: Option<PathBuf>) -> ProjectRoots {
         ProjectRoots { home, cache: Default::default() }
@@ -655,6 +670,8 @@ struct Entry<'a> {
     key: EntryKey,
     host: &'a HostId,
     cwd: &'a Path,
+    /// The Gantry project it was put in; it wins over the folder.
+    gantry: Option<&'a str>,
     title: &'a str,
     /// `last_active_ms`; panes the session list does not know count as active now.
     activity: u64,
@@ -667,9 +684,10 @@ enum EntryKind<'a> {
 }
 
 /// The Active list.
-pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut ProjectOrder) -> Vec<Row> {
+pub fn active<'a>(input: &'a ActiveInput<'a>, arrivals: &mut Arrivals, order: &mut ProjectOrder) -> Vec<Row> {
     let by_id: HashMap<(&HostId, &str), &SessionInfo> =
         input.sessions.iter().map(|s| ((&s.host, s.id.as_str()), *s)).collect();
+    let member = |pane: Option<&'a PaneEntry>, session: Option<&str>| member_project(input, pane, session);
     let mut entries: Vec<Entry<'_>> = Vec::new();
     let mut in_leaves: HashSet<(&HostId, &str)> = HashSet::new();
     for pane in input.panes {
@@ -682,6 +700,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
                     key: EntryKey::Leaf(pane.leaf),
                     host: &session.host,
                     cwd: &session.cwd,
+                    gantry: member(Some(pane), Some(&session.id)),
                     title,
                     activity: session.last_active_ms,
                     kind,
@@ -693,6 +712,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
                     key: EntryKey::Leaf(pane.leaf),
                     host: &pane.host,
                     cwd: &pane.cwd,
+                    gantry: member(Some(pane), pane.session.as_deref()),
                     title,
                     activity: u64::MAX,
                     kind: EntryKind::Pane(pane),
@@ -709,6 +729,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
             key: EntryKey::Session(session.id.clone()),
             host: &session.host,
             cwd: &session.cwd,
+            gantry: member(None, Some(&session.id)),
             title: session_title(session),
             activity: session.last_active_ms,
             kind,
@@ -727,18 +748,22 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
     arrivals.update(&keys.into_iter().map(|(key, _)| key.clone()).collect::<Vec<_>>());
 
     // A tab with several panes is one item, placed in the project of its first leaf that has an entry.
-    let leaf_cwd: HashMap<NodeId, (&HostId, &Path)> =
-        entries.iter().filter_map(|entry| Some((leaf_of(&entry.key)?, (entry.host, entry.cwd)))).collect();
+    let project_of_entry = |entry: &Entry<'_>| match entry.gantry {
+        Some(name) => gantry_project::key(name),
+        None => (input.project_of)(entry.host, entry.cwd),
+    };
+    let leaf_project: HashMap<NodeId, PathBuf> =
+        entries.iter().filter_map(|entry| Some((leaf_of(&entry.key)?, project_of_entry(entry)))).collect();
     let leaf_titles: HashMap<NodeId, &str> =
         entries.iter().filter_map(|entry| Some((leaf_of(&entry.key)?, entry.title))).collect();
     let mut groups: Vec<Group<'_>> = Vec::new();
     let mut group_of: HashMap<NodeId, usize> = HashMap::new();
     for tab in input.tabs.iter().filter(|tab| tab.leaves.len() >= 2) {
-        let Some((host, cwd)) = tab.leaves.iter().find_map(|leaf| leaf_cwd.get(leaf).copied()) else { continue };
+        let Some(project) = tab.leaves.iter().find_map(|leaf| leaf_project.get(leaf).cloned()) else { continue };
         let place = tab
             .leaves
             .iter()
-            .filter(|leaf| leaf_cwd.contains_key(leaf))
+            .filter(|leaf| leaf_project.contains_key(leaf))
             .map(|leaf| arrivals.of(&EntryKey::Leaf(*leaf)))
             .min()
             .unwrap_or(0);
@@ -746,7 +771,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
             group_of.insert(*leaf, groups.len());
         }
         let first_title = tab.leaves.iter().find_map(|leaf| leaf_titles.get(leaf).copied());
-        groups.push(Group { tab, project: (input.project_of)(host, cwd), place, first_title, members: Vec::new() });
+        groups.push(Group { tab, project, place, first_title, members: Vec::new() });
     }
 
     let mut fuzzy = Fuzzy::new(input.filter, entries.iter().map(|entry| keep_text(entry.title, entry.cwd, input.home)));
@@ -758,7 +783,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
         }
         match leaf_of(&entry.key).and_then(|leaf| group_of.get(&leaf)) {
             Some(&group) => groups[group].members.push(entry),
-            None => by_project.entry((input.project_of)(entry.host, entry.cwd)).or_default().push(entry),
+            None => by_project.entry(project_of_entry(&entry)).or_default().push(entry),
         }
     }
     let mut items_of: HashMap<PathBuf, Vec<Item<'_>>> = HashMap::new();
@@ -769,6 +794,11 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
         let position = |entry: &Entry<'_>| group.tab.leaves.iter().position(|leaf| Some(*leaf) == leaf_of(&entry.key));
         group.members.sort_by_key(position);
         items_of.entry(group.project.clone()).or_default().push(Item::Group(group));
+    }
+    if !filtering {
+        for name in input.gantry_projects {
+            items_of.entry(gantry_project::key(name)).or_default();
+        }
     }
     let mut projects: Vec<(PathBuf, Vec<Item<'_>>)> = items_of.into_iter().collect();
     // Tabs the user placed come below the new ones (newest first), in their saved order; outside sessions have no
@@ -797,13 +827,13 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
     let mut paths: Vec<PathBuf> = projects.iter().map(|(path, _)| path.clone()).collect();
     for (_, items) in &projects {
         for entry in items.iter().flat_map(Item::entries) {
-            let own = (input.project_of)(entry.host, entry.cwd);
+            let own = project_of_entry(entry);
             if !paths.contains(&own) {
                 paths.push(own);
             }
         }
     }
-    let labels = labels(&paths, input.home);
+    let labels = labels(&paths, input.home, input.gantry_projects);
 
     let mut rows = Vec::new();
     for (path, items) in projects {
@@ -812,7 +842,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
             match item {
                 Item::Single(entry) => {
                     let mut row = entry_row(entry, input);
-                    row.project = Some((input.project_of)(entry.host, entry.cwd));
+                    row.project = Some(project_of_entry(entry));
                     rendered.push(row);
                 }
                 Item::Group(group) => {
@@ -833,7 +863,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
                     for entry in &group.members {
                         let mut row = entry_row(entry, input);
                         row.in_tab = true;
-                        let own = (input.project_of)(entry.host, entry.cwd);
+                        let own = project_of_entry(entry);
                         row.project_label = (own != path).then(|| labels[&own].clone());
                         row.project = Some(own);
                         rendered.push(row);
@@ -871,6 +901,20 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
         }
     }
     rows
+}
+
+/// The Gantry project a pane or session was put in: the pane's own label wins; a session's label counts only while
+/// its project exists (a deleted one lives on in Recents only).
+fn member_project<'a>(
+    input: &'a ActiveInput<'a>,
+    pane: Option<&'a PaneEntry>,
+    session: Option<&str>,
+) -> Option<&'a str> {
+    pane.and_then(|pane| pane.project.as_deref()).or_else(|| {
+        let name = input.session_projects.get(session?)?;
+        let exists = input.gantry_projects.iter().any(|known| gantry_project::same(known, name));
+        exists.then_some(name.as_str())
+    })
 }
 
 /// A split tab and its kept entries, to be listed together.
@@ -1051,10 +1095,13 @@ pub fn project_label(rows: &[Row], root: &Path) -> Option<String> {
     })
 }
 
-/// Project names: the folder's name, or its whole displayed path where two projects share a name. A remote project
+/// Project names: a Gantry project's name, else the folder's name, or its whole displayed path where two projects share a name. A remote project
 /// is `<host> - <name>`.
-pub(crate) fn labels(paths: &[PathBuf], home: Option<&Path>) -> HashMap<PathBuf, String> {
+pub(crate) fn labels(paths: &[PathBuf], home: Option<&Path>, gantry: &[String]) -> HashMap<PathBuf, String> {
     let name = |path: &Path, whole: bool| {
+        if let Some(name) = gantry_project::display_name(path, gantry, None) {
+            return name;
+        }
         let (host, root) = split_project_key(path);
         let home = home.filter(|_| host.is_local());
         let text = match root.file_name() {
@@ -1173,6 +1220,7 @@ mod tests {
             alone: true,
             container: None,
             color: None,
+            project: None,
         }
     }
 
@@ -1193,6 +1241,8 @@ mod tests {
         arrivals: Arrivals,
         order: ProjectOrder,
         saved: crate::sidebar_order::SidebarOrder,
+        session_projects: BTreeMap<String, String>,
+        gantry_projects: Vec<String>,
     }
 
     impl Fixture {
@@ -1213,6 +1263,8 @@ mod tests {
                 marked: &self.marked,
                 tabs: &self.tabs,
                 project_of: &project_of,
+                session_projects: &self.session_projects,
+                gantry_projects: &self.gantry_projects,
                 saved_order: &self.saved,
                 now_ms: NOW,
             };
@@ -2067,7 +2119,7 @@ mod tests {
             project_key(&devbox, Path::new("/home/u/app")),
             project_key(&devbox, Path::new("/home/u/api")),
         ];
-        let labels = labels(&paths, Some(Path::new("/home/me")));
+        let labels = labels(&paths, Some(Path::new("/home/me")), &[]);
         assert_eq!(labels[&paths[0]], "app");
         assert_eq!(labels[&paths[1]], "devbox - app");
         assert_eq!(labels[&paths[2]], "devbox - api");
@@ -2077,8 +2129,80 @@ mod tests {
     fn two_remote_folders_with_one_name_show_their_paths() {
         let devbox = HostId::named("devbox");
         let paths = vec![project_key(&devbox, Path::new("/srv/a/app")), project_key(&devbox, Path::new("/srv/b/app"))];
-        let labels = labels(&paths, None);
+        let labels = labels(&paths, None, &[]);
         assert_eq!(labels[&paths[0]], "devbox - /srv/a/app");
         assert_eq!(labels[&paths[1]], "devbox - /srv/b/app");
+    }
+
+    fn gantry_pane(leaf: NodeId, cwd: &str, project: &str) -> PaneEntry {
+        PaneEntry { project: Some(project.into()), ..shell_pane(leaf, cwd) }
+    }
+
+    #[test]
+    fn pane_with_project_is_listed_under_its_gantry_heading_only() {
+        let mut fixture = Fixture::of(vec![], vec![gantry_pane(1, "/r/alpha", "Billing"), shell_pane(2, "/r/alpha")]);
+        fixture.gantry_projects = vec!["Billing".into()];
+        let rows = fixture.rows();
+        let headings: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::Project { label, path, .. } => Some((label.clone(), path.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headings.len(), 2);
+        assert!(headings.contains(&("Billing".into(), PathBuf::from("gantry://billing"))));
+        assert!(headings.contains(&("alpha".into(), PathBuf::from("/r/alpha"))));
+        let at = |key: RowKey| find(&rows, &key).unwrap();
+        let billing = at(RowKey::Project("gantry://billing".into()));
+        assert_eq!(at(RowKey::Leaf(1)), billing + 1);
+        assert_eq!(rows[billing + 1].project, Some(PathBuf::from("gantry://billing")));
+        assert_eq!(rows.iter().filter(|row| row.key() == RowKey::Leaf(1)).count(), 1);
+    }
+
+    #[test]
+    fn empty_gantry_project_gets_a_heading() {
+        let mut fixture = Fixture::of(vec![], vec![]);
+        fixture.gantry_projects = vec!["Billing".into()];
+        assert_eq!(fixture.outline(), vec!["▾ Billing"]);
+        // A filter hides it, like any project with nothing matching.
+        fixture.filter = "zzz".into();
+        assert!(fixture.outline().is_empty());
+    }
+
+    #[test]
+    fn split_tab_sits_under_first_panes_project() {
+        let mut fixture = Fixture::of(vec![], vec![gantry_pane(1, "/r/alpha", "Billing"), shell_pane(2, "/r/beta")]);
+        fixture.gantry_projects = vec!["Billing".into()];
+        fixture.tabs = vec![tab(0, 1, &[1, 2])];
+        let rows = fixture.rows();
+        assert_eq!(
+            keys(&rows),
+            vec![RowKey::Project("gantry://billing".into()), RowKey::Tab(1), RowKey::Leaf(1), RowKey::Leaf(2)]
+        );
+        assert_eq!(rows[2].project_label, None);
+        assert_eq!(rows[3].project_label.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn external_session_follows_session_projects() {
+        let external = session("e1", "/r/alpha", SessionState::External { pid: Some(5) }, NOW - HOUR_MS);
+        let mut fixture = Fixture::of(vec![external], vec![]);
+        fixture.session_projects.insert("e1".into(), "Billing".into());
+        // The project was deleted: the label is only for Recents.
+        assert_eq!(fixture.outline()[0], "▾ alpha");
+        fixture.gantry_projects = vec!["Billing".into()];
+        let rows = fixture.rows();
+        assert!(matches!(&rows[0].kind, RowKind::Project { label, .. } if label == "Billing"));
+        assert_eq!(rows[1].project, Some(PathBuf::from("gantry://billing")));
+        assert!(!rows.iter().any(|row| matches!(&row.kind, RowKind::Project { label, .. } if label == "alpha")));
+    }
+
+    #[test]
+    fn to_save_keeps_gantry_keys_even_when_empty() {
+        let mut order = ProjectOrder::default();
+        order.seed(&paths(&["gantry://billing", "/gone", "/a"]));
+        order.update(&paths(&["/a"]), false);
+        assert_eq!(order.to_save(&paths(&["/a"])), paths(&["gantry://billing", "/a"]));
     }
 }

@@ -16,6 +16,7 @@ use protocol::message::ContainerChoice;
 use app_core::session_tree::{PaneEntry, TabEntry};
 use app_core::settings::ShellSettings;
 
+use crate::recents_view::ProjectMembership;
 use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::terminal_view::{PaneEvent, TerminalView};
 use crate::theme::theme;
@@ -94,8 +95,8 @@ impl WorkspaceView {
     /// The color of the project `leaf` belongs to (its session's directory, else the pane's), if project colors are on.
     pub(super) fn leaf_project_color(&self, leaf: NodeId, cx: &App) -> Option<u32> {
         let cwd = self.leaf_cwd(leaf, cx)?;
-        let host = self.workspace.leaves.get(&leaf)?.host.clone();
-        theme(cx).project(&self.sidebar.read(cx).project_of(&host, &cwd))
+        let found = self.workspace.leaves.get(&leaf)?;
+        theme(cx).project(&self.sidebar.read(cx).project_of(&found.host, &cwd, found.project.as_deref()))
     }
 
     /// The directory `leaf` works in: its session's, else the pane's.
@@ -429,6 +430,7 @@ impl WorkspaceView {
                         .is_some_and(|tab| self.workspace.tabs[tab].root.leaves().len() == 1),
                     container: leaf.launch.container.clone(),
                     color: leaf.color,
+                    project: leaf.project.clone(),
                 }
             })
             .collect();
@@ -446,7 +448,12 @@ impl WorkspaceView {
                 Some(TabEntry { index, name: tab.name.clone(), focused, leaves })
             })
             .collect();
-        self.sidebar.update(cx, |sidebar, cx| sidebar.set_panes(panes, tabs, cx));
+        let membership = self.workspace.membership();
+        cx.set_global(ProjectMembership(membership.clone()));
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_projects(membership.projects, membership.sessions, cx);
+            sidebar.set_panes(panes, tabs, cx);
+        });
         self.push_launcher_folders(cx);
         self.push_launcher_hosts(cx);
     }

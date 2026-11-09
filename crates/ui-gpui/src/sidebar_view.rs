@@ -1,7 +1,7 @@
 //! The sidebar: the Active list (every pane and every Claude session running outside Gantry, by project), colored
 //! by what each needs, with a fuzzy filter.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -193,6 +193,8 @@ pub struct SidebarView {
     home: Option<PathBuf>,
     /// Project of each directory seen (it stats parent directories; cleared on every refresh).
     roots: ProjectRoots,
+    gantry_projects: Vec<String>,
+    session_projects: BTreeMap<String, String>,
     /// The Settings tab is open (a row above the list), and is the visible tab.
     settings_open: bool,
     settings_active: bool,
@@ -257,6 +259,8 @@ impl SidebarView {
             scroll: UniformListScrollHandle::new(),
             home: std::env::home_dir(),
             roots: ProjectRoots::new(std::env::home_dir()),
+            gantry_projects: Vec::new(),
+            session_projects: BTreeMap::new(),
             settings_open: false,
             settings_active: false,
             git_row: None,
@@ -325,9 +329,24 @@ impl SidebarView {
             .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SidebarEvent::New { claude: false })))
     }
 
-    /// The project a directory belongs to (its git repository, else the directory).
-    pub(crate) fn project_of(&self, host: &HostId, cwd: &Path) -> PathBuf {
-        self.roots.of(host, cwd)
+    /// The project a pane belongs to: the Gantry project `gantry` when given, else its directory's (its git
+    /// repository, else the directory).
+    pub(crate) fn project_of(&self, host: &HostId, cwd: &Path, gantry: Option<&str>) -> PathBuf {
+        self.roots.of_member(host, cwd, gantry)
+    }
+
+    /// The Gantry projects and the projects sessions were put in.
+    pub fn set_projects(
+        &mut self,
+        projects: Vec<String>,
+        session_projects: BTreeMap<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if projects != self.gantry_projects || session_projects != self.session_projects {
+            self.gantry_projects = projects;
+            self.session_projects = session_projects;
+            self.rebuild(cx);
+        }
     }
 
     /// Every Gantry leaf in sidebar order, whatever the filter or collapsed projects hide.
@@ -711,6 +730,8 @@ impl SidebarView {
                     marked: &self.marked,
                     tabs: &self.tabs,
                     project_of: &project_of,
+                    session_projects: &self.session_projects,
+                    gantry_projects: &self.gantry_projects,
                     saved_order: &self.saved_order,
                     now_ms,
                 };

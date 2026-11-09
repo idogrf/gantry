@@ -776,6 +776,11 @@ impl Workspace {
         self.gantry_projects.iter().map(String::as_str).find(|existing| gantry_project::same(existing, name))
     }
 
+    /// The Gantry projects and session labels, for lists that show sessions without a pane.
+    pub fn membership(&self) -> gantry_project::Membership {
+        gantry_project::Membership { projects: self.gantry_projects.clone(), sessions: self.session_projects.clone() }
+    }
+
     /// Make a Gantry project called `name` (trimmed) at the top of the list; returns the name kept.
     pub fn create_project(&mut self, name: &str) -> Result<String, ProjectError> {
         let name = gantry_project::validate_name(&self.gantry_projects, name, None)?;

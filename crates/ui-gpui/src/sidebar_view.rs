@@ -1199,13 +1199,14 @@ impl SidebarView {
             (upper, lower)
         });
         // Where a drop of a pane, tab or session on this row goes: the Gantry project of its group (any row), or out of
-        // its Gantry project (a folder heading); whether this is a heading.
+        // its Gantry project (any row of a folder's group); whether this is a heading.
         let assign: Option<(Option<String>, bool)> = match (&self.rows[index].kind, &self.rows[index].project) {
             (RowKind::Project { path, .. }, _) if !gantry_project::is_key(path) => Some((None, true)),
             (kind, Some(path)) if gantry_project::is_key(path) => Some((
                 gantry_project::display_name(path, &self.gantry_projects, None),
                 matches!(kind, RowKind::Project { .. }),
             )),
+            (_, Some(path)) if !gantry_project::is_key(path) => Some((None, false)),
             _ => None,
         };
         let group_name = format!("row-{index}");

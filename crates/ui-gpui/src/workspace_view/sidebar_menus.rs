@@ -144,6 +144,13 @@ impl WorkspaceView {
                 let shell = cx.global::<SettingsStore>().settings().shell.clone();
                 self.open_launch(PaneLaunch::shell(home, &shell), None, None, HostId::local(), Some(name), window, cx);
             }
+            MenuAction::RemoveFromProject(leaf) => {
+                self.on_sidebar_event(
+                    SidebarEvent::AssignToProject { source: Assign::Leaf(leaf), project: None },
+                    window,
+                    cx,
+                );
+            }
             MenuAction::RenameProject(name) => {
                 self.set_sidebar_compact(false, window, cx);
                 self.sidebar.update(cx, |sidebar, cx| sidebar.start_project_rename(&name, window, cx));

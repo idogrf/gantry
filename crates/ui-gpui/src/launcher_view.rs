@@ -1319,6 +1319,17 @@ impl LauncherView {
             .flex()
             .flex_col()
             .when(self.flow.has_host_step(), |card| card.child(self.render_host_bar(theme, cx)))
+            .when(self.flow.project.is_some(), |card| {
+                let what = if self.claude_first { "Claude session" } else { "terminal" };
+                card.child(
+                    div()
+                        .px_4()
+                        .pt(theme.ui(10.))
+                        .text_xs()
+                        .text_color(rgb(theme.tokens.muted))
+                        .child(format!("In which folder should the {what} open?")),
+                )
+            })
             .child(
                 div()
                     .h(theme.ui(46.))

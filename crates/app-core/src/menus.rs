@@ -89,6 +89,8 @@ pub enum MenuAction {
         /// Claude (else a shell).
         claude: bool,
     },
+    /// Take a pane out of its Gantry project, back under its folder.
+    RemoveFromProject(NodeId),
     /// Rename a Gantry project inline in the sidebar.
     RenameProject(String),
     /// Delete a Gantry project.
@@ -433,6 +435,12 @@ fn read_mark_item(leaf: NodeId, unread: bool) -> MenuItem {
     }
 }
 
+/// "Remove from project", for a row listed under a Gantry project.
+fn remove_from_project_item(row: &Row, leaf: NodeId) -> Option<MenuItem> {
+    let project = row.project.as_deref()?;
+    crate::gantry_project::is_key(project).then(|| entry("Remove from project", MenuAction::RemoveFromProject(leaf)))
+}
+
 fn close_item(leaf: NodeId, alone: &dyn Fn(NodeId) -> bool) -> MenuItem {
     let label = if alone(leaf) { "Close tab" } else { "Close pane" };
     with_shortcut(label, Shortcut::Close, MenuAction::ClosePane(leaf))
@@ -472,6 +480,7 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
             items.push(entry("Copy session id", MenuAction::Copy(session.id.clone())));
             items.extend(folder_items(&session.cwd, vscode, &session.host));
             if let Some(leaf) = leaf {
+                items.extend(remove_from_project_item(row, *leaf));
                 items.push(MenuItem::Separator);
                 items.push(close_item(*leaf, alone));
             }
@@ -489,6 +498,7 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
                 items.push(entry("Copy session id", MenuAction::Copy(id.clone())));
             }
             items.extend(folder_items(&pane.cwd, vscode, &pane.host));
+            items.extend(remove_from_project_item(row, pane.leaf));
             items.push(MenuItem::Separator);
             items.push(close_item(pane.leaf, alone));
         }
@@ -810,6 +820,20 @@ mod tests {
         );
         let boxed = session_row(SessionState::External { pid: None }, Tone::Elsewhere, None);
         assert_eq!(labels(&row_menu(&boxed, ALONE, &MenuContext::default()).unwrap())[0], "Copy session id");
+    }
+
+    #[test]
+    fn a_row_in_a_gantry_project_offers_remove_from_project() {
+        let has = |row: &Row| {
+            let items = row_menu(row, ALONE, &MenuContext::default()).unwrap();
+            items.iter().any(|item| matches!(item, MenuItem::Entry(e) if e.action == MenuAction::RemoveFromProject(7)))
+        };
+        let mut row = pane_row(true, false);
+        assert!(!has(&row), "no project");
+        row.project = Some("/r/app".into());
+        assert!(!has(&row), "a folder project");
+        row.project = Some(crate::gantry_project::key("Billing"));
+        assert!(has(&row));
     }
 
     #[test]

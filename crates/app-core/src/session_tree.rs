@@ -402,6 +402,126 @@ pub fn shown_order(projects: &[ProjectItems], moved: Option<(usize, &[Vec<NodeId
     (paths, items)
 }
 
+/// The leaves a drag of `source` carries, when it names an item of `projects`.
+fn moved_leaves(projects: &[ProjectItems], source: DragSource) -> Option<Vec<NodeId>> {
+    projects.iter().flat_map(|items| items.blocks.iter()).find_map(|block| match source {
+        DragSource::Pane(leaf) => block.leaves.contains(&leaf).then(|| vec![leaf]),
+        DragSource::Tab(first) => (block.group && block.leaves.first() == Some(&first)).then(|| block.leaves.clone()),
+    })
+}
+
+/// The items of the project `at` names after `source` is dropped there (its index and its blocks of leaves): the
+/// source's leaves leave their old block (a pane of a split tab becomes a block of its own) and go in at `at`, which
+/// counts the blocks as listed before the move. `None` for an unknown item or project.
+pub fn place_in(projects: &[ProjectItems], source: DragSource, at: DropAt) -> Option<(usize, Vec<Vec<NodeId>>)> {
+    let (project, before) = match at {
+        DropAt::Before { project, block } => (project, Some(block)),
+        DropAt::End { project } => (project, None),
+    };
+    let moved = moved_leaves(projects, source)?;
+    let mut blocks: Vec<Vec<NodeId>> = projects.get(project)?.blocks.iter().map(|block| block.leaves.clone()).collect();
+    let mut position = before.unwrap_or(blocks.len()).min(blocks.len());
+    let from = blocks.iter().position(|block| block.iter().any(|leaf| moved.contains(leaf)));
+    if let Some(from) = from {
+        match source {
+            DragSource::Tab(_) => {
+                blocks.remove(from);
+                if from < position {
+                    position -= 1;
+                }
+            }
+            DragSource::Pane(leaf) => {
+                blocks[from].retain(|other| *other != leaf);
+                if blocks[from].is_empty() {
+                    blocks.remove(from);
+                    if from < position {
+                        position -= 1;
+                    }
+                }
+            }
+        }
+    }
+    blocks.insert(position, moved);
+    Some((project, blocks))
+}
+
+/// What [`shown_order`] lists after `source` is dropped at `at`: the source's leaves are taken out of every project
+/// and listed in the target project at `at`. `None` when [`place_in`] is.
+pub fn placed_order(projects: &[ProjectItems], source: DragSource, at: DropAt) -> Option<(Vec<PathBuf>, Vec<NodeId>)> {
+    let (target, blocks) = place_in(projects, source, at)?;
+    let moved = moved_leaves(projects, source)?;
+    let paths = projects.iter().map(|project| project.path.clone()).collect();
+    let mut leaves = Vec::new();
+    for (index, project) in projects.iter().enumerate() {
+        if index == target {
+            leaves.extend(blocks.iter().flatten().copied());
+        } else {
+            leaves.extend(
+                project
+                    .blocks
+                    .iter()
+                    .flat_map(|block| block.leaves.iter().copied())
+                    .filter(|leaf| !moved.contains(leaf)),
+            );
+        }
+    }
+    Some((paths, leaves))
+}
+
+/// What the sidebar shows while an item is dragged over a row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropCue {
+    /// Nothing: the drop is not for this target (it may still pull a pane out of its split tab).
+    Neutral,
+    /// The drop would do nothing: the target's box in the danger color, no line.
+    Deny,
+    /// The item lands at this place: the target's box and a line there.
+    Land(DropAt),
+}
+
+/// The cue for dropping `source` at `at`. `current` is the project the item is listed in now and `real` the folder
+/// project its pane belongs to without a Gantry project; `pullable` says a drop elsewhere pulls the pane out of its
+/// split tab.
+pub fn drop_cue(
+    projects: &[ProjectItems],
+    source: DragSource,
+    current: &Path,
+    real: &Path,
+    pullable: bool,
+    at: DropAt,
+) -> DropCue {
+    let (DropAt::Before { project, .. } | DropAt::End { project }) = at;
+    let Some(target) = projects.get(project).map(|items| items.path.as_path()) else { return DropCue::Neutral };
+    let nothing = if pullable { DropCue::Neutral } else { DropCue::Deny };
+    if current == target {
+        return if reorder(projects, source, at).is_some() { DropCue::Land(at) } else { nothing };
+    }
+    if gantry_project::is_key(target) {
+        return DropCue::Land(at);
+    }
+    if gantry_project::is_key(current) {
+        return if target == real { DropCue::Land(at) } else { DropCue::Neutral };
+    }
+    nothing
+}
+
+/// Where a drop at `fraction` (0 = top, 1 = bottom) of row `row`, listed in project `project`, lands: before the block
+/// the row is in (its first half of rows) or before the next one (its second half); on the heading, before the first
+/// block. `End` when no block follows.
+pub fn hover_at(projects: &[ProjectItems], project: usize, row: usize, fraction: f32) -> Option<DropAt> {
+    let blocks = &projects.get(project)?.blocks;
+    let inside = blocks.iter().position(|block| (block.row..=block.last_row).contains(&row));
+    let block = match inside {
+        None => 0,
+        Some(index) => {
+            let item = &blocks[index];
+            let rows = (item.last_row - item.row + 1) as f32;
+            if ((row - item.row) as f32 + fraction.clamp(0., 1.)) / rows < 0.5 { index } else { index + 1 }
+        }
+    };
+    Some(if block < blocks.len() { DropAt::Before { project, block } } else { DropAt::End { project } })
+}
+
 /// The group edges of `rows[index]`.
 pub fn group_edges(rows: &[Row], index: usize) -> GroupEdges {
     let heading = |row: &Row| matches!(row.kind, RowKind::Project { .. });
@@ -1803,6 +1923,121 @@ mod tests {
         assert_eq!(reorder(&projects, DragSource::Pane(3), at(9)), None, "no such place");
         assert_eq!(reorder(&projects, DragSource::Tab(3), at(2)), None, "a single pane is not a split tab");
         assert_eq!(reorder(&projects, DragSource::Pane(99), at(1)), None, "an unknown leaf");
+    }
+
+    /// /r/app: tab [4, 5] (rows 1..=3), 3 (row 4), 2 (row 5); gantry://work: 1 (row 7); gantry://empty: nothing.
+    fn drop_fixture() -> Vec<ProjectItems> {
+        let block =
+            |row, last_row, leaves: &[NodeId], group| ItemBlock { row, last_row, leaves: leaves.to_vec(), group };
+        vec![
+            ProjectItems {
+                path: PathBuf::from("/r/app"),
+                blocks: vec![block(1, 3, &[4, 5], true), block(4, 4, &[3], false), block(5, 5, &[2], false)],
+            },
+            ProjectItems { path: gantry_project::key("Work"), blocks: vec![block(7, 7, &[1], false)] },
+            ProjectItems { path: gantry_project::key("Empty"), blocks: vec![] },
+        ]
+    }
+
+    #[test]
+    fn place_in_inserts_into_another_project_and_leaves_the_old_one() {
+        let projects = drop_fixture();
+        let before = |project, block| DropAt::Before { project, block };
+        let placed = |source, at| place_in(&projects, source, at).unwrap();
+        assert_eq!(placed(DragSource::Pane(3), before(1, 0)), (1, vec![vec![3], vec![1]]));
+        assert_eq!(placed(DragSource::Pane(2), DropAt::End { project: 1 }), (1, vec![vec![1], vec![2]]));
+        assert_eq!(placed(DragSource::Pane(2), DropAt::End { project: 2 }), (2, vec![vec![2]]));
+        assert_eq!(placed(DragSource::Pane(1), before(0, 1)), (0, vec![vec![4, 5], vec![1], vec![3], vec![2]]));
+    }
+
+    #[test]
+    fn place_in_moves_a_split_tab_whole_and_a_pane_of_it_alone() {
+        let projects = drop_fixture();
+        assert_eq!(
+            place_in(&projects, DragSource::Tab(4), DropAt::Before { project: 1, block: 0 }),
+            Some((1, vec![vec![4, 5], vec![1]]))
+        );
+        assert_eq!(
+            place_in(&projects, DragSource::Pane(5), DropAt::End { project: 1 }),
+            Some((1, vec![vec![1], vec![5]])),
+            "a pane of a split tab becomes a block of its own"
+        );
+        // Inside one project the blocks are counted before the move.
+        assert_eq!(
+            place_in(&projects, DragSource::Pane(3), DropAt::End { project: 0 }),
+            Some((0, vec![vec![4, 5], vec![2], vec![3]]))
+        );
+        assert_eq!(
+            place_in(&projects, DragSource::Pane(2), DropAt::Before { project: 0, block: 0 }),
+            Some((0, vec![vec![2], vec![4, 5], vec![3]]))
+        );
+    }
+
+    #[test]
+    fn place_in_refuses_unknown_items_and_projects() {
+        let projects = drop_fixture();
+        assert_eq!(place_in(&projects, DragSource::Pane(99), DropAt::End { project: 1 }), None);
+        assert_eq!(place_in(&projects, DragSource::Tab(3), DropAt::End { project: 1 }), None, "a pane is no tab");
+        assert_eq!(place_in(&projects, DragSource::Pane(3), DropAt::End { project: 9 }), None);
+    }
+
+    #[test]
+    fn placed_order_lists_the_moved_leaves_once_at_their_new_place() {
+        let projects = drop_fixture();
+        let (paths, leaves) =
+            placed_order(&projects, DragSource::Pane(3), DropAt::Before { project: 1, block: 0 }).unwrap();
+        assert_eq!(paths.len(), 3);
+        assert_eq!(leaves, vec![4, 5, 2, 3, 1]);
+        let (_, leaves) = placed_order(&projects, DragSource::Pane(5), DropAt::End { project: 2 }).unwrap();
+        assert_eq!(leaves, vec![4, 3, 2, 1, 5]);
+    }
+
+    #[test]
+    fn hover_at_picks_the_block_edge_nearest_the_pointer() {
+        let projects = drop_fixture();
+        let before = |project, block| Some(DropAt::Before { project, block });
+        assert_eq!(hover_at(&projects, 0, 0, 0.9), before(0, 0), "the heading");
+        assert_eq!(hover_at(&projects, 0, 4, 0.2), before(0, 1), "a single row, upper half");
+        assert_eq!(hover_at(&projects, 0, 4, 0.8), before(0, 2), "a single row, lower half");
+        assert_eq!(hover_at(&projects, 0, 5, 0.8), Some(DropAt::End { project: 0 }), "the last block, lower half");
+        assert_eq!(hover_at(&projects, 0, 1, 0.9), before(0, 0), "a split tab's first row, upper half of the block");
+        assert_eq!(hover_at(&projects, 0, 2, 0.5), before(0, 1), "a split tab's middle row, lower half of the block");
+        assert_eq!(hover_at(&projects, 0, 3, 0.1), before(0, 1));
+        assert_eq!(hover_at(&projects, 2, 9, 0.5), Some(DropAt::End { project: 2 }), "an empty project");
+        assert_eq!(hover_at(&projects, 5, 0, 0.5), None);
+    }
+
+    #[test]
+    fn drop_cue_decides_land_deny_or_neutral() {
+        let projects = drop_fixture();
+        let app = Path::new("/r/app");
+        let web = Path::new("/r/web");
+        let work = gantry_project::key("Work");
+        let at = |project, block| DropAt::Before { project, block };
+        let cue = |source, current: &Path, real: &Path, pullable, at| {
+            drop_cue(&projects, source, current, real, pullable, at)
+        };
+        // (a) the item's own project: a real move lands, no change is denied.
+        assert_eq!(cue(DragSource::Pane(2), app, app, false, at(0, 0)), DropCue::Land(at(0, 0)));
+        assert_eq!(cue(DragSource::Pane(3), app, app, false, at(0, 1)), DropCue::Deny);
+        assert_eq!(cue(DragSource::Pane(5), app, app, true, at(0, 2)), DropCue::Neutral, "pulled out instead");
+        // (b) a Gantry project the item is not in.
+        assert_eq!(cue(DragSource::Pane(3), app, app, false, at(1, 0)), DropCue::Land(at(1, 0)));
+        assert_eq!(
+            cue(DragSource::Pane(3), app, app, false, DropAt::End { project: 2 }),
+            DropCue::Land(DropAt::End { project: 2 })
+        );
+        // (c) a folder project: only the item's real one takes it back from a Gantry project.
+        assert_eq!(cue(DragSource::Pane(1), &work, app, false, at(0, 1)), DropCue::Land(at(0, 1)));
+        assert_eq!(cue(DragSource::Pane(1), &work, web, false, at(0, 1)), DropCue::Neutral);
+        // (d) anything else: denied, or neutral when the drop pulls a pane out.
+        assert_eq!(cue(DragSource::Pane(6), web, web, false, at(0, 1)), DropCue::Deny);
+        assert_eq!(
+            cue(DragSource::Pane(5), app, app, true, at(1, 0)),
+            DropCue::Land(at(1, 0)),
+            "a Gantry project takes it"
+        );
+        assert_eq!(cue(DragSource::Pane(3), app, app, false, at(7, 0)), DropCue::Neutral);
     }
 
     #[test]

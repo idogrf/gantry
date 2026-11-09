@@ -12,9 +12,9 @@ use app_core::host_state::{HostDot, hosts_summary};
 use app_core::hosts_fold::HostsFold;
 use app_core::menus::{self, MenuAction, MenuContext};
 use app_core::session_tree::{
-    self, Activation, ActiveInput, Arrivals, DragSource, DropAt, GroupEdges, PaneEntry, ProjectItems, ProjectOrder,
-    ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, display_path, project_items, reorder, session_title,
-    shown_order,
+    self, Activation, ActiveInput, Arrivals, DragSource, DropAt, DropCue, GroupEdges, PaneEntry, ProjectItems,
+    ProjectOrder, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, display_path, drop_cue, hover_at, placed_order,
+    project_items, reorder, session_title, shown_order,
 };
 use app_core::sessions::SessionStore;
 use app_core::sidebar_compact::tile_letter;
@@ -23,8 +23,8 @@ use app_core::split_tree::NodeId;
 use app_core::text_field::TextField;
 use app_core::theme_colors::ToneColors;
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task,
+    AnyElement, App, Bounds, ClickEvent, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task,
     UniformListDecoration, UniformListScrollHandle, Window, div, prelude::*, px, relative, rgb, rgba, svg,
     uniform_list,
 };
@@ -202,6 +202,8 @@ pub struct SidebarView {
     saved_order: SidebarOrder,
     /// The movable items of the listed projects (none while a filter is typed).
     items: Rc<Vec<ProjectItems>>,
+    /// What a dragged pane or split tab shows over the row it is on.
+    drop_hint: Option<DropHint>,
     filter: TextField,
     /// The row being renamed and its text field.
     renaming: Option<(RenameTarget, TextField)>,
@@ -277,6 +279,7 @@ impl SidebarView {
             order: ProjectOrder::default(),
             saved_order: SidebarOrder::default(),
             items: Rc::new(Vec::new()),
+            drop_hint: None,
             filter: TextField::default(),
             renaming: None,
             project_edit: None,
@@ -1071,80 +1074,108 @@ impl SidebarView {
         }
     }
 
-    /// Half a row that takes a dragged tab (a pane's row or a split tab's heading) to `at`: it draws a line at its top
-    /// or bottom edge while an item that can go there is over it.
-    fn landing(&self, at: DropAt, top: bool, cx: &mut Context<Self>) -> gpui::Div {
-        let theme = theme(cx).clone();
-        let half = theme.ui(ROW_HEIGHT / 2.);
-        let accent = rgb(theme.tokens.accent);
-        let (pane_items, tab_items) = (self.items.clone(), self.items.clone());
-        let line = move |style: gpui::StyleRefinement| {
-            if top { style.border_t_2().border_color(accent) } else { style.border_b_2().border_color(accent) }
-        };
-        div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .when(top, |half_row| half_row.top_0())
-            .when(!top, |half_row| half_row.bottom_0())
-            .h(half)
-            .drag_over::<DraggedPane>(move |style, dragged, _, _| {
-                if reorder(&pane_items, DragSource::Pane(dragged.leaf), at).is_some() { line(style) } else { style }
-            })
-            .drag_over::<DraggedTab>(move |style, dragged, _, _| {
-                if reorder(&tab_items, DragSource::Tab(dragged.first), at).is_some() { line(style) } else { style }
-            })
-            .on_drop(cx.listener(move |this, dragged: &DraggedPane, _, cx| {
-                this.drop_item(DragSource::Pane(dragged.leaf), at, cx)
-            }))
-            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
-                this.drop_item(DragSource::Tab(dragged.first), at, cx)
-            }))
+    /// What dragging `source` over row `index` shows, from where the pointer is in the row (`fraction`: 0 = top,
+    /// 1 = bottom). `None` = nothing (the drop is not for this row's project).
+    fn hint_for(&self, index: usize, source: DragSource, fraction: f32) -> Option<DropHint> {
+        if matches!(self.rows[index].kind, RowKind::Detail { .. }) {
+            return None;
+        }
+        let heading = self.rows[..=index].iter().rposition(|row| matches!(row.kind, RowKind::Project { .. }))?;
+        let target = self.rows[heading].project.as_ref()?;
+        let project = self.items.iter().position(|items| &items.path == target)?;
+        let at = hover_at(&self.items, project, index, fraction)?;
+        let (current, real, pullable) = self.drag_facts(source)?;
+        match drop_cue(&self.items, source, &current, &real, pullable, at) {
+            DropCue::Neutral => None,
+            cue => Some(DropHint { row: index, target: target.clone(), cue }),
+        }
     }
 
-    /// A tab was dropped at `at`: move it inside its project and save the new order. A drop that is no move leaves
-    /// the drop to the list (a pane of a split tab becomes a tab of its own).
-    fn drop_item(&mut self, source: DragSource, at: DropAt, cx: &mut Context<Self>) {
-        let Some((project, blocks)) = reorder(&self.items, source, at) else {
-            // Dropped inside another project that is a Gantry project: the item goes into it.
-            let target = match at {
-                DropAt::Before { project, .. } | DropAt::End { project } => self.items.get(project).map(|p| &p.path),
-            };
-            let current = self.rows.iter().find_map(|row| match (&row.kind, source) {
-                (RowKind::Session { leaf: Some(leaf), .. }, DragSource::Pane(pane)) if *leaf == pane => {
-                    row.project.clone()
+    /// The project `source` is listed in, the folder project of its pane, and whether a drop elsewhere pulls it out of
+    /// its split tab.
+    fn drag_facts(&self, source: DragSource) -> Option<(PathBuf, PathBuf, bool)> {
+        let current = self.rows.iter().find_map(|row| match (&row.kind, source) {
+            (RowKind::Session { leaf: Some(leaf), .. }, DragSource::Pane(pane)) if *leaf == pane => row.project.clone(),
+            (RowKind::Pane { entry, .. }, DragSource::Pane(pane)) if entry.leaf == pane => row.project.clone(),
+            (RowKind::Tab { first, .. }, DragSource::Tab(tab)) if *first == tab => row.project.clone(),
+            _ => None,
+        })?;
+        let (DragSource::Pane(leaf) | DragSource::Tab(leaf)) = source;
+        let pane = self.panes.iter().find(|pane| pane.leaf == leaf)?;
+        let pullable =
+            matches!(source, DragSource::Pane(_)) && session_tree::pullable_leaves(&self.panes).contains(&leaf);
+        Some((current, self.roots.of(&pane.host, &pane.cwd), pullable))
+    }
+
+    /// A pane or split tab is over row `index`: keep the drop hint in step with the pointer.
+    fn drag_over_row(
+        &mut self,
+        index: usize,
+        source: DragSource,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let next = bounds.contains(&position).then(|| {
+            let fraction = f32::from(position.y - bounds.origin.y) / f32::from(bounds.size.height).max(1.);
+            self.hint_for(index, source, fraction)
+        });
+        match next {
+            Some(hint) if self.drop_hint != hint => {
+                self.drop_hint = hint;
+                cx.notify();
+            }
+            None if self.drop_hint.as_ref().is_some_and(|hint| hint.row == index) => {
+                self.drop_hint = None;
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    /// A pane or split tab was dropped on a row: it goes where the hint showed; with no hint a pane of a split tab
+    /// becomes a tab of its own.
+    fn drop_item(&mut self, source: DragSource, cx: &mut Context<Self>) {
+        match self.drop_hint.take().map(|hint| hint.cue) {
+            Some(DropCue::Land(at)) => self.land(source, at, cx),
+            Some(_) => cx.notify(),
+            None => {
+                cx.notify();
+                if let DragSource::Pane(leaf) = source
+                    && session_tree::pullable_leaves(&self.panes).contains(&leaf)
+                {
+                    cx.emit(SidebarEvent::PullOut(leaf));
                 }
-                (RowKind::Pane { entry, .. }, DragSource::Pane(pane)) if entry.leaf == pane => row.project.clone(),
-                (RowKind::Tab { first, .. }, DragSource::Tab(tab)) if *first == tab => row.project.clone(),
-                _ => None,
-            });
-            if let Some(target) =
-                target.filter(|target| gantry_project::is_key(target) && current.as_ref() != Some(*target))
-            {
-                let name = gantry_project::display_name(target, &self.gantry_projects, None);
-                let source = match source {
-                    DragSource::Pane(leaf) => Assign::Leaf(leaf),
-                    DragSource::Tab(first) => Assign::Tab(first),
-                };
-                cx.emit(SidebarEvent::AssignToProject { source, project: name });
-                return;
             }
-            if let DragSource::Pane(leaf) = source
-                && session_tree::pullable_leaves(&self.panes).contains(&leaf)
-            {
-                cx.emit(SidebarEvent::PullOut(leaf));
-            }
-            return;
-        };
-        let all = project_items(&self.all_rows);
-        let Some(shown) = all.iter().position(|items| items.path == self.items[project].path) else { return };
-        let (projects, leaves) = shown_order(&all, Some((shown, &blocks)));
-        self.record_order(&projects, &leaves, cx);
+        }
     }
 
-    /// Something was dropped on a project heading: tell the workspace where it goes.
-    fn assign(&mut self, source: Assign, project: Option<String>, cx: &mut Context<Self>) {
-        cx.emit(SidebarEvent::AssignToProject { source, project });
+    /// Put `source` at `at`: a move inside its project saves the new order; into another project, the order with the
+    /// item at that place is saved first and then the workspace gives it the project.
+    fn land(&mut self, source: DragSource, at: DropAt, cx: &mut Context<Self>) {
+        let (DropAt::Before { project, .. } | DropAt::End { project }) = at;
+        let Some(target) = self.items.get(project).map(|items| items.path.clone()) else { return };
+        let all = project_items(&self.all_rows);
+        let Some(shown) = all.iter().position(|items| items.path == target) else { return };
+        if self.drag_facts(source).is_some_and(|(current, ..)| current == target) {
+            let Some((_, blocks)) = reorder(&self.items, source, at) else { return };
+            let (projects, leaves) = shown_order(&all, Some((shown, &blocks)));
+            self.record_order(&projects, &leaves, cx);
+            return;
+        }
+        let at = match at {
+            DropAt::Before { block, .. } if block < all[shown].blocks.len() => DropAt::Before { project: shown, block },
+            _ => DropAt::End { project: shown },
+        };
+        if let Some((projects, leaves)) = placed_order(&all, source, at) {
+            self.record_order(&projects, &leaves, cx);
+        }
+        let name = gantry_project::display_name(&target, &self.gantry_projects, None);
+        let source = match source {
+            DragSource::Pane(leaf) => Assign::Leaf(leaf),
+            DragSource::Tab(first) => Assign::Tab(first),
+        };
+        cx.emit(SidebarEvent::AssignToProject { source, project: name });
     }
 
     /// Save the order shown now (the user just changed it) and tell the workspace.
@@ -1173,42 +1204,8 @@ impl SidebarView {
             _ => None,
         };
         let content = self.render_row_content(index, window, cx);
-        // A dragged tab lands before this item (upper half of its first row) or before the next one (lower half of
-        // its last row); there is no landing outside the item's own project.
-        let place = self.items.iter().enumerate().find_map(|(project, items)| {
-            items.blocks.iter().enumerate().find_map(|(block, item)| {
-                (item.row..=item.last_row).contains(&index).then_some((
-                    project,
-                    block,
-                    item.row == index,
-                    item.last_row == index,
-                    items.blocks.len(),
-                ))
-            })
-        });
-        let landings = place.map(|(project, block, first, last, count)| {
-            let upper = first.then(|| self.landing(DropAt::Before { project, block }, true, cx));
-            let lower = last.then(|| {
-                let at = if block + 1 < count {
-                    DropAt::Before { project, block: block + 1 }
-                } else {
-                    DropAt::End { project }
-                };
-                self.landing(at, false, cx)
-            });
-            (upper, lower)
-        });
-        // Where a drop of a pane, tab or session on this row goes: the Gantry project of its group (any row), or out of
-        // its Gantry project (any row of a folder's group); whether this is a heading.
-        let assign: Option<(Option<String>, bool)> = match (&self.rows[index].kind, &self.rows[index].project) {
-            (RowKind::Project { path, .. }, _) if !gantry_project::is_key(path) => Some((None, true)),
-            (kind, Some(path)) if gantry_project::is_key(path) => Some((
-                gantry_project::display_name(path, &self.gantry_projects, None),
-                matches!(kind, RowKind::Project { .. }),
-            )),
-            (_, Some(path)) if !gantry_project::is_key(path) => Some((None, false)),
-            _ => None,
-        };
+        // The drop cue of a pane or split tab being dragged: this row's part of the target's box, and the line.
+        let cue = self.drop_cue_parts(index, &theme, cx);
         let group_name = format!("row-{index}");
         let marker = div().absolute().left(theme.ui(14.)).right(theme.ui(14.)).h(px(3.)).rounded(px(2.));
         let marker = if edges.first { marker.top(px(0.)) } else { marker.bottom(px(0.)) };
@@ -1273,7 +1270,7 @@ impl SidebarView {
                         .bg(rgba(with_opacity(theme.tokens.line, amount))),
                 )
             })
-            .when_some(landings, |row, (upper, lower)| row.children(upper).children(lower))
+            .children(cue)
             .when(target.is_some(), |row| {
                 row.child(
                     marker.group_drag_over::<DraggedProject>(group_name, |style| style.bg(rgb(theme.tokens.accent))),
@@ -1285,22 +1282,86 @@ impl SidebarView {
                     this.drop_project(&dragged.root, before.as_deref(), cx);
                 }
             }))
-            // A project heading, and any row of a Gantry project, takes a pane or a split tab: it
-            // goes into that Gantry project (a folder heading takes it out of its Gantry project).
-            .when_some(assign, |row, (project, heading)| {
-                let tint = rgba((theme.tokens.accent << 8) | 0x2e);
-                let (pane_to, tab_to) = (project.clone(), project);
-                row.when(heading, |row| {
-                    row.drag_over::<DraggedPane>(move |style, _, _, _| style.bg(tint))
-                        .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(tint))
-                })
-                .on_drop(cx.listener(move |this, dragged: &DraggedPane, _, cx| {
-                    this.assign(Assign::Leaf(dragged.leaf), pane_to.clone(), cx)
-                }))
-                .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
-                    this.assign(Assign::Tab(dragged.first), tab_to.clone(), cx)
-                }))
-            })
+            // Every row takes a dragged pane or split tab, where the hint says it lands.
+            .on_drag_move(cx.listener(move |this, event: &DragMoveEvent<DraggedPane>, _, cx| {
+                let leaf = event.drag(cx).leaf;
+                this.drag_over_row(index, DragSource::Pane(leaf), event.bounds, event.event.position, cx)
+            }))
+            .on_drag_move(cx.listener(move |this, event: &DragMoveEvent<DraggedTab>, _, cx| {
+                let first = event.drag(cx).first;
+                this.drag_over_row(index, DragSource::Tab(first), event.bounds, event.event.position, cx)
+            }))
+            .on_drop(
+                cx.listener(|this, dragged: &DraggedPane, _, cx| this.drop_item(DragSource::Pane(dragged.leaf), cx)),
+            )
+            .on_drop(
+                cx.listener(|this, dragged: &DraggedTab, _, cx| this.drop_item(DragSource::Tab(dragged.first), cx)),
+            )
+    }
+
+    /// Row `index`'s part of the drop cue while a pane or split tab is dragged: the box around the target project's
+    /// group in segments (accent, or danger when the drop does nothing) and, where it lands, the accent line.
+    fn drop_cue_parts(&self, index: usize, theme: &Theme, cx: &App) -> Vec<gpui::Div> {
+        let Some(hint) = self.drop_hint.as_ref().filter(|_| cx.has_active_drag()) else { return Vec::new() };
+        let Some(heading) = self.rows[..=index].iter().rposition(|row| matches!(row.kind, RowKind::Project { .. }))
+        else {
+            return Vec::new();
+        };
+        if self.rows[heading].project.as_ref() != Some(&hint.target) {
+            return Vec::new();
+        }
+        let edges = session_tree::group_edges(&self.rows, index);
+        let faded = 1.0 - self.amount;
+        let (color, line) = match hint.cue {
+            DropCue::Land(at) => (theme.tokens.accent, Some(at)),
+            _ => (theme.tokens.danger, None),
+        };
+        let boxed = div()
+            .absolute()
+            .left(theme.ui(6. * faded))
+            .right(theme.ui(6. * faded))
+            .top(if edges.first { theme.ui(8.) } else { px(0.) })
+            .bottom(px(0.))
+            .border_l_2()
+            .border_r_2()
+            .border_dashed()
+            .border_color(rgb(color))
+            .bg(rgba((color << 8) | 0x2e))
+            .when(edges.first, |boxed| boxed.border_t_2().rounded_t(px(RADIUS)))
+            .when(edges.last, |boxed| boxed.border_b_2().rounded_b(px(RADIUS)));
+        let mut parts = vec![boxed];
+        let Some(at) = line else { return parts };
+        let blocks = &self.items.iter().find(|items| items.path == hint.target).map(|items| &items.blocks);
+        let (above, below) = match (at, blocks) {
+            (DropAt::Before { block, .. }, Some(blocks)) => {
+                (blocks.get(block).is_some_and(|item| item.row == index), false)
+            }
+            (DropAt::End { .. }, Some(blocks)) => {
+                (false, blocks.last().map_or(index == heading, |item| item.last_row == index))
+            }
+            _ => (false, false),
+        };
+        if above || below {
+            let line = div()
+                .absolute()
+                .left(theme.ui(6. * faded + 8.))
+                .right(theme.ui(6. * faded + 8.))
+                .h(px(2.))
+                .bg(rgb(theme.tokens.accent))
+                .when(above, |line| line.top(px(0.)))
+                .when(below, |line| line.bottom(px(0.)))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(-3.))
+                        .top(px(-2.))
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(rgb(theme.tokens.accent)),
+                );
+            parts.push(line);
+        }
+        parts
     }
 
     /// The close button of row `index`, in the slot of its right-most mark. It replaces `badge` while the row is
@@ -1918,6 +1979,17 @@ fn renames(kind: &RowKind, target: RenameTarget) -> bool {
     }
 }
 
+/// The drop cue of a dragged pane or split tab, from the row the pointer is over.
+#[derive(Clone, Debug, PartialEq)]
+struct DropHint {
+    /// The row the pointer is over.
+    row: usize,
+    /// The project it would go to (its key).
+    target: PathBuf,
+    /// [`DropCue::Deny`] or [`DropCue::Land`].
+    cue: DropCue,
+}
+
 /// A split tab's heading being dragged to a new place inside its project.
 #[derive(Clone)]
 struct DraggedTab {
@@ -2023,6 +2095,7 @@ impl Render for SidebarView {
                 move |style, dragged, _, _| if pullable.contains(&dragged.leaf) { style.bg(tint) } else { style }
             })
             .on_drop(cx.listener(|this, dragged: &DraggedPane, _, cx| {
+                this.drop_hint = None;
                 if session_tree::pullable_leaves(&this.panes).contains(&dragged.leaf) {
                     cx.emit(SidebarEvent::PullOut(dragged.leaf));
                 }

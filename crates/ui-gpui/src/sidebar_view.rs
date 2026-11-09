@@ -1107,15 +1107,27 @@ impl SidebarView {
         Some((current, self.roots.of(&pane.host, &pane.cwd)))
     }
 
-    /// A pane or split tab is being dragged: offer the drop-in zone of its folder when the item is in a Gantry project
-    /// and the folder has no heading. Never with a filter typed or the compact column.
-    fn update_zone(&mut self, source: DragSource, cx: &mut Context<Self>) {
-        let zone = (self.amount < 0.5 && self.filter_text().is_empty())
+    /// A pane or split tab is being dragged, `inside` the sidebar or not (`bounds`: the sidebar, `position`: the
+    /// pointer): offer the drop-in zone of its folder while the pointer is over the sidebar, the item is in a Gantry
+    /// project and the folder has no heading. Never with a filter typed or the compact column. A new zone is not armed
+    /// until the pointer has been outside its box once.
+    fn update_zone(
+        &mut self,
+        source: DragSource,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let offered = bounds.contains(&position) && self.amount < 0.5 && self.filter_text().is_empty();
+        let zone = offered
             .then(|| {
                 let (current, real) = self.drag_facts(source)?;
                 let folder = zone_folder(&self.items, &current, &real)?;
                 let project = gantry_project::display_name(&current, &self.gantry_projects, None)?;
-                Some(Zone { source, folder, project })
+                let armed = self.zone.as_ref().is_some_and(|old| {
+                    old.armed && old.source == source && old.folder == folder && old.project == project
+                });
+                Some(Zone { source, folder, project, armed })
             })
             .flatten();
         if self.zone != zone {
@@ -1124,17 +1136,31 @@ impl SidebarView {
         }
     }
 
-    /// The pointer is over the drop-in zone: no row shows a drop hint.
-    fn drag_over_zone(&mut self, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
-        if bounds.contains(&position) && self.drop_hint.take().is_some() {
+    /// A drag that is not a pane or split tab: no drop-in zone.
+    fn clear_zone(&mut self, cx: &mut Context<Self>) {
+        if self.zone.take().is_some() {
             cx.notify();
         }
     }
 
-    /// `source` was dropped on the drop-in zone: it leaves its Gantry project for its folder.
+    /// A pane or split tab moved, `bounds` being the drop-in zone's box: no row shows a drop hint while the pointer is
+    /// in it, and once it has been outside the box the zone is armed.
+    fn drag_over_zone(&mut self, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if bounds.contains(&position) {
+            if self.drop_hint.take().is_some() {
+                cx.notify();
+            }
+        } else if let Some(zone) = self.zone.as_mut().filter(|zone| !zone.armed) {
+            zone.armed = true;
+            cx.notify();
+        }
+    }
+
+    /// `source` was dropped on the drop-in zone's box: when the zone is armed it leaves its Gantry project for its
+    /// folder; the drop is taken either way.
     fn drop_on_zone(&mut self, source: DragSource, cx: &mut Context<Self>) {
         self.drop_hint = None;
-        if self.zone.take().is_some_and(|zone| zone.source == source) {
+        if self.zone.take().is_some_and(|zone| zone.armed && zone.source == source) {
             let source = match source {
                 DragSource::Pane(leaf) => Assign::Leaf(leaf),
                 DragSource::Tab(first) => Assign::Tab(first),
@@ -1147,6 +1173,7 @@ impl SidebarView {
     /// The drop-in zone: a dashed box for the folder, drawn below the list while one is offered.
     fn render_zone(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<Stateful<gpui::Div>> {
         let zone = self.zone.as_ref().filter(|_| cx.has_active_drag() && self.amount < 0.5)?;
+        let armed = zone.armed;
         let (host, root) = split_project_key(&zone.folder);
         let home = self.home.as_deref().filter(|_| host.is_local());
         let mut paths: Vec<PathBuf> = self.items.iter().map(|items| items.path.clone()).collect();
@@ -1154,14 +1181,18 @@ impl SidebarView {
         let name = labels(&paths, home, &self.gantry_projects).remove(&zone.folder).unwrap_or_default();
         let color = theme.tokens.accent;
         let group = "drop-in-zone";
+        // The hover cue is only for an armed zone.
         let hidden = |line: gpui::Div| {
-            line.group_drag_over::<DraggedPane>(group, |style| style.hidden())
-                .group_drag_over::<DraggedTab>(group, |style| style.hidden())
+            line.when(armed, |line| {
+                line.group_drag_over::<DraggedPane>(group, |style| style.hidden())
+                    .group_drag_over::<DraggedTab>(group, |style| style.hidden())
+            })
         };
         let shown = |line: gpui::Div| {
-            line.hidden()
-                .group_drag_over::<DraggedPane>(group, |style| style.flex())
-                .group_drag_over::<DraggedTab>(group, |style| style.flex())
+            line.hidden().when(armed, |line| {
+                line.group_drag_over::<DraggedPane>(group, |style| style.flex())
+                    .group_drag_over::<DraggedTab>(group, |style| style.flex())
+            })
         };
         Some(
             div()
@@ -1182,6 +1213,7 @@ impl SidebarView {
                 )
                 .child(
                     div()
+                        .id("drop-in-zone-box")
                         .group(group)
                         .flex()
                         .flex_col()
@@ -1193,8 +1225,11 @@ impl SidebarView {
                         .border_dashed()
                         .border_color(rgb(color))
                         .bg(rgba((color << 8) | 0x1a))
-                        .group_drag_over::<DraggedPane>(group, move |style| style.bg(rgba((color << 8) | 0x40)))
-                        .group_drag_over::<DraggedTab>(group, move |style| style.bg(rgba((color << 8) | 0x40)))
+                        .when(armed, |zone_box| {
+                            zone_box
+                                .group_drag_over::<DraggedPane>(group, move |style| style.bg(rgba((color << 8) | 0x40)))
+                                .group_drag_over::<DraggedTab>(group, move |style| style.bg(rgba((color << 8) | 0x40)))
+                        })
                         .child(
                             div()
                                 .flex()
@@ -1224,21 +1259,21 @@ impl SidebarView {
                                 .text_xs()
                                 .text_color(rgb(color))
                                 .child(format!("Drop to take it out of {}", zone.project)),
-                        )),
-                )
-                .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DraggedPane>, _, cx| {
-                    this.drag_over_zone(event.bounds, event.event.position, cx)
-                }))
-                .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DraggedTab>, _, cx| {
-                    this.drag_over_zone(event.bounds, event.event.position, cx)
-                }))
-                // Taking the drop here keeps the sidebar's own pull-out from also firing.
-                .on_drop(cx.listener(|this, dragged: &DraggedPane, _, cx| {
-                    this.drop_on_zone(DragSource::Pane(dragged.leaf), cx)
-                }))
-                .on_drop(cx.listener(|this, dragged: &DraggedTab, _, cx| {
-                    this.drop_on_zone(DragSource::Tab(dragged.first), cx)
-                })),
+                        ))
+                        .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DraggedPane>, _, cx| {
+                            this.drag_over_zone(event.bounds, event.event.position, cx)
+                        }))
+                        .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DraggedTab>, _, cx| {
+                            this.drag_over_zone(event.bounds, event.event.position, cx)
+                        }))
+                        // Taking the drop here keeps the sidebar's own pull-out from also firing.
+                        .on_drop(cx.listener(|this, dragged: &DraggedPane, _, cx| {
+                            this.drop_on_zone(DragSource::Pane(dragged.leaf), cx)
+                        }))
+                        .on_drop(cx.listener(|this, dragged: &DraggedTab, _, cx| {
+                            this.drop_on_zone(DragSource::Tab(dragged.first), cx)
+                        })),
+                ),
         )
     }
 
@@ -2130,6 +2165,8 @@ struct Zone {
     folder: PathBuf,
     /// The display name of the Gantry project it is in now.
     project: String,
+    /// The pointer has been outside the zone's box since it appeared: only then does it take a drop.
+    armed: bool,
 }
 
 /// A split tab's heading being dragged to a new place inside its project.
@@ -2212,7 +2249,13 @@ impl Render for SidebarView {
         // The sessions list started to scroll (or fits again): the SSH hosts block may fold by itself.
         // Not while compact: the column's own bottom rows are taller, and a fold made then would still be there when
         // the sidebar expands.
+        // A drag that ended (dropped elsewhere, cancelled) leaves no zone behind.
+        if self.zone.is_some() && !cx.has_active_drag() {
+            self.zone = None;
+        }
+        // Not while the drop-in zone is shown: it shrinks the list, which is no scrolling to react to.
         if follows_list_scroll(self.amount)
+            && self.zone.is_none()
             && let Some(extent) = Extent::of(&self.scroll)
         {
             self.hosts_fold.observe(extent.contents.1 > extent.viewport.1 + 0.5);
@@ -2237,11 +2280,16 @@ impl Render for SidebarView {
                 move |style, dragged, _, _| if pullable.contains(&dragged.leaf) { style.bg(tint) } else { style }
             })
             .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DraggedPane>, _, cx| {
-                this.update_zone(DragSource::Pane(event.drag(cx).leaf), cx)
+                let source = DragSource::Pane(event.drag(cx).leaf);
+                this.update_zone(source, event.bounds, event.event.position, cx)
             }))
             .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DraggedTab>, _, cx| {
-                this.update_zone(DragSource::Tab(event.drag(cx).first), cx)
+                let source = DragSource::Tab(event.drag(cx).first);
+                this.update_zone(source, event.bounds, event.event.position, cx)
             }))
+            // Any other drag (a project heading, files) shows no zone.
+            .on_drag_move(cx.listener(|this, _: &DragMoveEvent<DraggedProject>, _, cx| this.clear_zone(cx)))
+            .on_drag_move(cx.listener(|this, _: &DragMoveEvent<gpui::ExternalPaths>, _, cx| this.clear_zone(cx)))
             .on_drop(cx.listener(|this, dragged: &DraggedPane, _, cx| {
                 this.drop_hint = None;
                 if session_tree::pullable_leaves(&this.panes).contains(&dragged.leaf) {

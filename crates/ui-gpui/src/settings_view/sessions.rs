@@ -23,25 +23,6 @@ const DIR_COMMAND: &str = "dir-command";
 pub(super) const SHELL_PROGRAM: &str = "shell-program";
 pub(super) const SHELL_ARGS: &str = "shell-args";
 
-const SESSIONS_PER_PROJECT: Stepped = Stepped {
-    name: "recents-per-project",
-    get: |s| s.recents.per_project as f32,
-    set: |s, value| s.recents.per_project = value as usize,
-    delta: 1.0,
-    min: 1.0,
-    max: 20.0,
-    unit: "",
-};
-const PROJECT_CHIPS: Stepped = Stepped {
-    name: "recents-chips",
-    get: |s| s.recents.chips as f32,
-    set: |s, value| s.recents.chips = value as usize,
-    delta: 1.0,
-    min: 0.0,
-    max: 12.0,
-    unit: "",
-};
-
 /// Split a command line into words: spaces separate, single quotes keep everything, double quotes keep spaces (and
 /// let `\"` and `\\` through), a backslash outside quotes escapes the next character. An open quote runs to the end.
 pub(super) fn split_args(text: &str) -> Vec<String> {
@@ -424,8 +405,7 @@ impl SettingsView {
     ) -> Div {
         let dirs = self.claude_dirs_group(theme, settings, window, cx);
         let favorites = self.favorites_group(theme, settings, window, cx);
-        let recents = self.recents_group(theme, settings, window, cx);
-        div().flex().flex_col().gap(theme.ui(26.)).child(dirs).child(favorites).child(recents)
+        div().flex().flex_col().gap(theme.ui(26.)).child(dirs).child(favorites)
     }
 
     /// A small text button for a list row's trailing slot.
@@ -763,44 +743,6 @@ impl SettingsView {
             "Favorites",
             Some("Shown first in the launcher. Pin a folder from a project's right-click menu."),
             rows,
-        )
-    }
-
-    fn recents_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
-        let per_project = self.stepper(&SESSIONS_PER_PROJECT, settings, window, cx);
-        let per_project_reset = self.reset_slot(
-            "reset-recents-per-project",
-            0,
-            settings,
-            |s| s.recents.per_project,
-            |s, v| s.recents.per_project = v,
-            window,
-            cx,
-        );
-        let chips = self.stepper(&PROJECT_CHIPS, settings, window, cx);
-        let chips_reset = self.reset_slot(
-            "reset-recents-chips",
-            0,
-            settings,
-            |s| s.recents.chips,
-            |s, v| s.recents.chips = v,
-            window,
-            cx,
-        );
-        group(
-            theme,
-            "Recent sessions",
-            None,
-            vec![
-                row(
-                    theme,
-                    "Sessions per project",
-                    "Shown in the pop-up before you search.",
-                    per_project,
-                    per_project_reset,
-                ),
-                row(theme, "Project chips", "Projects you can filter by in one click.", chips, chips_reset),
-            ],
         )
     }
 }

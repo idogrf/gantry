@@ -221,15 +221,6 @@ pub struct ShellSettings {
     pub args: Vec<String>,
 }
 
-/// Sizes of the recent sessions pop-up.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RecentsSettings {
-    /// Sessions listed per project (1 to 20).
-    pub per_project: usize,
-    /// Project chips (0 to 12).
-    pub chips: usize,
-}
-
 /// Window behaviour.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WindowSettings {
@@ -404,8 +395,6 @@ pub struct Settings {
     pub ssh_hosts: Vec<SshHost>,
     /// Shell for new shell panes.
     pub shell: ShellSettings,
-    /// Recent sessions pop-up sizes.
-    pub recents: RecentsSettings,
     /// Pinned folders, in order.
     pub favorites: Vec<PathBuf>,
     /// Window behaviour.
@@ -476,7 +465,6 @@ impl Default for Settings {
             folder_claude_dirs: BTreeMap::new(),
             ssh_hosts: Vec::new(),
             shell: ShellSettings::default(),
-            recents: RecentsSettings { per_project: 5, chips: 6 },
             favorites: Vec::new(),
             window: WindowSettings {
                 restore_layout: true,
@@ -922,12 +910,6 @@ impl Reader {
             args: self.strings(&map, "shell.", "args"),
         };
 
-        let map = self.object(raw, "", "recents");
-        let recents = RecentsSettings {
-            per_project: self.number(&map, "recents.", "perProject", 5.0, (1.0, 20.0)).round() as usize,
-            chips: self.number(&map, "recents.", "chips", 6.0, (0.0, 12.0)).round() as usize,
-        };
-
         let favorites = self.favorites(raw);
 
         let map = self.object(raw, "", "window");
@@ -987,7 +969,6 @@ impl Reader {
             folder_claude_dirs,
             ssh_hosts,
             shell,
-            recents,
             favorites,
             window,
             last_prompt,
@@ -1101,12 +1082,6 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
     add(&["folderClaudeDirs"], Value::Object(folders), !settings.folder_claude_dirs.is_empty());
     add(&["shell", "program"], settings.shell.program.clone().into(), settings.shell.program != default.shell.program);
     add(&["shell", "args"], settings.shell.args.clone().into(), settings.shell.args != default.shell.args);
-    add(
-        &["recents", "perProject"],
-        settings.recents.per_project.into(),
-        settings.recents.per_project != default.recents.per_project,
-    );
-    add(&["recents", "chips"], settings.recents.chips.into(), settings.recents.chips != default.recents.chips);
     let favorites: Vec<Value> =
         settings.favorites.iter().map(|path| path.to_string_lossy().into_owned().into()).collect();
     add(&["favorites"], Value::Array(favorites), !settings.favorites.is_empty());
@@ -1476,7 +1451,6 @@ mod tests {
         settings.default_claude_dir = Some("Work".into());
         settings.folder_claude_dirs.insert("/home/me/work/ops".into(), "Work".into());
         settings.shell = ShellSettings { program: "/bin/zsh".into(), args: vec!["-l".into()] };
-        settings.recents = RecentsSettings { per_project: 9, chips: 2 };
         settings.favorites = vec!["/a".into(), "/b".into()];
         settings.window = WindowSettings {
             restore_layout: false,
@@ -1501,7 +1475,6 @@ mod tests {
         );
         assert_eq!(s.default_claude_dir, None);
         assert_eq!(s.shell, ShellSettings { program: String::new(), args: vec![] });
-        assert_eq!(s.recents, RecentsSettings { per_project: 5, chips: 6 });
         assert_eq!(
             s.window,
             WindowSettings {
@@ -1699,16 +1672,27 @@ mod tests {
 
     #[test]
     fn ranges_clamp() {
-        let loaded = parse(
-            r#"{"recents": {"perProject": 99, "chips": -3}, "window": {"scrollback": 5, "sidebarAtStart": "sideways"}}"#,
-        );
+        let loaded = parse(r#"{"window": {"scrollback": 5, "sidebarAtStart": "sideways"}}"#);
         let settings = loaded.settings.unwrap();
-        assert_eq!(settings.recents, RecentsSettings { per_project: 20, chips: 0 });
         assert_eq!(settings.window.scrollback, 1000);
         assert_eq!(settings.window.sidebar_at_start, SidebarAtStart::Remember);
         let keys: Vec<_> = loaded.problems.iter().map(|problem| problem.key.as_str()).collect();
-        assert_eq!(keys, ["recents.perProject", "recents.chips", "window.sidebarAtStart", "window.scrollback"]);
+        assert_eq!(keys, ["window.sidebarAtStart", "window.scrollback"]);
         assert_eq!(parse(r#"{"window": {"scrollback": 1000000}}"#).settings.unwrap().window.scrollback, 100000);
+    }
+
+    #[test]
+    fn an_old_recents_key_is_left_alone() {
+        let loaded = parse(r#"{"recents": {"perProject": 99, "chips": -3}, "favorites": ["/a"]}"#);
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        let mut settings = loaded.settings.unwrap();
+        settings.favorites.push("/b".into());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &loaded.raw).unwrap();
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["recents"], serde_json::json!({"perProject": 99, "chips": -3}), "kept as it was");
+        assert_eq!(written["favorites"], serde_json::json!(["/a", "/b"]));
     }
 
     #[test]

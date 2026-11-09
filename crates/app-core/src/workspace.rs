@@ -390,6 +390,9 @@ pub struct Leaf {
     /// The color the user gave the pane; `None` = only the project color. A value that does not parse loads as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_tint")]
     pub color: Option<Tint>,
+    /// Marked unread by hand: it keeps the mark, even in view, until Claude's status changes or the user marks it read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unread: bool,
 }
 
 /// Reads a saved pane color, treating anything unreadable as none.
@@ -402,7 +405,7 @@ impl Leaf {
     /// A leaf about to run `launch`.
     pub fn new(launch: PaneLaunch) -> Leaf {
         let session = launch.session().map(String::from);
-        Leaf { pane: None, host: HostId::local(), launch, session, name: None, color: None }
+        Leaf { pane: None, host: HostId::local(), launch, session, name: None, color: None, unread: false }
     }
 
     /// The pane's host and id, while it runs.
@@ -726,6 +729,27 @@ impl Workspace {
             }
             None => false,
         }
+    }
+
+    /// Mark a pane unread by hand, or clear the mark. True when the mark changed.
+    pub fn set_unread(&mut self, leaf: NodeId, unread: bool) -> bool {
+        match self.leaves.get_mut(&leaf) {
+            Some(found) if found.unread != unread => {
+                found.unread = unread;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the user marked the pane unread by hand.
+    pub fn is_unread(&self, leaf: NodeId) -> bool {
+        self.leaves.get(&leaf).is_some_and(|leaf| leaf.unread)
+    }
+
+    /// The panes marked unread by hand.
+    pub fn unread_leaves(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.leaves.iter().filter(|(_, leaf)| leaf.unread).map(|(id, _)| *id)
     }
 
     /// The color the user gave a pane, if any.
@@ -2207,6 +2231,30 @@ mod tests {
     }
 
     #[test]
+    fn an_unread_mark_is_saved_with_the_leaf_and_absent_when_cleared() {
+        let mut ws = Workspace::default();
+        let leaf = ws.new_tab(PaneLaunch::claude("/repo".into()));
+        assert!(!ws.set_unread(leaf, false));
+        assert!(ws.set_unread(leaf, true));
+        assert!(!ws.set_unread(leaf, true));
+        assert!(!ws.set_unread(leaf + 100, true));
+        let text = serde_json::to_string(&ws).unwrap();
+        assert!(text.contains(r#""unread":true"#));
+        let loaded: Workspace = serde_json::from_str(&text).unwrap();
+        assert!(loaded.is_unread(leaf));
+        assert_eq!(loaded.unread_leaves().collect::<Vec<_>>(), vec![leaf]);
+        assert!(ws.set_unread(leaf, false));
+        assert!(!serde_json::to_string(&ws).unwrap().contains("unread"));
+    }
+
+    #[test]
+    fn a_leaf_saved_without_the_mark_loads_as_read() {
+        let leaf: Leaf =
+            serde_json::from_str(r#"{"pane":null,"launch":{"program":"claude","args":[],"cwd":"/r"}}"#).unwrap();
+        assert!(!leaf.unread);
+    }
+
+    #[test]
     fn rename_leaf_trims_clears_and_refuses_claude() {
         let mut ws = Workspace::default();
         let shell_leaf = ws.new_tab(shell("/repo"));
@@ -2258,6 +2306,7 @@ mod tests {
             },
             session: session.map(Into::into),
             name: None,
+            unread: false,
         }
     }
 

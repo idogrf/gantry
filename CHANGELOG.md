@@ -11,6 +11,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Changed
 - **Project pill shows status** - The dot on a project heading is now a small rounded rectangle, three dots wide, that shows the most urgent session in the project (needs input, then done, working, unread), in the same colors as the session rows. With nothing to act on it is grey. The project color stays on the name and the line. It counts the sessions of a collapsed project too, and the compact sidebar shows it as well. While any session in the project is working, a band in the status color sweeps across it, like the glow on a working session row.
 - **Search keeps your order** - A search in the Recent sessions pop-up only narrows the list and no longer ranks it, so a recent session that matches loosely is no longer listed below an older one that matches well. The list is in the sort you picked, newest first by default, and every row names its project.
+- **Unread marks are kept** - A session you marked as unread is still marked after Gantry restarts. The mark still goes away when Claude starts working again or you mark it as read.
 
 ### Removed
 - **Recent sessions settings** - "Sessions per project" and "Project chips" in Settings > Sessions are gone: the pop-up lists every session and the Project filter replaces the chips.

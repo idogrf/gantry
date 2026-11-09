@@ -299,7 +299,6 @@ impl WorkspaceView {
             }
         }
         self.slots.remove(&leaf);
-        self.marked_unread.remove(&leaf);
         if self.unseen.remove(&leaf).is_some() {
             self.sync_unseen(cx);
         }

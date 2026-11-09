@@ -456,9 +456,6 @@ pub struct WorkspaceView {
     attention: AttentionTracker,
     /// Leaves with an alert the user has not seen yet.
     unseen: HashMap<NodeId, AlertKind>,
-    /// Leaves marked unread by hand: they keep the mark, even in view, until Claude's status changes or the user marks
-    /// them read.
-    marked_unread: HashSet<NodeId>,
     _activation: Subscription,
     /// The theme whose terminal colors the daemon was last told.
     sent_palette: Option<Preset>,
@@ -682,7 +679,6 @@ impl WorkspaceView {
             welcome_items: RefCell::new(None),
             attention: AttentionTracker::default(),
             unseen: HashMap::new(),
-            marked_unread: HashSet::new(),
             _activation: activation,
             sent_palette: None,
             _theme: theme_changed,
@@ -703,6 +699,9 @@ impl WorkspaceView {
         for leaf in leaves {
             this.add_slot(leaf, window, cx);
         }
+        // A mark made by hand (`Leaf.unread`) outlives a restart, and so does the alert it stands on.
+        this.unseen = this.workspace.unread_leaves().map(|leaf| (leaf, AlertKind::Finished)).collect();
+        this.sync_unseen(cx);
         for (leaf, key) in &restored.attach {
             let launch = this.workspace.leaves[leaf].launch.clone();
             this.slots[leaf].view.update(cx, |view, cx| view.attach(key.pane, launch, cx));

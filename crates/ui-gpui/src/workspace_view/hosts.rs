@@ -137,7 +137,6 @@ impl WorkspaceView {
         self.workspace.remove_host(host);
         for leaf in leaves {
             self.slots.remove(&leaf);
-            self.marked_unread.remove(&leaf);
             self.unseen.remove(&leaf);
             self.pending.retain(|_, waiting| *waiting != leaf);
         }

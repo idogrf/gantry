@@ -398,6 +398,8 @@ pub enum RowKind {
         label: String,
         /// Its entries are shown.
         expanded: bool,
+        /// The most urgent tone among its sessions (`None` = nothing needs attention), whether or not it is expanded.
+        urgent: Option<Tone>,
     },
     /// A Claude session (in a pane of the layout, or running outside Gantry).
     Session {
@@ -576,6 +578,23 @@ pub fn status_tone(status: Option<&SessionStatus>, unseen: Unseen) -> Tone {
 /// (`None` = no status to color it by).
 pub fn leaf_tone(status: Option<&SessionStatus>, unseen: Unseen, offline: bool) -> Option<Tone> {
     if offline { Some(Tone::Closed) } else { status.map(|status| status_tone(Some(status), unseen)) }
+}
+
+/// The tone a project's dot shows: the most urgent of `tones` (needs input, then done, unread, working), `None`
+/// when none of them needs a color.
+pub fn most_urgent(tones: impl IntoIterator<Item = Tone>) -> Option<Tone> {
+    let rank = |tone: Tone| match tone {
+        Tone::NeedsInput => Some(4),
+        Tone::Done => Some(3),
+        Tone::Unread => Some(2),
+        Tone::Working => Some(1),
+        Tone::Idle | Tone::Elsewhere | Tone::Closed => None,
+    };
+    tones
+        .into_iter()
+        .filter_map(|tone| rank(tone).map(|rank| (rank, tone)))
+        .max_by_key(|(rank, _)| *rank)
+        .map(|(_, tone)| tone)
 }
 
 /// Tone of any session.
@@ -821,7 +840,12 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
             }
         }
         let expanded = filtering || !input.toggled.contains(&path);
-        let mut heading = Row::new(RowKind::Project { label: labels[&path].clone(), path: path.clone(), expanded });
+        let urgent = most_urgent(rendered.iter().filter_map(|row| match &row.kind {
+            RowKind::Session { tone, .. } | RowKind::Pane { tone, .. } => Some(*tone),
+            _ => None,
+        }));
+        let mut heading =
+            Row::new(RowKind::Project { label: labels[&path].clone(), path: path.clone(), expanded, urgent });
         heading.project = Some(path);
         rows.push(heading);
         if expanded {
@@ -1080,6 +1104,17 @@ mod tests {
     const DAY_MS: u64 = 24 * 60 * 60 * 1000;
     const NOW: u64 = 100 * DAY_MS;
     const HOUR_MS: u64 = 60 * 60 * 1000;
+
+    #[test]
+    fn project_dot_shows_the_most_urgent_tone() {
+        use Tone::*;
+        assert_eq!(most_urgent([Idle, Working, NeedsInput, Done]), Some(NeedsInput));
+        assert_eq!(most_urgent([Working, Unread, Done]), Some(Done));
+        assert_eq!(most_urgent([Idle, Working, Unread]), Some(Unread));
+        assert_eq!(most_urgent([Closed, Working, Elsewhere]), Some(Working));
+        assert_eq!(most_urgent([Idle, Closed, Elsewhere]), None);
+        assert_eq!(most_urgent([]), None);
+    }
 
     fn session(id: &str, cwd: &str, state: SessionState, last_active_ms: u64) -> SessionInfo {
         SessionInfo {

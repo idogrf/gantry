@@ -596,7 +596,12 @@ mod tests {
             "not in Gantry"
         );
         assert_eq!(
-            middle_click(&Row::new(RowKind::Project { path: "/r/app".into(), label: "app".into(), expanded: true })),
+            middle_click(&Row::new(RowKind::Project {
+                path: "/r/app".into(),
+                label: "app".into(),
+                expanded: true,
+                urgent: None
+            })),
             None
         );
     }
@@ -828,7 +833,8 @@ mod tests {
             (recents.action.clone(), recents.shortcut),
             (MenuAction::RecentsFor("/r/app".into()), Some(Shortcut::Recents))
         );
-        let row = Row::new(RowKind::Project { path: "/r/app".into(), label: "app".into(), expanded: true });
+        let row =
+            Row::new(RowKind::Project { path: "/r/app".into(), label: "app".into(), expanded: true, urgent: None });
         assert_eq!(
             row_menu(&row, ALONE, &MenuContext::default()),
             None,

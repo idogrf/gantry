@@ -22,10 +22,10 @@ use app_core::split_tree::NodeId;
 use app_core::text_field::TextField;
 use app_core::theme_colors::ToneColors;
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task,
-    UniformListDecoration, UniformListScrollHandle, Window, div, prelude::*, px, relative, rgb, rgba, svg,
-    uniform_list,
+    AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task,
+    UniformListDecoration, UniformListScrollHandle, Window, canvas, div, fill, prelude::*, px, relative, rgb, rgba,
+    size, svg, uniform_list,
 };
 use protocol::host::HostId;
 use protocol::message::SessionInfo;
@@ -38,8 +38,8 @@ use crate::hover_card::{self, HostsCard, HoverCard, Lead, lead, line_width};
 use crate::pane_drag::DraggedPane;
 use crate::settings_store::{SettingsStore, dir_badge_for, shortcut_label};
 use crate::theme::{
-    RADIUS, Theme, UI_FONT, container_icon, dir_badge, group_tint, pane_marker, pin_icon, side_line, ssh_icon,
-    sweeping, theme, working_sweep,
+    AURA_FEATHER, AURA_LAYERS, AURA_OPACITY, RADIUS, Theme, UI_FONT, container_icon, dir_badge, group_tint,
+    pane_marker, pin_icon, pulse_animation, pulse_opacity, side_line, ssh_icon, sweeping, theme, working_sweep,
 };
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
@@ -1278,14 +1278,19 @@ impl SidebarView {
                 .map(|label| div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(label))
         };
         match &row.kind {
-            RowKind::Project { path, label, expanded } => {
+            RowKind::Project { path, label, expanded, urgent } => {
+                let dot = urgent.map_or(theme.tokens.muted, |tone| {
+                    let colors = theme.tone(tone);
+                    colors.fill.unwrap_or(colors.dot)
+                });
+                let pulsing = urgent.is_some_and(|tone| sweeping(tone, self.animate, true));
                 let color = theme.project(path);
                 let dragged = DraggedProject { root: path.clone(), label: label.clone() };
                 // The hairline needs room: with less than `MIN_RULE` left between the name and the dot it is not drawn
                 // and the name takes the space, so no stub is left. The width is the list's of the last frame.
                 let rule = Extent::of(&self.scroll).is_none_or(|extent| {
                     let name = line_width(window, label, window.rem_size() * 0.875, FontWeight::SEMIBOLD);
-                    let marks = theme.ui(8.) * f32::from(color.is_some()) + theme.ui(14.);
+                    let marks = theme.ui(8.) + theme.ui(14.);
                     let chrome = theme.ui(12. + 2. + HEADING_INSET * 2. + 8. + 6.) + theme.ui(6.) * 3.;
                     px(extent.viewport.0) - chrome - marks - name >= theme.ui(MIN_RULE)
                 });
@@ -1323,7 +1328,7 @@ impl SidebarView {
                             })
                             // The dot keeps its place in the line (an empty slot) and is drawn over it, so that it can slide
                             // to the column's center when compact.
-                            .when(color.is_some(), |pill| pill.child(div().flex_none().size(theme.ui(8.))))
+                            .child(div().flex_none().size(theme.ui(8.)))
                             .child(
                                 svg()
                                     .path(if *expanded { CHEVRON_DOWN_ICON } else { CHEVRON_RIGHT_ICON })
@@ -1332,17 +1337,73 @@ impl SidebarView {
                                     .opacity(faded)
                                     .text_color(rgb(theme.tokens.muted)),
                             )
-                            .child(
-                                div()
+                            .when(pulsing, |pill| {
+                                // The aura: a circle painted straight to the window (not a laid-out box, which GPUI
+                                // snaps to whole pixels), so it grows and fades smoothly around the dot's center.
+                                let (dot_size, reach) = (f32::from(theme.ui(8.)), f32::from(theme.ui(8.)));
+                                let side = px(dot_size + 2. * reach);
+                                pill.child(
+                                    div()
+                                        .absolute()
+                                        .right(theme.ui(26. - 8. * amount) - px(reach))
+                                        .top(relative(0.5))
+                                        .mt(-side / 2.)
+                                        .size(side)
+                                        .with_animation(
+                                            ("aura-dot", index),
+                                            pulse_animation(),
+                                            move |slot, progress| {
+                                                slot.child(
+                                                    canvas(
+                                                        |_, _, _| (),
+                                                        move |bounds, (), window, _| {
+                                                            let outer = dot_size + 2. * reach * progress;
+                                                            let alpha = AURA_OPACITY * (1. - progress).powi(2);
+                                                            // A soft disc: circles one inside the other, each faint, so the edge fades out.
+                                                            for layer in 0..AURA_LAYERS {
+                                                                let diameter = px(outer
+                                                                    * (1.
+                                                                        - AURA_FEATHER * layer as f32
+                                                                            / AURA_LAYERS as f32));
+                                                                let mut color: Hsla = rgb(dot).into();
+                                                                color.a = alpha / (AURA_LAYERS - 1) as f32;
+                                                                window.paint_quad(
+                                                                    fill(
+                                                                        Bounds::centered_at(
+                                                                            bounds.center(),
+                                                                            size(diameter, diameter),
+                                                                        ),
+                                                                        color,
+                                                                    )
+                                                                    .corner_radii(diameter / 2.),
+                                                                );
+                                                            }
+                                                        },
+                                                    )
+                                                    .size_full(),
+                                                )
+                                            },
+                                        ),
+                                )
+                            })
+                            .child({
+                                let base = div()
                                     .absolute()
                                     .right(theme.ui(26. - 8. * amount))
                                     .top(relative(0.5))
                                     .mt(theme.ui(-4.))
                                     .size(theme.ui(8.))
                                     .rounded(px(3.))
-                                    .bg(rgb(color.unwrap_or(theme.tokens.muted)))
-                                    .when(color.is_none(), |dot| dot.opacity(amount)),
-                            ),
+                                    .bg(rgb(dot));
+                                if pulsing {
+                                    base.with_animation(("pulse-dot", index), pulse_animation(), |dot, progress| {
+                                        dot.opacity(pulse_opacity(progress))
+                                    })
+                                    .into_any_element()
+                                } else {
+                                    base.into_any_element()
+                                }
+                            }),
                     )
             }
             RowKind::Session { session, tone, note, .. } => {

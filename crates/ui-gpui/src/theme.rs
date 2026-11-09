@@ -157,6 +157,27 @@ pub(crate) fn sweeping(tone: Tone, enabled: bool, window_active: bool) -> bool {
     tone == Tone::Working && enabled && window_active
 }
 
+/// The opacity of a pulsing Working dot at `progress` (0..1 of a pulse): it dims to about half and comes back.
+pub(crate) fn pulse_opacity(progress: f32) -> f32 {
+    0.55 + 0.45 * (0.5 + 0.5 * (std::f32::consts::TAU * progress).cos())
+}
+
+/// How visible the aura of a Working dot is when it starts, before it fades out.
+pub(crate) const AURA_OPACITY: f32 = 0.6;
+
+/// How many circles make up the aura's soft disc.
+pub(crate) const AURA_LAYERS: usize = 4;
+/// How much of the aura's radius its soft edge takes (0..1).
+pub(crate) const AURA_FEATHER: f32 = 0.3;
+
+/// One pulse of a Working dot and its aura.
+const PULSE_PERIOD: Duration = Duration::from_millis(3000);
+
+/// A Working dot: one pulse every `PULSE_PERIOD`, at the glow's frame rate.
+pub(crate) fn pulse_animation() -> Animation {
+    Animation::new(PULSE_PERIOD).repeat().with_max_fps(SWEEP_FPS)
+}
+
 /// Where the glow is at `progress` (0..1 of a pass): the band's left edge as a fraction of the track (it enters
 /// from the left and leaves at the right) and its strength, which fades in and out at the ends so the clip at the
 /// track's edges never shows.

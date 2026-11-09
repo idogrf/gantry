@@ -5,6 +5,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed
+- **Project dot shows status** - The dot on a project heading now shows the most urgent session in the project (needs input, then done, unread, working), in the same colors as the session rows, and pulses while a session is working. With nothing to act on it is grey. The project color stays on the name and the line. It counts the sessions of a collapsed project too.
+
 ## [0.13.0] - 2026-11-03
 
 ### Added

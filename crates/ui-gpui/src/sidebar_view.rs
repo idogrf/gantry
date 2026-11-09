@@ -13,8 +13,8 @@ use app_core::hosts_fold::HostsFold;
 use app_core::menus::{self, MenuAction, MenuContext};
 use app_core::session_tree::{
     self, Activation, ActiveInput, Arrivals, DragSource, DropAt, DropCue, GroupEdges, PaneEntry, ProjectItems,
-    ProjectOrder, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, display_path, drop_cue, hover_at, placed_order,
-    project_items, reorder, session_title, shown_order,
+    ProjectOrder, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, display_path, drop_cue, hover_at, labels,
+    placed_order, project_items, reorder, session_title, shown_order, zone_folder,
 };
 use app_core::sessions::SessionStore;
 use app_core::sidebar_compact::tile_letter;
@@ -28,10 +28,10 @@ use gpui::{
     UniformListDecoration, UniformListScrollHandle, Window, div, prelude::*, px, relative, rgb, rgba, svg,
     uniform_list,
 };
-use protocol::host::HostId;
+use protocol::host::{HostId, split_project_key};
 use protocol::message::SessionInfo;
 
-use crate::assets::{CHEVRON_DOWN_ICON, CHEVRON_RIGHT_ICON, CLOSE_ICON, LAYERS_ICON};
+use crate::assets::{CHEVRON_DOWN_ICON, CHEVRON_RIGHT_ICON, CLOSE_ICON, FOLDER_ICON, LAYERS_ICON};
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::git_scrollbar::Extent;
@@ -204,6 +204,8 @@ pub struct SidebarView {
     items: Rc<Vec<ProjectItems>>,
     /// What a dragged pane or split tab shows over the row it is on.
     drop_hint: Option<DropHint>,
+    /// The drop-in zone offered while a pane or split tab is dragged (see `update_zone`).
+    zone: Option<Zone>,
     filter: TextField,
     /// The row being renamed and its text field.
     renaming: Option<(RenameTarget, TextField)>,
@@ -280,6 +282,7 @@ impl SidebarView {
             saved_order: SidebarOrder::default(),
             items: Rc::new(Vec::new()),
             drop_hint: None,
+            zone: None,
             filter: TextField::default(),
             renaming: None,
             project_edit: None,
@@ -1102,6 +1105,141 @@ impl SidebarView {
         let (DragSource::Pane(leaf) | DragSource::Tab(leaf)) = source;
         let pane = self.panes.iter().find(|pane| pane.leaf == leaf)?;
         Some((current, self.roots.of(&pane.host, &pane.cwd)))
+    }
+
+    /// A pane or split tab is being dragged: offer the drop-in zone of its folder when the item is in a Gantry project
+    /// and the folder has no heading. Never with a filter typed or the compact column.
+    fn update_zone(&mut self, source: DragSource, cx: &mut Context<Self>) {
+        let zone = (self.amount < 0.5 && self.filter_text().is_empty())
+            .then(|| {
+                let (current, real) = self.drag_facts(source)?;
+                let folder = zone_folder(&self.items, &current, &real)?;
+                let project = gantry_project::display_name(&current, &self.gantry_projects, None)?;
+                Some(Zone { source, folder, project })
+            })
+            .flatten();
+        if self.zone != zone {
+            self.zone = zone;
+            cx.notify();
+        }
+    }
+
+    /// The pointer is over the drop-in zone: no row shows a drop hint.
+    fn drag_over_zone(&mut self, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if bounds.contains(&position) && self.drop_hint.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// `source` was dropped on the drop-in zone: it leaves its Gantry project for its folder.
+    fn drop_on_zone(&mut self, source: DragSource, cx: &mut Context<Self>) {
+        self.drop_hint = None;
+        if self.zone.take().is_some_and(|zone| zone.source == source) {
+            let source = match source {
+                DragSource::Pane(leaf) => Assign::Leaf(leaf),
+                DragSource::Tab(first) => Assign::Tab(first),
+            };
+            cx.emit(SidebarEvent::AssignToProject { source, project: None });
+        }
+        cx.notify();
+    }
+
+    /// The drop-in zone: a dashed box for the folder, drawn below the list while one is offered.
+    fn render_zone(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<Stateful<gpui::Div>> {
+        let zone = self.zone.as_ref().filter(|_| cx.has_active_drag() && self.amount < 0.5)?;
+        let (host, root) = split_project_key(&zone.folder);
+        let home = self.home.as_deref().filter(|_| host.is_local());
+        let mut paths: Vec<PathBuf> = self.items.iter().map(|items| items.path.clone()).collect();
+        paths.push(zone.folder.clone());
+        let name = labels(&paths, home, &self.gantry_projects).remove(&zone.folder).unwrap_or_default();
+        let color = theme.tokens.accent;
+        let group = "drop-in-zone";
+        let hidden = |line: gpui::Div| {
+            line.group_drag_over::<DraggedPane>(group, |style| style.hidden())
+                .group_drag_over::<DraggedTab>(group, |style| style.hidden())
+        };
+        let shown = |line: gpui::Div| {
+            line.hidden()
+                .group_drag_over::<DraggedPane>(group, |style| style.flex())
+                .group_drag_over::<DraggedTab>(group, |style| style.flex())
+        };
+        Some(
+            div()
+                .id("drop-in-zone")
+                .flex_none()
+                .flex()
+                .flex_col()
+                .mx(theme.ui(12.))
+                .mt(theme.ui(4.))
+                .mb(theme.ui(6.))
+                .gap(theme.ui(4.))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.tokens.muted))
+                        .child("BACK TO ITS FOLDER"),
+                )
+                .child(
+                    div()
+                        .group(group)
+                        .flex()
+                        .flex_col()
+                        .gap(theme.ui(2.))
+                        .px(theme.ui(10.))
+                        .py(theme.ui(8.))
+                        .rounded(px(RADIUS))
+                        .border_2()
+                        .border_dashed()
+                        .border_color(rgb(color))
+                        .bg(rgba((color << 8) | 0x1a))
+                        .group_drag_over::<DraggedPane>(group, move |style| style.bg(rgba((color << 8) | 0x40)))
+                        .group_drag_over::<DraggedTab>(group, move |style| style.bg(rgba((color << 8) | 0x40)))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(theme.ui(6.))
+                                .child(
+                                    svg()
+                                        .path(FOLDER_ICON)
+                                        .flex_none()
+                                        .size(theme.ui(14.))
+                                        .text_color(rgb(theme.tokens.muted)),
+                                )
+                                .when(!host.is_local(), |line| line.child(ssh_icon(theme.tokens.muted, theme)))
+                                .child(
+                                    div().flex_1().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(name),
+                                ),
+                        )
+                        .child(hidden(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(rgba((theme.tokens.muted << 8) | 0xb3))
+                                .child(display_path(&root, home)),
+                        ))
+                        .child(shown(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(color))
+                                .child(format!("Drop to take it out of {}", zone.project)),
+                        )),
+                )
+                .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DraggedPane>, _, cx| {
+                    this.drag_over_zone(event.bounds, event.event.position, cx)
+                }))
+                .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DraggedTab>, _, cx| {
+                    this.drag_over_zone(event.bounds, event.event.position, cx)
+                }))
+                // Taking the drop here keeps the sidebar's own pull-out from also firing.
+                .on_drop(cx.listener(|this, dragged: &DraggedPane, _, cx| {
+                    this.drop_on_zone(DragSource::Pane(dragged.leaf), cx)
+                }))
+                .on_drop(cx.listener(|this, dragged: &DraggedTab, _, cx| {
+                    this.drop_on_zone(DragSource::Tab(dragged.first), cx)
+                })),
+        )
     }
 
     /// A pane or split tab is over row `index`: keep the drop hint in step with the pointer.
@@ -1983,6 +2121,17 @@ struct DropHint {
     at: DropAt,
 }
 
+/// The drop-in zone offered for the item being dragged.
+#[derive(Clone, Debug, PartialEq)]
+struct Zone {
+    /// The dragged pane or split tab.
+    source: DragSource,
+    /// The folder project it goes back to (its key).
+    folder: PathBuf,
+    /// The display name of the Gantry project it is in now.
+    project: String,
+}
+
 /// A split tab's heading being dragged to a new place inside its project.
 #[derive(Clone)]
 struct DraggedTab {
@@ -2087,6 +2236,12 @@ impl Render for SidebarView {
                 let tint = rgba((theme.tokens.accent << 8) | 0x2e);
                 move |style, dragged, _, _| if pullable.contains(&dragged.leaf) { style.bg(tint) } else { style }
             })
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DraggedPane>, _, cx| {
+                this.update_zone(DragSource::Pane(event.drag(cx).leaf), cx)
+            }))
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DraggedTab>, _, cx| {
+                this.update_zone(DragSource::Tab(event.drag(cx).first), cx)
+            }))
             .on_drop(cx.listener(|this, dragged: &DraggedPane, _, cx| {
                 this.drop_hint = None;
                 if session_tree::pullable_leaves(&this.panes).contains(&dragged.leaf) {
@@ -2419,7 +2574,8 @@ impl Render for SidebarView {
                         // Room under the last row for its ring.
                         .pb(px(RING + RING_GAP))
                         .flex_1(),
-                    ),
+                    )
+                    .children(self.render_zone(&theme, cx)),
             )
             .child(self.render_hosts(&theme, cx))
             .child(

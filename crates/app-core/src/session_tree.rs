@@ -495,6 +495,15 @@ pub fn drop_cue(projects: &[ProjectItems], source: DragSource, current: &Path, r
     DropCue::Neutral
 }
 
+/// The folder project to offer as a drop-in zone while an item is dragged: `real` when the item is listed in a Gantry
+/// project (`current`) and its folder has no heading among `projects` (so the heading itself cannot take it back).
+pub fn zone_folder(projects: &[ProjectItems], current: &Path, real: &Path) -> Option<PathBuf> {
+    let due = gantry_project::is_key(current)
+        && !gantry_project::is_key(real)
+        && !projects.iter().any(|items| items.path == real);
+    due.then(|| real.to_path_buf())
+}
+
 /// Where a drop at `fraction` (0 = top, 1 = bottom) of row `row`, listed in project `project`, lands: before the block
 /// the row is in (its first half of rows) or before the next one (its second half); on the heading, before the first
 /// block. `End` when no block follows.
@@ -1232,7 +1241,7 @@ pub fn project_label(rows: &[Row], root: &Path) -> Option<String> {
 
 /// Project names: a Gantry project's name, else the folder's name, or its whole displayed path where two projects share a name. A remote project
 /// is `<host> - <name>`.
-pub(crate) fn labels(paths: &[PathBuf], home: Option<&Path>, gantry: &[String]) -> HashMap<PathBuf, String> {
+pub fn labels(paths: &[PathBuf], home: Option<&Path>, gantry: &[String]) -> HashMap<PathBuf, String> {
     let name = |path: &Path, whole: bool| {
         if let Some(name) = gantry_project::display_name(path, gantry, None) {
             return name;
@@ -1939,6 +1948,19 @@ mod tests {
             ProjectItems { path: gantry_project::key("Work"), blocks: vec![block(7, 7, &[1], false)] },
             ProjectItems { path: gantry_project::key("Empty"), blocks: vec![] },
         ]
+    }
+
+    #[test]
+    fn zone_folder_is_due_for_a_gantry_item_whose_folder_has_no_heading() {
+        let projects = drop_fixture();
+        let work = gantry_project::key("Work");
+        let gone = Path::new("/r/gone");
+        assert_eq!(zone_folder(&projects, &work, gone), Some(gone.to_path_buf()));
+        // The folder has a heading: the heading takes the drop.
+        assert_eq!(zone_folder(&projects, &work, Path::new("/r/app")), None);
+        // A folder project's item has nothing to leave.
+        assert_eq!(zone_folder(&projects, Path::new("/r/app"), gone), None);
+        assert_eq!(zone_folder(&[], &work, gone), Some(gone.to_path_buf()));
     }
 
     #[test]

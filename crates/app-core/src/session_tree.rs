@@ -154,6 +154,22 @@ impl ProjectOrder {
         self.order.insert(to, moved);
     }
 
+    /// A project's key changed (a Gantry project was renamed): it keeps its place.
+    pub fn rename(&mut self, from: &Path, to: &Path) {
+        for known in self.order.iter_mut().filter(|known| known.as_path() == from) {
+            *known = to.to_path_buf();
+        }
+        if self.kept.remove(from) {
+            self.kept.insert(to.to_path_buf());
+        }
+    }
+
+    /// Forget a project for good (a Gantry project was deleted), kept or not.
+    pub fn forget(&mut self, root: &Path) {
+        self.order.retain(|known| known.as_path() != root);
+        self.kept.remove(root);
+    }
+
     /// Where `root` sits (unknown = after every known project).
     pub fn position(&self, root: &Path) -> usize {
         self.order.iter().position(|path| path == root).unwrap_or(usize::MAX)
@@ -2210,6 +2226,17 @@ mod tests {
         assert!(matches!(&rows[0].kind, RowKind::Project { label, .. } if label == "Billing"));
         assert_eq!(rows[1].project, Some(PathBuf::from("gantry://billing")));
         assert!(!rows.iter().any(|row| matches!(&row.kind, RowKind::Project { label, .. } if label == "alpha")));
+    }
+
+    #[test]
+    fn a_renamed_project_keeps_its_place_and_a_deleted_one_is_forgotten() {
+        let mut order = ProjectOrder::default();
+        order.seed(&paths(&["/a", "gantry://billing", "/b"]));
+        order.rename(Path::new("gantry://billing"), Path::new("gantry://invoices"));
+        assert_eq!(order.projects(), paths(&["/a", "gantry://invoices", "/b"]));
+        order.forget(Path::new("gantry://invoices"));
+        assert_eq!(order.projects(), paths(&["/a", "/b"]));
+        assert_eq!(order.to_save(&paths(&["/a", "/b"])), paths(&["/a", "/b"]));
     }
 
     #[test]

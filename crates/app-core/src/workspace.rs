@@ -810,6 +810,10 @@ impl Workspace {
                 *name = to.clone();
             }
         }
+        let (old, new) = (gantry_project::key(from), gantry_project::key(&to));
+        for key in self.sidebar_order.projects.iter_mut().filter(|key| **key == old) {
+            *key = new.clone();
+        }
         Ok(to)
     }
 
@@ -3668,6 +3672,15 @@ mod tests {
     }
 
     #[test]
+    fn rename_moves_the_saved_order_key() {
+        let mut ws = Workspace::default();
+        ws.create_project("Billing").unwrap();
+        ws.sidebar_order.projects = vec!["/a".into(), "gantry://billing".into()];
+        ws.rename_project("Billing", "Invoices").unwrap();
+        assert_eq!(ws.sidebar_order.projects, vec![std::path::PathBuf::from("/a"), "gantry://invoices".into()]);
+    }
+
+    #[test]
     fn rename_to_own_name_in_other_case_is_allowed() {
         let mut ws = Workspace::default();
         ws.create_project("billing").unwrap();
@@ -3840,7 +3853,7 @@ mod tests {
         let c = ws.split(Axis::Vertical, shell("/c")).unwrap();
         let d = ws.new_tab(shell("/d"));
         for leaf in [a, c, d] {
-            ws.pane_started(leaf, leaf as u64 + 100, "/x".into());
+            ws.pane_started(leaf, leaf + 100, "/x".into());
         }
         ws.set_leaf_project(a, Some("Billing"));
         ws.set_leaf_project(b, Some("billing"));

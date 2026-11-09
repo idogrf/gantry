@@ -3,11 +3,11 @@
 
 use std::collections::HashSet;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use app_core::gantry_project::Membership;
+use app_core::gantry_project::{self, Membership};
 use app_core::recents::{
     self, ContentState, Facet, FilterSection, FilterValue, Prefs, RecentItem, RecentsInput, Snippet, Sort,
     searches_content,
@@ -22,7 +22,7 @@ use gpui::{
 use protocol::host::HostId;
 use protocol::message::{SearchHit, SessionInfo, Speaker};
 
-use crate::assets::RESET_ICON;
+use crate::assets::{LAYERS_ICON, RESET_ICON};
 use crate::field;
 use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::theme::{
@@ -66,6 +66,19 @@ pub enum RecentsEvent {
         /// The query.
         query: String,
     },
+}
+
+/// The name a project goes by in a row: a Gantry project's display name, else its folder's name with the host in front
+/// of a remote one's.
+fn project_name(project: &Path, host: &HostId, names: &[String]) -> String {
+    if let Some(name) = gantry_project::display_name(project, names, None) {
+        return name;
+    }
+    let name = project.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    match host.remote_name() {
+        Some(host) => format!("{host} - {name}"),
+        None => name,
+    }
 }
 
 /// The sort and filters of the last pop-up, kept for the next one while Gantry runs.
@@ -410,9 +423,11 @@ impl RecentsView {
                 .overflow_hidden()
                 .whitespace_nowrap()
         };
+        let names = cx.try_global::<ProjectMembership>().map(|global| global.0.names()).unwrap_or_default();
         let row = match &self.items[index] {
             RecentItem::Heading { path, label, display } => {
                 let color = theme.project(path);
+                let gantry = gantry_project::is_key(path);
                 return row.child(
                     div()
                         .size_full()
@@ -421,8 +436,16 @@ impl RecentsView {
                         .items_end()
                         .gap_2()
                         .pb(theme.ui(4.))
-                        .children(color.map(|color| {
+                        .children(color.filter(|_| !gantry).map(|color| {
                             div().flex_none().mb(theme.ui(5.)).size(theme.ui(8.)).rounded(px(3.)).bg(rgb(color))
+                        }))
+                        .children(gantry.then(|| {
+                            svg()
+                                .path(LAYERS_ICON)
+                                .flex_none()
+                                .mb(theme.ui(3.))
+                                .size(theme.ui(14.))
+                                .text_color(rgb(color.unwrap_or(theme.tokens.muted)))
                         }))
                         .child(
                             div()
@@ -467,12 +490,7 @@ impl RecentsView {
                         .map(|badge| dir_badge(&badge, &theme)),
                     )
                     .when(self.prefs.sort != Sort::Project, |pill| {
-                        let name =
-                            project.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-                        let name = match session.host.remote_name() {
-                            Some(host) => format!("{host} - {name}"),
-                            None => name,
-                        };
+                        let name = project_name(project, &session.host, &names);
                         pill.child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(name))
                     })
                     .child(
@@ -484,12 +502,7 @@ impl RecentsView {
                     ),
             ),
             RecentItem::Session { session, age, project, marks, snippet: Some(snippet), open } => {
-                let project_name =
-                    project.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-                let project_name = match session.host.remote_name() {
-                    Some(host) => format!("{host} - {project_name}"),
-                    None => project_name,
-                };
+                let project_name = project_name(project, &session.host, &names);
                 row.h(theme.ui(HIT_ROW_HEIGHT)).child(
                     pill()
                         .flex_col()
@@ -619,6 +632,7 @@ impl RecentsView {
         let theme = theme(cx).clone();
         let key = value.key.clone();
         let color = value.project.as_deref().and_then(|project| theme.project(project));
+        let gantry = value.project.as_deref().is_some_and(gantry_project::is_key);
         div()
             .id(SharedString::from(format!("filter-{}-{}", facet.title(), value.key)))
             .w_full()
@@ -645,7 +659,18 @@ impl RecentsView {
                         box_.bg(rgb(theme.tokens.accent)).text_color(rgb(theme.tokens.on_accent)).text_xs().child("✓")
                     }),
             )
-            .children(color.map(|color| div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(color))))
+            .children(
+                color
+                    .filter(|_| !gantry)
+                    .map(|color| div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(color))),
+            )
+            .children(gantry.then(|| {
+                svg()
+                    .path(LAYERS_ICON)
+                    .flex_none()
+                    .size(theme.ui(12.))
+                    .text_color(rgb(color.unwrap_or(theme.tokens.muted)))
+            }))
             .child(div().flex_1().min_w_0().truncate().child(value.label.clone()))
             .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(value.count.to_string()))
             .on_click(cx.listener(move |this, _, _, cx| {

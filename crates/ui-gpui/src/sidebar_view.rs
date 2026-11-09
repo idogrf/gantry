@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use app_core::gantry_project::{self, Assign, ProjectError};
 use app_core::host_state::{HostDot, hosts_summary};
 use app_core::hosts_fold::HostsFold;
 use app_core::menus::{self, MenuAction, MenuContext};
@@ -30,7 +31,7 @@ use gpui::{
 use protocol::host::HostId;
 use protocol::message::SessionInfo;
 
-use crate::assets::{CHEVRON_DOWN_ICON, CHEVRON_RIGHT_ICON, CLOSE_ICON};
+use crate::assets::{CHEVRON_DOWN_ICON, CHEVRON_RIGHT_ICON, CLOSE_ICON, LAYERS_ICON};
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::git_scrollbar::Extent;
@@ -78,6 +79,15 @@ pub enum RenameTarget {
     Tab(usize),
 }
 
+/// The inline name field of a Gantry project.
+struct ProjectEdit {
+    /// The project being renamed (its display name); `None` = a new project.
+    from: Option<String>,
+    field: TextField,
+    /// The name is refused: another project has it.
+    exists: bool,
+}
+
 /// What the sidebar asks the workspace to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SidebarEvent {
@@ -111,6 +121,27 @@ pub enum SidebarEvent {
     },
     /// A pane of a split tab was dropped on the sidebar: make it a tab of its own.
     PullOut(NodeId),
+    /// The new project button was pressed: show the sidebar with its name field open.
+    StartProject,
+    /// A name was confirmed for a new Gantry project.
+    NewProject(String),
+    /// A Gantry project's inline rename was confirmed.
+    RenameProject {
+        /// The project's display name before.
+        from: String,
+        /// The new name (checked: not empty, not another project's).
+        to: String,
+    },
+    /// The × of a Gantry project heading was pressed.
+    DeleteProject(String),
+    /// A pane, tab or session was dropped on a project heading (or inside a Gantry project): `project` is the
+    /// Gantry project it goes into, `None` = back to its folder project.
+    AssignToProject {
+        /// What was dropped.
+        source: Assign,
+        /// The target Gantry project's display name.
+        project: Option<String>,
+    },
     /// The user moved a project or a tab: this is the order to save in the layout.
     OrderChanged(SidebarOrder),
     /// Open the recent sessions pop-up.
@@ -174,6 +205,8 @@ pub struct SidebarView {
     filter: TextField,
     /// The row being renamed and its text field.
     renaming: Option<(RenameTarget, TextField)>,
+    /// The Gantry project name being typed: a new project's, or the rename of one.
+    project_edit: Option<ProjectEdit>,
     toggled: HashSet<PathBuf>,
     details: Option<String>,
     /// Sessions with an alert the user has not seen.
@@ -246,6 +279,7 @@ impl SidebarView {
             items: Rc::new(Vec::new()),
             filter: TextField::default(),
             renaming: None,
+            project_edit: None,
             toggled: HashSet::new(),
             details: None,
             unseen: HashSet::new(),
@@ -660,6 +694,24 @@ impl SidebarView {
         self.rebuild(cx);
     }
 
+    /// A Gantry project was renamed: its heading keeps its place and its fold; `saved` is the workspace's order now.
+    pub fn project_renamed(&mut self, from: &Path, to: &Path, saved: SidebarOrder, cx: &mut Context<Self>) {
+        self.order.rename(from, to);
+        if self.toggled.remove(from) {
+            self.toggled.insert(to.to_path_buf());
+        }
+        self.saved_order = saved;
+        self.rebuild(cx);
+    }
+
+    /// A Gantry project was deleted: its place is forgotten; `saved` is the workspace's order now.
+    pub fn project_removed(&mut self, key: &Path, saved: SidebarOrder, cx: &mut Context<Self>) {
+        self.order.forget(key);
+        self.toggled.remove(key);
+        self.saved_order = saved;
+        self.rebuild(cx);
+    }
+
     /// The workspace's panes and tabs.
     pub fn set_panes(&mut self, panes: Vec<PaneEntry>, tabs: Vec<TabEntry>, cx: &mut Context<Self>) {
         if panes != self.panes || tabs != self.tabs {
@@ -687,6 +739,57 @@ impl SidebarView {
         self.focus_handle.focus(window, cx);
         cx.notify();
         true
+    }
+
+    /// Open the name field of a new Gantry project at the top of the list.
+    pub fn start_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.renaming = None;
+        self.project_edit = Some(ProjectEdit { from: None, field: TextField::default(), exists: false });
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Edit the name of the Gantry project `name` in place on its heading. False, changing nothing, when its
+    /// heading is not in the drawn list (collapsed sidebar, filter).
+    pub fn start_project_rename(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let key = gantry_project::key(name);
+        let Some(index) =
+            self.rows.iter().position(|row| matches!(&row.kind, RowKind::Project { path, .. } if *path == key))
+        else {
+            return false;
+        };
+        self.scroll.scroll_to_item(index, ScrollStrategy::Center);
+        let mut field = TextField::default();
+        field.insert(name);
+        field.select_all();
+        self.renaming = None;
+        self.project_edit = Some(ProjectEdit { from: Some(name.to_string()), field, exists: false });
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+        true
+    }
+
+    /// The project name field: the text, with a red line under it while the name is refused.
+    fn project_field(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let edit = self.project_edit.as_ref()?;
+        let press = field::on_press(cx, |this, offset, clicks, _, cx| {
+            if let Some(edit) = &mut this.project_edit {
+                edit.field.press(offset, clicks);
+            }
+            cx.notify();
+        });
+        let line = if edit.exists { theme.tokens.danger } else { theme.tokens.line };
+        Some(
+            div()
+                .flex_1()
+                .min_w_0()
+                // A press in the field must not activate the row.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .border_b_1()
+                .border_color(rgb(line))
+                .child(field::render(&edit.field, "Project name", true, theme, press)),
+        )
     }
 
     /// The inline field standing in for the title of the row of `target`, while it is being renamed.
@@ -811,6 +914,37 @@ impl SidebarView {
 
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
+        if let Some(edit) = &mut self.project_edit {
+            match keystroke.key.as_str() {
+                "enter" => {
+                    let (from, name) = (edit.from.clone(), edit.field.text().to_string());
+                    match gantry_project::validate_name(&self.gantry_projects, &name, from.as_deref()) {
+                        Ok(to) => {
+                            self.project_edit = None;
+                            cx.emit(match from {
+                                Some(from) => SidebarEvent::RenameProject { from, to },
+                                None => SidebarEvent::NewProject(to),
+                            });
+                            cx.emit(SidebarEvent::Dismiss);
+                        }
+                        Err(ProjectError::Exists) => edit.exists = true,
+                        Err(ProjectError::Empty) => {}
+                    }
+                }
+                "escape" => {
+                    self.project_edit = None;
+                    cx.emit(SidebarEvent::Dismiss);
+                }
+                _ => {
+                    if field::edit(&mut edit.field, keystroke, cx) {
+                        edit.exists = false;
+                    }
+                }
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if let Some((target, field)) = &mut self.renaming {
             match keystroke.key.as_str() {
                 "enter" => {
@@ -901,7 +1035,7 @@ impl SidebarView {
             .map(|pane| (pane.leaf, pane.color));
         let alone = |leaf: NodeId| self.panes.iter().find(|pane| pane.leaf == leaf).is_none_or(|pane| pane.alone);
         let items = match &row.kind {
-            RowKind::Project { path, .. } => {
+            RowKind::Project { path, label, .. } => {
                 // The dev container one of its listed sessions runs in.
                 let container = self.rows[index + 1..]
                     .iter()
@@ -914,7 +1048,10 @@ impl SidebarView {
                         }
                         _ => None,
                     });
-                Some(menus::project_menu(path, container, &context))
+                match gantry_project::is_key(path) {
+                    true => Some(menus::gantry_project_menu(label, path, &context)),
+                    false => Some(menus::project_menu(path, container, &context)),
+                }
             }
             _ => menus::row_menu(row, &alone, &context),
         };
@@ -970,6 +1107,29 @@ impl SidebarView {
     /// the drop to the list (a pane of a split tab becomes a tab of its own).
     fn drop_item(&mut self, source: DragSource, at: DropAt, cx: &mut Context<Self>) {
         let Some((project, blocks)) = reorder(&self.items, source, at) else {
+            // Dropped inside another project that is a Gantry project: the item goes into it.
+            let target = match at {
+                DropAt::Before { project, .. } | DropAt::End { project } => self.items.get(project).map(|p| &p.path),
+            };
+            let current = self.rows.iter().find_map(|row| match (&row.kind, source) {
+                (RowKind::Session { leaf: Some(leaf), .. }, DragSource::Pane(pane)) if *leaf == pane => {
+                    row.project.clone()
+                }
+                (RowKind::Pane { entry, .. }, DragSource::Pane(pane)) if entry.leaf == pane => row.project.clone(),
+                (RowKind::Tab { first, .. }, DragSource::Tab(tab)) if *first == tab => row.project.clone(),
+                _ => None,
+            });
+            if let Some(target) =
+                target.filter(|target| gantry_project::is_key(target) && current.as_ref() != Some(*target))
+            {
+                let name = gantry_project::display_name(target, &self.gantry_projects, None);
+                let source = match source {
+                    DragSource::Pane(leaf) => Assign::Leaf(leaf),
+                    DragSource::Tab(first) => Assign::Tab(first),
+                };
+                cx.emit(SidebarEvent::AssignToProject { source, project: name });
+                return;
+            }
             if let DragSource::Pane(leaf) = source
                 && session_tree::pullable_leaves(&self.panes).contains(&leaf)
             {
@@ -981,6 +1141,11 @@ impl SidebarView {
         let Some(shown) = all.iter().position(|items| items.path == self.items[project].path) else { return };
         let (projects, leaves) = shown_order(&all, Some((shown, &blocks)));
         self.record_order(&projects, &leaves, cx);
+    }
+
+    /// Something was dropped on a project heading: tell the workspace where it goes.
+    fn assign(&mut self, source: Assign, project: Option<String>, cx: &mut Context<Self>) {
+        cx.emit(SidebarEvent::AssignToProject { source, project });
     }
 
     /// Save the order shown now (the user just changed it) and tell the workspace.
@@ -1034,6 +1199,16 @@ impl SidebarView {
             });
             (upper, lower)
         });
+        // Where a drop of a pane, tab or session on this row goes: the Gantry project of its group (any row), or out of
+        // its Gantry project (a folder heading); whether this is a heading.
+        let assign: Option<(Option<String>, bool)> = match (&self.rows[index].kind, &self.rows[index].project) {
+            (RowKind::Project { path, .. }, _) if !gantry_project::is_key(path) => Some((None, true)),
+            (kind, Some(path)) if gantry_project::is_key(path) => Some((
+                gantry_project::display_name(path, &self.gantry_projects, None),
+                matches!(kind, RowKind::Project { .. }),
+            )),
+            _ => None,
+        };
         let group_name = format!("row-{index}");
         let marker = div().absolute().left(theme.ui(14.)).right(theme.ui(14.)).h(px(3.)).rounded(px(2.));
         let marker = if edges.first { marker.top(px(0.)) } else { marker.bottom(px(0.)) };
@@ -1110,6 +1285,26 @@ impl SidebarView {
                     this.drop_project(&dragged.root, before.as_deref(), cx);
                 }
             }))
+            // A project heading, and any row of a Gantry project, takes a pane, a split tab or an outside session: it
+            // goes into that Gantry project (a folder heading takes it out of its Gantry project).
+            .when_some(assign, |row, (project, heading)| {
+                let tint = rgba((theme.tokens.accent << 8) | 0x2e);
+                let (pane_to, tab_to, session_to) = (project.clone(), project.clone(), project);
+                row.when(heading, |row| {
+                    row.drag_over::<DraggedPane>(move |style, _, _, _| style.bg(tint))
+                        .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(tint))
+                        .drag_over::<DraggedSession>(move |style, _, _, _| style.bg(tint))
+                })
+                .on_drop(cx.listener(move |this, dragged: &DraggedPane, _, cx| {
+                    this.assign(Assign::Leaf(dragged.leaf), pane_to.clone(), cx)
+                }))
+                .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                    this.assign(Assign::Tab(dragged.first), tab_to.clone(), cx)
+                }))
+                .on_drop(cx.listener(move |this, dragged: &DraggedSession, _, cx| {
+                    this.assign(Assign::Session(dragged.id.clone()), session_to.clone(), cx)
+                }))
+            })
     }
 
     /// The close button of row `index`, in the slot of its right-most mark. It replaces `badge` while the row is
@@ -1295,6 +1490,18 @@ impl SidebarView {
         let base = base.when_some(dragged_pane, |base, dragged| {
             base.on_drag(dragged, |dragged: &DraggedPane, _offset, _window, cx: &mut App| cx.new(|_| dragged.clone()))
         });
+        // A session running outside Gantry has no pane, but can be dropped on a project heading.
+        let dragged_session = match &row.kind {
+            RowKind::Session { session, leaf: None, .. } => {
+                Some(DraggedSession { id: session.id.clone(), title: session_title(session).to_string() })
+            }
+            _ => None,
+        };
+        let base = base.when_some(dragged_session, |base, dragged| {
+            base.on_drag(dragged, |dragged: &DraggedSession, _offset, _window, cx: &mut App| {
+                cx.new(|_| dragged.clone())
+            })
+        });
         // A row listed under another project's tab heading names its own project.
         let project = || {
             row.project_label
@@ -1312,6 +1519,11 @@ impl SidebarView {
                 let glow = *working && sweeping(Tone::Working, self.animate, true);
                 let band = theme.tone(urgent.unwrap_or(Tone::Working)).dot;
                 let color = theme.project(path);
+                let gantry = gantry_project::is_key(path);
+                let editing = self.project_edit.as_ref().is_some_and(|edit| {
+                    gantry && edit.from.as_deref().is_some_and(|from| gantry_project::same(from, label))
+                });
+                let mark = color.unwrap_or(theme.tokens.muted);
                 let dragged = DraggedProject { root: path.clone(), label: label.clone() };
                 // The hairline needs room: with less than `MIN_RULE` left between the name and the dot it is not drawn
                 // and the name takes the space, so no stub is left. The width is the list's of the last frame.
@@ -1332,16 +1544,26 @@ impl SidebarView {
                             .pl(theme.ui(8.))
                             .pr(theme.ui(6.))
                             .gap(theme.ui(6.))
-                            .child(
-                                div()
+                            .children(gantry.then(|| {
+                                svg()
+                                    .path(LAYERS_ICON)
+                                    .flex_none()
+                                    .size(theme.ui(14.))
+                                    .opacity(faded)
+                                    .text_color(rgb(mark))
+                            }))
+                            .child(match editing.then(|| self.project_field(&theme, cx)).flatten() {
+                                Some(field) => field.into_any_element(),
+                                None => div()
                                     .min_w_0()
                                     .truncate()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .when_some(color, |name, color| name.text_color(rgb(color)))
                                     .when(!rule, |name| name.flex_1())
                                     .opacity(faded)
-                                    .child(label.clone()),
-                            )
+                                    .child(label.clone())
+                                    .into_any_element(),
+                            })
                             // A hairline in the project color joins the name to the dot and the chevron.
                             .when(rule, |pill| {
                                 pill.child(
@@ -1364,6 +1586,55 @@ impl SidebarView {
                                     .opacity(faded)
                                     .text_color(rgb(theme.tokens.muted)),
                             )
+                            // Compact: a Gantry project's layers icon takes the place of the pill.
+                            .when(gantry && amount > 0.0, |pill| {
+                                pill.child(
+                                    svg()
+                                        .path(LAYERS_ICON)
+                                        .absolute()
+                                        .right(theme.ui(26. - (PILL_WIDTH - 8.) * amount + PILL_WIDTH / 2. - 7.))
+                                        .top(relative(0.5))
+                                        .mt(theme.ui(-7.))
+                                        .size(theme.ui(14.))
+                                        .opacity(amount)
+                                        .text_color(rgb(dot)),
+                                )
+                            })
+                            // Expanded: a Gantry project's × deletes it, in the pill's place while the heading is hovered.
+                            .when(gantry && close_slot_shown(amount), |pill| {
+                                let danger = theme.tokens.danger;
+                                let name = label.clone();
+                                pill.child(
+                                    div()
+                                        .id(("delete-project", index))
+                                        .absolute()
+                                        .right(theme.ui(26. + PILL_WIDTH / 2. - 8.))
+                                        .top(relative(0.5))
+                                        .mt(theme.ui(-8.))
+                                        .size(theme.ui(16.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(5.))
+                                        .cursor_pointer()
+                                        .opacity(0.)
+                                        .group_hover(format!("row-{index}"), |style| style.opacity(1.))
+                                        .hover(|style| style.bg(rgba((danger << 8) | 0x24)))
+                                        .child(
+                                            svg()
+                                                .path(CLOSE_ICON)
+                                                .size(theme.ui(12.))
+                                                .text_color(rgba((danger << 8) | 0xc7)),
+                                        )
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                                                cx.emit(SidebarEvent::DeleteProject(name.clone()));
+                                                cx.stop_propagation();
+                                            }),
+                                        ),
+                                )
+                            })
                             .child(
                                 div()
                                     .absolute()
@@ -1374,6 +1645,11 @@ impl SidebarView {
                                     .h(theme.ui(8.))
                                     .rounded(px(3.))
                                     .bg(rgb(dot))
+                                    // A Gantry project's pill gives way to its × while hovered, and to its icon when compact.
+                                    .when(gantry && close_slot_shown(amount), |pill| {
+                                        pill.group_hover(format!("row-{index}"), |style| style.opacity(0.))
+                                    })
+                                    .when(gantry && amount > 0.0, |pill| pill.opacity(1. - amount))
                                     .when(glow, |pill| {
                                         pill.child(pill_sweep(("pill-sweep", index), theme.ui(3.), band))
                                     }),
@@ -1560,6 +1836,16 @@ impl SidebarView {
                         }),
                 )
             }
+            RowKind::Empty => base.child(
+                div()
+                    .pl(theme.ui(39.))
+                    .overflow_hidden()
+                    .text_xs()
+                    .italic()
+                    .opacity(faded)
+                    .text_color(rgb(theme.tokens.muted))
+                    .child("Empty. Drag a session here, or New Claude here."),
+            ),
             RowKind::Detail { text, .. } => base.child(
                 div()
                     .pl(theme.ui(39.))
@@ -1672,6 +1958,32 @@ impl Render for DraggedTab {
     }
 }
 
+/// A session running outside Gantry being dragged to a project heading.
+#[derive(Clone)]
+struct DraggedSession {
+    /// The session's id.
+    id: String,
+    title: String,
+}
+
+impl Render for DraggedSession {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme(cx);
+        div()
+            .px(theme.ui(12.))
+            .py(theme.ui(6.))
+            .rounded(px(RADIUS))
+            .border_1()
+            .border_color(rgb(theme.tokens.accent))
+            .bg(rgb(theme.tokens.raised))
+            .text_color(rgb(theme.tokens.text))
+            .text_sm()
+            .font_family(UI_FONT)
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(self.title.clone())
+    }
+}
+
 /// A project heading being dragged to a new place in the list.
 #[derive(Clone)]
 struct DraggedProject {
@@ -1719,9 +2031,10 @@ impl Render for SidebarView {
         // Clicking elsewhere (focus left the sidebar) cancels a rename.
         if !focused {
             self.renaming = None;
+            self.project_edit = None;
         }
         // The rename field has the focus then, not the filter.
-        let focused = focused && self.renaming.is_none();
+        let focused = focused && self.renaming.is_none() && self.project_edit.is_none();
         // The sessions list started to scroll (or fits again): the SSH hosts block may fold by itself.
         // Not while compact: the column's own bottom rows are taller, and a fold made then would still be there when
         // the sidebar expands.
@@ -1797,7 +2110,50 @@ impl Render for SidebarView {
                                     }),
                                 )),
                         )
-                    }),
+                    })
+                    // New project: the layers icon with a small plus; also the first tile of the compact column.
+                    .child(
+                        div()
+                            .id("new-project")
+                            .relative()
+                            .flex_none()
+                            .size(theme.ui(36.))
+                            .when(self.amount < 1.0, |button| button.ml(theme.ui(6.) * (1.0 - self.amount)))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(RADIUS))
+                            .bg(rgb(theme.tokens.raised))
+                            .border_1()
+                            .border_color(rgb(theme.tokens.line))
+                            .cursor_pointer()
+                            .hover(|style| style.border_color(rgb(theme.tokens.accent)))
+                            .tooltip(hover_card::tooltip(HoverCard {
+                                title: "New project".into(),
+                                status: None,
+                                dir: None,
+                                container: false,
+                                host: None,
+                                folder: None,
+                            }))
+                            .child(svg().path(LAYERS_ICON).size(theme.ui(18.)).text_color(rgb(theme.tokens.muted)))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .right(theme.ui(3.))
+                                    .bottom(theme.ui(3.))
+                                    .size(theme.ui(11.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(rgb(theme.tokens.accent))
+                                    .text_color(rgb(theme.tokens.on_accent))
+                                    .text_size(theme.ui(10.))
+                                    .child("+"),
+                            )
+                            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SidebarEvent::StartProject))),
+                    ),
             )
             .when(self.settings_open, |this| {
                 let out = RING + RING_GAP;
@@ -1972,6 +2328,40 @@ impl Render for SidebarView {
                     .on_drop(
                         cx.listener(|this, dragged: &DraggedProject, _, cx| this.drop_project(&dragged.root, None, cx)),
                     )
+                    // The name field of a project being made: an empty heading at the top of the list.
+                    .children(self.project_edit.as_ref().filter(|edit| edit.from.is_none()).map(|edit| {
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .mx(theme.ui(12.))
+                            .mb(theme.ui(4.))
+                            .child(
+                                div()
+                                    .h(theme.ui(34.))
+                                    .px(theme.ui(10.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(theme.ui(6.))
+                                    .rounded(px(RADIUS))
+                                    .border_1()
+                                    .border_color(rgb(theme.tokens.accent))
+                                    .child(
+                                        svg().path(LAYERS_ICON).size(theme.ui(14.)).text_color(rgb(theme.tokens.muted)),
+                                    )
+                                    .children(self.project_field(&theme, cx)),
+                            )
+                            .when(edit.exists, |card| {
+                                card.child(
+                                    div()
+                                        .px(theme.ui(10.))
+                                        .pt(theme.ui(2.))
+                                        .text_xs()
+                                        .text_color(rgb(theme.tokens.danger))
+                                        .child("A project with this name already exists"),
+                                )
+                            })
+                    }))
                     .child(
                         uniform_list(
                             "session-rows",

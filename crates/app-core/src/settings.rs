@@ -1743,6 +1743,25 @@ mod tests {
     }
 
     #[test]
+    fn a_gantry_project_key_is_a_valid_project_color_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let loaded = parse(r#"{"projectColors": {"folders": {"gantry://billing": "amber"}}}"#);
+        let mut s = loaded.settings.unwrap();
+        let key = Path::new("gantry://billing");
+        assert_eq!(project_color(&s, key), Some(Tint::Palette(ProjectColor::Amber)));
+        s.project_colors.folders.insert("gantry://docs".into(), Tint::Palette(ProjectColor::Teal));
+        save(&path, &s, &loaded.raw).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("\"gantry://billing\": \"amber\"") && text.contains("\"gantry://docs\": \"teal\""),
+            "{text}"
+        );
+        let back = parse(&text).settings.unwrap();
+        assert_eq!(back.project_colors.folders, s.project_colors.folders);
+    }
+
+    #[test]
     fn expand_home_tilde() {
         let home = Path::new("/home/me");
         assert_eq!(expand_home(Path::new("~/x"), Some(home)), PathBuf::from("/home/me/x"));

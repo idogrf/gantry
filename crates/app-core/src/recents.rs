@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use protocol::host::HostId;
 use protocol::message::{SearchHit, SessionInfo, SessionState, Speaker};
 
+use crate::gantry_project;
 use crate::session_tree::{age, display_path, labels, session_title};
 
 /// How the pop-up orders its sessions.
@@ -321,7 +322,11 @@ pub fn items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
                 sessions.sort_by(|a, b| newest(a.session, b.session));
                 items.push(RecentItem::Heading {
                     label: labels[&path].clone(),
-                    display: display_path(&path, input.home),
+                    display: if gantry_project::is_key(&path) {
+                        String::new()
+                    } else {
+                        display_path(&path, input.home)
+                    },
                     path,
                 });
                 items.extend(sessions.iter().map(session_item));

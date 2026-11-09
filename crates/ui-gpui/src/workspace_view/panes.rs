@@ -4,14 +4,16 @@ use std::path::{Path, PathBuf};
 
 use app_core::attention::without_claude_glyph;
 use app_core::dialogs;
+use app_core::gantry_project;
 use app_core::host_state::HostState;
+use app_core::launcher;
 use app_core::split_tree::{Axis, NodeId};
 use app_core::workspace::{DirBadge, PaneLaunch};
 use app_core::{layout_store, window_state};
 use daemon::containers::GONE as CONTAINER_GONE;
 use gpui::{App, Context, Focusable, Window, WindowBounds, prelude::*};
 use protocol::host::{HostId, PaneKey};
-use protocol::message::ContainerChoice;
+use protocol::message::{ContainerChoice, SessionInfo};
 
 use app_core::session_tree::{PaneEntry, TabEntry};
 use app_core::settings::ShellSettings;
@@ -147,12 +149,12 @@ impl WorkspaceView {
         let cwd_from = source.and_then(|leaf| leaf.key());
         let host = source.map(|leaf| leaf.host.clone()).unwrap_or_default();
         if host.is_local() {
-            self.open_new(claude, cwd, axis, cwd_from, host, None);
+            self.open_new(claude, cwd, axis, cwd_from, host, None, None);
         } else {
             // A new tab or split of a remote pane: no container lookup and no local Claude dir or shell settings.
             let launch =
                 if claude { PaneLaunch::claude(cwd) } else { PaneLaunch::shell(cwd, &ShellSettings::default()) };
-            self.open_launch(launch, axis, cwd_from, host, window, cx);
+            self.open_launch(launch, axis, cwd_from, host, None, window, cx);
         }
     }
 
@@ -162,6 +164,7 @@ impl WorkspaceView {
     }
 
     /// Start a new Claude or shell pane in `cwd` — after asking where, when a dev container mounts `cwd`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn open_new(
         &mut self,
         claude: bool,
@@ -170,10 +173,11 @@ impl WorkspaceView {
         cwd_from: Option<PaneKey>,
         host: HostId,
         pick: Option<String>,
+        project: Option<String>,
     ) {
         self.next_request += 1;
         self.local_client().find_container(self.next_request, &cwd);
-        self.pending_opens.insert(self.next_request, PendingOpen { claude, pick, cwd, axis, cwd_from, host });
+        self.pending_opens.insert(self.next_request, PendingOpen { claude, pick, cwd, axis, cwd_from, host, project });
     }
 
     /// Start a new Claude session (or shell) in `cwd`: Claude with the config dir `pick` names, else the one remembered
@@ -200,12 +204,13 @@ impl WorkspaceView {
         claude: bool,
         dir: PathBuf,
         dir_pick: Option<String>,
+        project: Option<String>,
         cx: &mut Context<Self>,
     ) {
         if let Some(name) = &dir_pick {
             self.remember_pick(&dir, name, cx);
         }
-        self.open_new(claude, dir, None, None, HostId::local(), dir_pick);
+        self.open_new(claude, dir, None, None, HostId::local(), dir_pick, project);
     }
 
     /// An explicit pick of a config dir for `folder` is remembered for it; picking the default forgets it.
@@ -229,19 +234,22 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(PendingOpen { claude, pick, cwd, axis, cwd_from, host }) = self.pending_opens.remove(&request) else {
+        let Some(PendingOpen { claude, pick, cwd, axis, cwd_from, host, project }) =
+            self.pending_opens.remove(&request)
+        else {
             return;
         };
         let Some(container) = container else {
             let launch = self.new_launch(claude, cwd, pick.as_deref(), None, cx);
-            self.open_launch(launch, axis, cwd_from, host, window, cx);
+            self.open_launch(launch, axis, cwd_from, host, project, window, cx);
             return;
         };
         let folder = &container.host_folder;
-        let project =
+        let folder_name =
             folder.file_name().map_or_else(|| folder.display().to_string(), |name| name.to_string_lossy().into_owned());
-        let spec = dialogs::dev_container(&project, &container.name, container.running);
-        let open = DevContainerOpen { claude, pick, cwd, axis, cwd_from, host, host_folder: container.host_folder };
+        let spec = dialogs::dev_container(&folder_name, &container.name, container.running);
+        let open =
+            DevContainerOpen { claude, pick, cwd, axis, cwd_from, host, project, host_folder: container.host_folder };
         self.open_dialog(spec, DialogAction::DevContainer(Box::new(open)), window, cx);
     }
 
@@ -252,12 +260,14 @@ impl WorkspaceView {
     }
 
     /// Start `launch` in a new tab, or splitting the focused pane along `axis` (a split runs on `host`).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_launch(
         &mut self,
         launch: PaneLaunch,
         axis: Option<Axis>,
         cwd_from: Option<PaneKey>,
         host: HostId,
+        project: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -275,6 +285,9 @@ impl WorkspaceView {
             }
             None => self.workspace.new_tab_on(launch, host),
         };
+        if let Some(project) = project {
+            self.workspace.set_leaf_project(leaf, Some(&project));
+        }
         self.add_slot(leaf, window, cx);
         self.spawn_leaf(leaf, cwd_from, window, cx);
         self.focus_current(window, cx);
@@ -465,15 +478,86 @@ impl WorkspaceView {
         host: &HostId,
         claude: bool,
         dir: PathBuf,
+        project: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let launch = if claude { PaneLaunch::claude(dir) } else { PaneLaunch::shell(dir, &ShellSettings::default()) };
         let leaf = self.workspace.new_tab_on(launch, host.clone());
+        if let Some(project) = project {
+            self.workspace.set_leaf_project(leaf, Some(&project));
+        }
         self.add_slot(leaf, window, cx);
         self.spawn_leaf(leaf, None, window, cx); // queues the leaf and connects when the host is not connected
         self.focus_current(window, cx);
         self.save(cx);
+    }
+
+    /// Open the launcher for a new Claude session in the Gantry project `name`, on the folder its sessions last ran in.
+    pub(super) fn new_claude_in_project(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_launcher(true, window, cx);
+        let membership = self.workspace.membership();
+        let leaves: Vec<(HostId, PathBuf, Option<String>)> = self
+            .workspace
+            .leaves
+            .values()
+            .map(|leaf| (leaf.host.clone(), leaf.launch.cwd.clone(), leaf.project.clone()))
+            .collect();
+        let sessions: Vec<&SessionInfo> = self.sidebar.read(cx).sessions().all().collect();
+        let last = launcher::last_folder_of(name, &sessions, &membership, &leaves);
+        if let Some((view, _)) = &self.launcher {
+            let name = name.to_string();
+            view.update(cx, |view, cx| view.set_project(&name, last, cx));
+        }
+    }
+
+    /// Rename a Gantry project: its panes, its sessions' labels, its color and its place follow.
+    pub(super) fn rename_project(&mut self, from: &str, to: &str, cx: &mut Context<Self>) {
+        let Ok(to) = self.workspace.rename_project(from, to) else { return };
+        let (old, new) = (gantry_project::key(from), gantry_project::key(&to));
+        if old != new {
+            SettingsStore::update(cx, |settings| {
+                if let Some(color) = settings.project_colors.folders.remove(&old) {
+                    settings.project_colors.folders.insert(new.clone(), color);
+                }
+            });
+        }
+        let saved = self.workspace.sidebar_order.clone();
+        self.sidebar.update(cx, |sidebar, cx| sidebar.project_renamed(&old, &new, saved, cx));
+        self.save(cx);
+        cx.notify();
+    }
+
+    /// Delete a Gantry project: at once when nothing runs in it, else after asking (its running sessions are stopped).
+    pub(super) fn delete_project(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let running = self.workspace.delete_plan(name).running.len();
+        if running == 0 {
+            self.remove_project(name, window, cx);
+        } else {
+            self.open_dialog(
+                dialogs::delete_project(name, running),
+                DialogAction::DeleteProject(name.to_string()),
+                window,
+                cx,
+            );
+        }
+    }
+
+    /// Close the panes of a Gantry project (the ones that ended too) and remove the project with its color and place.
+    pub(super) fn remove_project(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let plan = self.workspace.delete_plan(name);
+        for leaf in plan.running.into_iter().chain(plan.dead) {
+            self.close_leaf(leaf, window, cx);
+        }
+        self.workspace.remove_project(name);
+        let key = gantry_project::key(name);
+        SettingsStore::update(cx, |settings| {
+            settings.project_colors.folders.remove(&key);
+        });
+        let saved = self.workspace.sidebar_order.clone();
+        self.sidebar.update(cx, |sidebar, cx| sidebar.project_removed(&key, saved, cx));
+        self.save(cx);
+        cx.notify();
     }
 
     pub(super) fn running_panes(&self, leaves: &[NodeId], cx: &Context<Self>) -> usize {

@@ -201,7 +201,7 @@ impl WorkspaceView {
                 row.on_click(cx.listener(move |this, _, window, cx| {
                     // A start waits for the daemon's container answer; a second click would open a second session.
                     if this.pending_opens.is_empty() {
-                        this.open_folder(host.clone(), path.clone(), true, None, window, cx)
+                        this.open_folder(host.clone(), path.clone(), true, None, None, window, cx)
                     }
                 }))
             })

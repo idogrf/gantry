@@ -43,6 +43,9 @@ pub(crate) const BRANCH_ICON: &str = "icons/branch.svg";
 /// The sidebar toggle tab's collapse arrow, drawn by `workspace_view` (the expand arrow is `CHEVRON_RIGHT_ICON`).
 pub(crate) const CHEVRON_LEFT_ICON: &str = "icons/chevron-left.svg";
 
+/// The recent sessions pop-up's reset filters button (a counter-clockwise arrow), drawn by `recents_view`.
+pub(crate) const RESET_ICON: &str = "icons/reset.svg";
+
 /// The app icon in color, drawn next to the name in the title bar (a picture, not a tinted icon like the others).
 pub(crate) const LOGO: &str = "icons/gantry.png";
 
@@ -69,6 +72,7 @@ impl AssetSource for Assets {
             INFO_ICON => Some(include_bytes!("../assets/icons/info.svg")),
             BRANCH_ICON => Some(include_bytes!("../assets/icons/branch.svg")),
             CHEVRON_LEFT_ICON => Some(include_bytes!("../assets/icons/chevron-left.svg")),
+            RESET_ICON => Some(include_bytes!("../assets/icons/reset.svg")),
             LOGO => Some(include_bytes!("../assets/icons/gantry.png")),
             _ => None,
         };
@@ -89,6 +93,7 @@ impl AssetSource for Assets {
             PIN_ICON.into(),
             INFO_ICON.into(),
             CHEVRON_LEFT_ICON.into(),
+            RESET_ICON.into(),
             LOGO.into(),
         ])
     }
@@ -112,6 +117,7 @@ mod tests {
             PROMPT_ICON,
             PIN_ICON,
             INFO_ICON,
+            RESET_ICON,
         ] {
             let bytes = Assets.load(icon).unwrap().expect("embedded");
             assert!(std::str::from_utf8(&bytes).unwrap().starts_with("<svg"), "{icon}");

@@ -1080,10 +1080,6 @@ pub(crate) fn labels(paths: &[PathBuf], home: Option<&Path>) -> HashMap<PathBuf,
         .collect()
 }
 
-pub(crate) fn newest_first(a: &&SessionInfo, b: &&SessionInfo) -> std::cmp::Ordering {
-    b.last_active_ms.cmp(&a.last_active_ms).then_with(|| a.id.cmp(&b.id))
-}
-
 /// Whether an entry passes the filter (matched against its title and displayed directory).
 pub(crate) fn keep(fuzzy: &mut Option<Fuzzy>, title: &str, cwd: &Path, home: Option<&Path>) -> bool {
     fuzzy.as_mut().is_none_or(|fuzzy| fuzzy.score(&keep_text(title, cwd, home)).is_some())

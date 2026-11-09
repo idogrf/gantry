@@ -836,7 +836,11 @@ impl Workspace {
     pub fn set_tab_project(&mut self, index: usize, project: Option<&str>) -> bool {
         let Some(tab) = self.tabs.get(index).filter(|tab| !tab.settings) else { return false };
         let leaves = tab.root.leaves();
-        leaves.into_iter().fold(false, |any, leaf| self.set_leaf_project(leaf, project) || any)
+        let mut any = false;
+        for leaf in leaves {
+            any |= self.set_leaf_project(leaf, project);
+        }
+        any
     }
 
     /// Label a session that has no pane of ours (an external or closed one) with a Gantry project (made if

@@ -5,8 +5,15 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Sort and filter recent sessions** - The Recent sessions pop-up (`Ctrl+Shift+R`) has a sort bar (Recent, Name or Project, with a reverse button; `Tab` switches the sort) and a sidebar of filters by Project, Host and Config dir. Each filter shows the five with the newest sessions and keeps the rest under More…, and a round-arrow button resets them all. The sort and filters stay while Gantry is open.
+
 ### Changed
 - **Project dot shows status** - The dot on a project heading now shows the most urgent session in the project (needs input, then done, unread, working), in the same colors as the session rows, and pulses while a session is working. With nothing to act on it is grey. The project color stays on the name and the line. It counts the sessions of a collapsed project too.
+- **Search keeps your order** - A search in the Recent sessions pop-up only narrows the list and no longer ranks it, so a recent session that matches loosely is no longer listed below an older one that matches well. The list is in the sort you picked, newest first by default, and every row names its project.
+
+### Removed
+- **Recent sessions settings** - "Sessions per project" and "Project chips" in Settings > Sessions are gone: the pop-up lists every session and the Project filter replaces the chips.
 
 ## [0.13.0] - 2026-11-03
 

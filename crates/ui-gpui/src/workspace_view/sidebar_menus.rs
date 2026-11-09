@@ -103,13 +103,17 @@ impl WorkspaceView {
             MenuAction::OpenInVsCode(args) => self.open_in_vscode(args, window, cx),
             MenuAction::MarkUnread(leaf) => {
                 self.unseen.insert(leaf, AlertKind::Finished);
-                self.marked_unread.insert(leaf);
+                if self.workspace.set_unread(leaf, true) {
+                    self.save(cx);
+                }
                 self.sync_unseen(cx);
                 cx.notify();
             }
             MenuAction::MarkRead(leaf) => {
                 self.unseen.remove(&leaf);
-                self.marked_unread.remove(&leaf);
+                if self.workspace.set_unread(leaf, false) {
+                    self.save(cx);
+                }
                 self.sync_unseen(cx);
                 cx.notify();
             }

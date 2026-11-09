@@ -249,16 +249,19 @@ impl WorkspaceView {
 
     /// Drop the hand-made unread mark of every session whose status is no longer Idle.
     fn drop_marks_of_changed(&mut self, host: &HostId, sessions: &[SessionInfo], cx: &mut Context<Self>) {
-        if self.marked_unread.is_empty() {
-            return;
-        }
+        let mut changed = false;
         for session in sessions {
             let SessionState::Managed { pane } = session.state else { continue };
             let Some(leaf) = self.workspace.leaf_for_pane(&PaneKey::new(host.clone(), pane)) else { continue };
-            if status_tone(session.status.as_ref(), Unseen::No) != Tone::Idle && self.marked_unread.remove(&leaf) {
+            if status_tone(session.status.as_ref(), Unseen::No) != Tone::Idle && self.workspace.set_unread(leaf, false)
+            {
                 self.unseen.remove(&leaf);
-                self.sync_unseen(cx);
+                changed = true;
             }
+        }
+        if changed {
+            self.save(cx);
+            self.sync_unseen(cx);
         }
     }
 
@@ -291,7 +294,7 @@ impl WorkspaceView {
         }
         let before = self.unseen.len();
         let workspace = &self.workspace;
-        forget_seen(&mut self.unseen, &self.marked_unread, |leaf| workspace.is_visible(leaf));
+        forget_seen(&mut self.unseen, |leaf| workspace.is_unread(leaf), |leaf| workspace.is_visible(leaf));
         if self.unseen.len() != before {
             self.sync_unseen(cx);
         }
@@ -302,13 +305,13 @@ impl WorkspaceView {
     pub(super) fn sync_unseen(&self, cx: &mut Context<Self>) {
         let session_of = |leaf: &NodeId| self.workspace.leaves.get(leaf)?.session.clone();
         let sessions: HashSet<String> = self.unseen.keys().filter_map(session_of).collect();
-        let marked: HashSet<String> = self.marked_unread.iter().filter_map(session_of).collect();
+        let marked: HashSet<String> = self.workspace.unread_leaves().filter_map(|leaf| session_of(&leaf)).collect();
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_unseen(sessions, marked, cx));
     }
 
     /// Why `leaf`'s result is unseen, if it is.
     pub(super) fn unseen_of(&self, leaf: NodeId) -> Unseen {
-        if self.marked_unread.contains(&leaf) {
+        if self.workspace.is_unread(leaf) {
             Unseen::Marked
         } else if self.unseen.contains_key(&leaf) {
             Unseen::Alert
@@ -319,8 +322,12 @@ impl WorkspaceView {
 }
 
 /// Drop the alerts of the leaves the user can see, except those marked unread by hand.
-fn forget_seen(unseen: &mut HashMap<NodeId, AlertKind>, marked: &HashSet<NodeId>, visible: impl Fn(NodeId) -> bool) {
-    unseen.retain(|leaf, _| !visible(*leaf) || marked.contains(leaf));
+fn forget_seen(
+    unseen: &mut HashMap<NodeId, AlertKind>,
+    marked: impl Fn(NodeId) -> bool,
+    visible: impl Fn(NodeId) -> bool,
+) {
+    unseen.retain(|leaf, _| !visible(*leaf) || marked(*leaf));
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -331,7 +338,7 @@ mod tests {
     fn a_leaf_marked_unread_keeps_its_alert_in_view_while_others_are_forgotten() {
         let (marked, seen): (NodeId, NodeId) = (1, 2);
         let mut unseen = HashMap::from([(marked, AlertKind::Finished), (seen, AlertKind::Finished)]);
-        forget_seen(&mut unseen, &HashSet::from([marked]), |_| true);
+        forget_seen(&mut unseen, |leaf| leaf == marked, |_| true);
         assert_eq!(unseen.keys().copied().collect::<Vec<_>>(), vec![marked]);
     }
 }

@@ -28,7 +28,7 @@ Projects in Gantry are derived from the folder a session ran in. People who run 
 - Project key (what `project_of` returns today as a path): `gantry://<name>` **[call]**, like `ssh://<host>/<folder>`. The name part is the lowercased name; the display name is looked up from the saved list. Colors, saved order and menus use this key.
 - Membership is saved in two places (both additive in `layout.json`, no layout version bump, old files load unchanged):
   - `Leaf.project: Option<String>` - the display name; applies to every pane, Claude or shell, and follows the leaf across `/clear` and resume **[call]**.
-  - `Workspace.session_projects: map session id -> name` - written whenever a leaf in a project reports its session, and when a session (including an external one) is dragged into a project. It is what labels closed sessions in Recents and what a resume reads. Entries are never pruned **[call]** (tiny).
+  - `Workspace.session_projects: map session id -> name` - written whenever a leaf in a project reports its session. A session running outside Gantry can never be put in a project (not draggable, never listed under one). It is what labels closed sessions in Recents and what a resume reads. Entries are never pruned **[call]** (tiny).
 - `Workspace.gantry_projects: Vec<String>` - the projects that exist (the user's created list). A project "exists" in the sidebar even with no sessions; names that appear only in `session_projects` (deleted ones) exist only as Recents labels.
 - `project_of` gains the session: today `(host, cwd) -> key`; it becomes `(host, cwd, leaf project or session id) -> key`. The Gantry membership wins over the folder. Callers: `session_tree` (rows, split-tab groups), `recents` (`RecentsInput.project_of`, `project_key_of`, filter sections and labels), `sidebar_view`, `recents_view`, `workspace_view::panes::leaf_project_color`.
 - A project can mix hosts and folders freely (it is not host-bound).
@@ -44,11 +44,11 @@ A button beside the "Filter active sessions" box (icon: layers, with a small acc
 - Marker: the layers icon before the name (plain, no plus), plus the usual project dot with its status/aura behavior (the dot shows the most urgent session status as for folder projects). Compact sidebar: the layers icon takes the place of a folder project's square dot between tiles.
 - A Gantry project with no sessions stays in the list. A hover x (like a session row's x, in the dot's place) deletes it. Folder headings never get this x.
 - New projects go on top, as new folder projects do; the user can drag a heading to reorder, saved via `ProjectOrder`. `to_save` keeps `gantry://` keys even when empty, like `ssh://` ones **[call]**.
-- Empty state under the heading: a muted line "Empty. Drag a session here, or New Claude here." **[call]** wording.
+- Empty state under the heading: a muted one-line "Empty. Drag a session here." (ellipsis if clipped) **[call]** wording.
 
 ### Putting things in a project
 
-- Drag a session/pane row onto a project heading (or between its rows) to assign it. This works for Claude panes, shell panes and external sessions. The session leaves its folder heading and shows only under the Gantry project.
+- Drag a session/pane row onto a project heading (or between its rows) to assign it. This works for Claude panes and shell panes; sessions running outside Gantry cannot be dragged in. The session leaves its folder heading and shows only under the Gantry project.
 - Dragging one pane of a split tab (pane header or its row under the tab heading) pulls it out into a tab of its own in the target project (existing `pull_out` plus a project label).
 - Dragging a split tab's own heading moves the whole tab: every pane gets the project.
 - A split tab sits under its first pane's project (unchanged rule); a tab may mix projects.

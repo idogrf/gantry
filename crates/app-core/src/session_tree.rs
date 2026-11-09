@@ -708,7 +708,7 @@ enum EntryKind<'a> {
 pub fn active<'a>(input: &'a ActiveInput<'a>, arrivals: &mut Arrivals, order: &mut ProjectOrder) -> Vec<Row> {
     let by_id: HashMap<(&HostId, &str), &SessionInfo> =
         input.sessions.iter().map(|s| ((&s.host, s.id.as_str()), *s)).collect();
-    let member = |pane: Option<&'a PaneEntry>, session: Option<&str>| member_project(input, pane, session);
+    let member = |pane: &'a PaneEntry, session: Option<&str>| member_project(input, pane, session);
     let mut entries: Vec<Entry<'_>> = Vec::new();
     let mut in_leaves: HashSet<(&HostId, &str)> = HashSet::new();
     for pane in input.panes {
@@ -721,7 +721,7 @@ pub fn active<'a>(input: &'a ActiveInput<'a>, arrivals: &mut Arrivals, order: &m
                     key: EntryKey::Leaf(pane.leaf),
                     host: &session.host,
                     cwd: &session.cwd,
-                    gantry: member(Some(pane), Some(&session.id)),
+                    gantry: member(pane, Some(&session.id)),
                     title,
                     activity: session.last_active_ms,
                     kind,
@@ -733,7 +733,7 @@ pub fn active<'a>(input: &'a ActiveInput<'a>, arrivals: &mut Arrivals, order: &m
                     key: EntryKey::Leaf(pane.leaf),
                     host: &pane.host,
                     cwd: &pane.cwd,
-                    gantry: member(Some(pane), pane.session.as_deref()),
+                    gantry: member(pane, pane.session.as_deref()),
                     title,
                     activity: u64::MAX,
                     kind: EntryKind::Pane(pane),
@@ -750,7 +750,7 @@ pub fn active<'a>(input: &'a ActiveInput<'a>, arrivals: &mut Arrivals, order: &m
             key: EntryKey::Session(session.id.clone()),
             host: &session.host,
             cwd: &session.cwd,
-            gantry: member(None, Some(&session.id)),
+            gantry: None,
             title: session_title(session),
             activity: session.last_active_ms,
             kind,
@@ -929,14 +929,10 @@ pub fn active<'a>(input: &'a ActiveInput<'a>, arrivals: &mut Arrivals, order: &m
     rows
 }
 
-/// The Gantry project a pane or session was put in: the pane's own label wins; a session's label counts only while
-/// its project exists (a deleted one lives on in Recents only).
-fn member_project<'a>(
-    input: &'a ActiveInput<'a>,
-    pane: Option<&'a PaneEntry>,
-    session: Option<&str>,
-) -> Option<&'a str> {
-    pane.and_then(|pane| pane.project.as_deref()).or_else(|| {
+/// The Gantry project a pane was put in: its own label wins; its session's label counts only while its project
+/// exists (a deleted one lives on in Recents only). A session running outside Gantry is never in a project.
+fn member_project<'a>(input: &'a ActiveInput<'a>, pane: &'a PaneEntry, session: Option<&str>) -> Option<&'a str> {
+    pane.project.as_deref().or_else(|| {
         let name = input.session_projects.get(session?)?;
         let exists = input.gantry_projects.iter().any(|known| gantry_project::same(known, name));
         exists.then_some(name.as_str())
@@ -2215,17 +2211,24 @@ mod tests {
     }
 
     #[test]
-    fn external_session_follows_session_projects() {
+    fn an_external_session_is_never_listed_in_a_gantry_project() {
         let external = session("e1", "/r/alpha", SessionState::External { pid: Some(5) }, NOW - HOUR_MS);
         let mut fixture = Fixture::of(vec![external], vec![]);
         fixture.session_projects.insert("e1".into(), "Billing".into());
-        // The project was deleted: the label is only for Recents.
-        assert_eq!(fixture.outline()[0], "▾ alpha");
         fixture.gantry_projects = vec!["Billing".into()];
         let rows = fixture.rows();
-        assert!(matches!(&rows[0].kind, RowKind::Project { label, .. } if label == "Billing"));
-        assert_eq!(rows[1].project, Some(PathBuf::from("gantry://billing")));
-        assert!(!rows.iter().any(|row| matches!(&row.kind, RowKind::Project { label, .. } if label == "alpha")));
+        let heading = |name: &str| {
+            rows.iter().position(|row| matches!(&row.kind, RowKind::Project { label, .. } if label == name))
+        };
+        let (alpha, billing) = (heading("alpha").unwrap(), heading("Billing").unwrap());
+        assert!(rows[alpha + 1..].iter().any(|row| matches!(&row.kind, RowKind::Session { .. })), "under its folder");
+        assert!(
+            !rows[billing + 1..]
+                .iter()
+                .take_while(|row| !matches!(&row.kind, RowKind::Project { .. }))
+                .any(|row| matches!(&row.kind, RowKind::Session { .. })),
+            "the project stays empty"
+        );
     }
 
     #[test]

@@ -785,6 +785,15 @@ impl Workspace {
         self.gantry_projects.iter().map(String::as_str).find(|existing| gantry_project::same(existing, name))
     }
 
+    /// The Gantry project `leaf` is shown under: its own label, else its session's while that project exists.
+    pub fn leaf_project(&self, leaf: NodeId) -> Option<&str> {
+        let found = self.leaves.get(&leaf)?;
+        found.project.as_deref().or_else(|| {
+            let name = self.session_projects.get(found.session.as_deref()?)?;
+            self.project_exists(name)
+        })
+    }
+
     /// The Gantry projects and session labels, for lists that show sessions without a pane.
     pub fn membership(&self) -> gantry_project::Membership {
         gantry_project::Membership { projects: self.gantry_projects.clone(), sessions: self.session_projects.clone() }
@@ -861,21 +870,6 @@ impl Workspace {
         any
     }
 
-    /// Label a session that has no pane of ours (an external or closed one) with a Gantry project (made if
-    /// missing), or clear its label with `None`.
-    pub fn set_session_project(&mut self, session: &str, project: Option<&str>) {
-        match project {
-            Some(project) => {
-                if let Some(name) = self.ensure_project(project) {
-                    self.session_projects.insert(session.into(), name);
-                }
-            }
-            None => {
-                self.session_projects.remove(session);
-            }
-        }
-    }
-
     /// Put what was dropped in the Gantry project `project` (made if missing), or, with `None`, take it out of its
     /// Gantry project (back to its folder project). A pane of a split tab becomes a tab of its own first. False,
     /// changing nothing, when it is already there, or the source is unknown.
@@ -903,13 +897,6 @@ impl Workspace {
                     return false;
                 }
                 self.set_tab_project(index, project)
-            }
-            Assign::Session(id) => {
-                if current(self.session_projects.get(id)) {
-                    return false;
-                }
-                self.set_session_project(id, project);
-                true
             }
         }
     }
@@ -3663,7 +3650,7 @@ mod tests {
         let leaf = ws.new_tab(shell("/a"));
         ws.leaves.get_mut(&leaf).unwrap().session = Some("s1".into());
         ws.set_leaf_project(leaf, Some("Billing"));
-        ws.set_session_project("s2", Some("billing"));
+        ws.session_projects.insert("s2".into(), "billing".into());
         assert_eq!(ws.rename_project("billing", " Invoices "), Ok("Invoices".into()));
         assert_eq!(ws.gantry_projects, vec!["Invoices".to_string()]);
         assert_eq!(ws.leaves[&leaf].project.as_deref(), Some("Invoices"));
@@ -3716,6 +3703,22 @@ mod tests {
         assert!(ws.session_projects.is_empty());
         assert!(!ws.set_leaf_project(99, Some("x")));
         assert!(!ws.set_leaf_project(leaf, Some("  ")));
+    }
+
+    #[test]
+    fn leaf_project_falls_back_to_its_sessions_label_while_the_project_exists() {
+        let mut ws = Workspace::default();
+        let leaf = ws.new_tab(shell("/a"));
+        ws.leaves.get_mut(&leaf).unwrap().session = Some("s1".into());
+        assert_eq!(ws.leaf_project(leaf), None);
+        ws.gantry_projects.push("Billing".into());
+        ws.session_projects.insert("s1".into(), "billing".into());
+        assert_eq!(ws.leaf_project(leaf), Some("Billing"));
+        ws.leaves.get_mut(&leaf).unwrap().project = Some("Own".into());
+        assert_eq!(ws.leaf_project(leaf), Some("Own"));
+        ws.leaves.get_mut(&leaf).unwrap().project = None;
+        ws.gantry_projects.clear();
+        assert_eq!(ws.leaf_project(leaf), None);
     }
 
     #[test]
@@ -3818,18 +3821,6 @@ mod tests {
         assert!(!ws.assign_to_project(&Assign::Leaf(b), Some("BILLING")), "no pull out either");
         assert!(!ws.assign_to_project(&Assign::Leaf(a), None));
         assert_eq!(ws, before);
-    }
-
-    #[test]
-    fn drop_external_session_records_session_map() {
-        use gantry_project::Assign;
-        let mut ws = Workspace::default();
-        assert!(ws.assign_to_project(&Assign::Session("e1".into()), Some(" Billing ")));
-        assert_eq!(ws.session_projects["e1"], "Billing");
-        assert_eq!(ws.gantry_projects, vec!["Billing".to_string()]);
-        assert!(!ws.assign_to_project(&Assign::Session("e1".into()), Some("billing")));
-        assert!(ws.assign_to_project(&Assign::Session("e1".into()), None));
-        assert!(ws.session_projects.is_empty());
     }
 
     #[test]

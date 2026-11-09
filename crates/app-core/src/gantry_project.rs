@@ -16,8 +16,6 @@ pub enum Assign {
     Leaf(NodeId),
     /// A split tab, by the first leaf of its panes: every pane goes.
     Tab(NodeId),
-    /// A session with no pane of ours (an external one), by id.
-    Session(String),
 }
 
 /// Why a project name was refused.
@@ -27,6 +25,19 @@ pub enum ProjectError {
     Empty,
     /// Another project already has this name (ignoring case).
     Exists,
+    /// The name contains `/`, which a project key (a path) cannot tell apart from a separator.
+    Slash,
+}
+
+impl ProjectError {
+    /// The line shown under the name field; `None` for an empty name, which just does nothing.
+    pub fn message(self) -> Option<&'static str> {
+        match self {
+            ProjectError::Empty => None,
+            ProjectError::Exists => Some("A project with this name already exists"),
+            ProjectError::Slash => Some("A project name cannot contain /"),
+        }
+    }
 }
 
 /// `name` without surrounding spaces; `None` when nothing is left.
@@ -93,6 +104,9 @@ impl Membership {
 /// may keep its name (also in another case). `Empty` or `Exists` otherwise.
 pub fn validate_name(existing: &[String], name: &str, own: Option<&str>) -> Result<String, ProjectError> {
     let name = normalize(name).ok_or(ProjectError::Empty)?;
+    if name.contains('/') {
+        return Err(ProjectError::Slash);
+    }
     let taken = existing.iter().any(|other| same(other, &name) && !own.is_some_and(|own| same(own, other)));
     if taken { Err(ProjectError::Exists) } else { Ok(name) }
 }
@@ -147,6 +161,13 @@ mod tests {
         let list = vec!["Billing".to_string()];
         assert_eq!(validate_name(&list, "  BILLING ", None), Err(ProjectError::Exists));
         assert_eq!(validate_name(&list, "Other", None), Ok("Other".into()));
+    }
+
+    #[test]
+    fn rejects_slashes() {
+        assert_eq!(validate_name(&[], "a/b", None), Err(ProjectError::Slash));
+        assert_eq!(validate_name(&[], "foo/", None), Err(ProjectError::Slash));
+        assert!(ProjectError::Slash.message().is_some() && ProjectError::Empty.message().is_none());
     }
 
     #[test]

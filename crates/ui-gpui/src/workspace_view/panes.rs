@@ -98,7 +98,7 @@ impl WorkspaceView {
     pub(super) fn leaf_project_color(&self, leaf: NodeId, cx: &App) -> Option<u32> {
         let cwd = self.leaf_cwd(leaf, cx)?;
         let found = self.workspace.leaves.get(&leaf)?;
-        theme(cx).project(&self.sidebar.read(cx).project_of(&found.host, &cwd, found.project.as_deref()))
+        theme(cx).project(&self.sidebar.read(cx).project_of(&found.host, &cwd, self.workspace.leaf_project(leaf)))
     }
 
     /// The directory `leaf` works in: its session's, else the pane's.

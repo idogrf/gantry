@@ -84,8 +84,8 @@ struct ProjectEdit {
     /// The project being renamed (its display name); `None` = a new project.
     from: Option<String>,
     field: TextField,
-    /// The name is refused: another project has it.
-    exists: bool,
+    /// Why the name was refused, while the field still holds it.
+    error: Option<ProjectError>,
 }
 
 /// What the sidebar asks the workspace to do.
@@ -744,7 +744,7 @@ impl SidebarView {
     /// Open the name field of a new Gantry project at the top of the list.
     pub fn start_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.renaming = None;
-        self.project_edit = Some(ProjectEdit { from: None, field: TextField::default(), exists: false });
+        self.project_edit = Some(ProjectEdit { from: None, field: TextField::default(), error: None });
         self.scroll.scroll_to_item(0, ScrollStrategy::Top);
         self.focus_handle.focus(window, cx);
         cx.notify();
@@ -764,7 +764,7 @@ impl SidebarView {
         field.insert(name);
         field.select_all();
         self.renaming = None;
-        self.project_edit = Some(ProjectEdit { from: Some(name.to_string()), field, exists: false });
+        self.project_edit = Some(ProjectEdit { from: Some(name.to_string()), field, error: None });
         self.focus_handle.focus(window, cx);
         cx.notify();
         true
@@ -779,7 +779,7 @@ impl SidebarView {
             }
             cx.notify();
         });
-        let line = if edit.exists { theme.tokens.danger } else { theme.tokens.line };
+        let line = if edit.error.is_some() { theme.tokens.danger } else { theme.tokens.line };
         Some(
             div()
                 .flex_1()
@@ -927,8 +927,7 @@ impl SidebarView {
                             });
                             cx.emit(SidebarEvent::Dismiss);
                         }
-                        Err(ProjectError::Exists) => edit.exists = true,
-                        Err(ProjectError::Empty) => {}
+                        Err(error) => edit.error = Some(error).filter(|error| error.message().is_some()),
                     }
                 }
                 "escape" => {
@@ -937,7 +936,7 @@ impl SidebarView {
                 }
                 _ => {
                     if field::edit(&mut edit.field, keystroke, cx) {
-                        edit.exists = false;
+                        edit.error = None;
                     }
                 }
             }
@@ -1285,24 +1284,20 @@ impl SidebarView {
                     this.drop_project(&dragged.root, before.as_deref(), cx);
                 }
             }))
-            // A project heading, and any row of a Gantry project, takes a pane, a split tab or an outside session: it
+            // A project heading, and any row of a Gantry project, takes a pane or a split tab: it
             // goes into that Gantry project (a folder heading takes it out of its Gantry project).
             .when_some(assign, |row, (project, heading)| {
                 let tint = rgba((theme.tokens.accent << 8) | 0x2e);
-                let (pane_to, tab_to, session_to) = (project.clone(), project.clone(), project);
+                let (pane_to, tab_to) = (project.clone(), project);
                 row.when(heading, |row| {
                     row.drag_over::<DraggedPane>(move |style, _, _, _| style.bg(tint))
                         .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(tint))
-                        .drag_over::<DraggedSession>(move |style, _, _, _| style.bg(tint))
                 })
                 .on_drop(cx.listener(move |this, dragged: &DraggedPane, _, cx| {
                     this.assign(Assign::Leaf(dragged.leaf), pane_to.clone(), cx)
                 }))
                 .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
                     this.assign(Assign::Tab(dragged.first), tab_to.clone(), cx)
-                }))
-                .on_drop(cx.listener(move |this, dragged: &DraggedSession, _, cx| {
-                    this.assign(Assign::Session(dragged.id.clone()), session_to.clone(), cx)
                 }))
             })
     }
@@ -1489,18 +1484,6 @@ impl SidebarView {
         };
         let base = base.when_some(dragged_pane, |base, dragged| {
             base.on_drag(dragged, |dragged: &DraggedPane, _offset, _window, cx: &mut App| cx.new(|_| dragged.clone()))
-        });
-        // A session running outside Gantry has no pane, but can be dropped on a project heading.
-        let dragged_session = match &row.kind {
-            RowKind::Session { session, leaf: None, .. } => {
-                Some(DraggedSession { id: session.id.clone(), title: session_title(session).to_string() })
-            }
-            _ => None,
-        };
-        let base = base.when_some(dragged_session, |base, dragged| {
-            base.on_drag(dragged, |dragged: &DraggedSession, _offset, _window, cx: &mut App| {
-                cx.new(|_| dragged.clone())
-            })
         });
         // A row listed under another project's tab heading names its own project.
         let project = || {
@@ -1840,11 +1823,13 @@ impl SidebarView {
                 div()
                     .pl(theme.ui(39.))
                     .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
                     .text_xs()
                     .italic()
                     .opacity(faded)
                     .text_color(rgb(theme.tokens.muted))
-                    .child("Empty. Drag a session here, or New Claude here."),
+                    .child("Empty. Drag a session here."),
             ),
             RowKind::Detail { text, .. } => base.child(
                 div()
@@ -1941,32 +1926,6 @@ struct DraggedTab {
 }
 
 impl Render for DraggedTab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = theme(cx);
-        div()
-            .px(theme.ui(12.))
-            .py(theme.ui(6.))
-            .rounded(px(RADIUS))
-            .border_1()
-            .border_color(rgb(theme.tokens.accent))
-            .bg(rgb(theme.tokens.raised))
-            .text_color(rgb(theme.tokens.text))
-            .text_sm()
-            .font_family(UI_FONT)
-            .font_weight(FontWeight::SEMIBOLD)
-            .child(self.title.clone())
-    }
-}
-
-/// A session running outside Gantry being dragged to a project heading.
-#[derive(Clone)]
-struct DraggedSession {
-    /// The session's id.
-    id: String,
-    title: String,
-}
-
-impl Render for DraggedSession {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
         div()
@@ -2329,39 +2288,46 @@ impl Render for SidebarView {
                         cx.listener(|this, dragged: &DraggedProject, _, cx| this.drop_project(&dragged.root, None, cx)),
                     )
                     // The name field of a project being made: an empty heading at the top of the list.
-                    .children(self.project_edit.as_ref().filter(|edit| edit.from.is_none()).map(|edit| {
-                        div()
-                            .flex_none()
-                            .flex()
-                            .flex_col()
-                            .mx(theme.ui(12.))
-                            .mb(theme.ui(4.))
-                            .child(
+                    .children(
+                        self.project_edit.as_ref().filter(|edit| edit.from.is_none() || edit.error.is_some()).map(
+                            |edit| {
                                 div()
-                                    .h(theme.ui(34.))
-                                    .px(theme.ui(10.))
+                                    .flex_none()
                                     .flex()
-                                    .items_center()
-                                    .gap(theme.ui(6.))
-                                    .rounded(px(RADIUS))
-                                    .border_1()
-                                    .border_color(rgb(theme.tokens.accent))
-                                    .child(
-                                        svg().path(LAYERS_ICON).size(theme.ui(14.)).text_color(rgb(theme.tokens.muted)),
-                                    )
-                                    .children(self.project_field(&theme, cx)),
-                            )
-                            .when(edit.exists, |card| {
-                                card.child(
-                                    div()
-                                        .px(theme.ui(10.))
-                                        .pt(theme.ui(2.))
-                                        .text_xs()
-                                        .text_color(rgb(theme.tokens.danger))
-                                        .child("A project with this name already exists"),
-                                )
-                            })
-                    }))
+                                    .flex_col()
+                                    .mx(theme.ui(12.))
+                                    .mb(theme.ui(4.))
+                                    .when(edit.from.is_none(), |card| {
+                                        card.child(
+                                            div()
+                                                .h(theme.ui(34.))
+                                                .px(theme.ui(10.))
+                                                .flex()
+                                                .items_center()
+                                                .gap(theme.ui(6.))
+                                                .rounded(px(RADIUS))
+                                                .border_1()
+                                                .border_color(rgb(theme.tokens.accent))
+                                                .child(
+                                                    svg()
+                                                        .path(LAYERS_ICON)
+                                                        .size(theme.ui(14.))
+                                                        .text_color(rgb(theme.tokens.muted)),
+                                                )
+                                                .children(self.project_field(&theme, cx)),
+                                        )
+                                    })
+                                    .children(edit.error.and_then(ProjectError::message).map(|message| {
+                                        div()
+                                            .px(theme.ui(10.))
+                                            .pt(theme.ui(2.))
+                                            .text_xs()
+                                            .text_color(rgb(theme.tokens.danger))
+                                            .child(message)
+                                    }))
+                            },
+                        ),
+                    )
                     .child(
                         uniform_list(
                             "session-rows",

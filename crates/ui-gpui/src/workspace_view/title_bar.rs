@@ -406,7 +406,7 @@ impl WorkspaceView {
         let marker = self.workspace.leaf_color(leaf).map(|tint| tint.value(theme.preset));
         let sidebar = self.sidebar.read(cx);
         let host = self.workspace.leaves.get(&leaf).map(|leaf| leaf.host.clone()).unwrap_or_default();
-        let gantry = self.workspace.leaves.get(&leaf).and_then(|leaf| leaf.project.clone());
+        let gantry = self.workspace.leaf_project(leaf).map(String::from);
         let project = cwd.as_deref().map(|cwd| {
             let root = sidebar.project_of(&host, cwd, gantry.as_deref());
             let label = sidebar.project_label(&root).unwrap_or_else(|| {

@@ -915,11 +915,14 @@ pub fn active<'a>(input: &'a ActiveInput<'a>, arrivals: &mut Arrivals, order: &m
         groups.push(Group { tab, project, place, first_title, members: Vec::new() });
     }
 
-    let mut fuzzy = Fuzzy::new(input.filter, entries.iter().map(|entry| keep_text(entry.title, entry.cwd, input.home)));
+    let mut fuzzy = Fuzzy::new(
+        input.filter,
+        entries.iter().map(|entry| keep_text(entry.title, entry.cwd, entry.gantry, input.home)),
+    );
     let filtering = fuzzy.is_some();
     let mut by_project: HashMap<PathBuf, Vec<Entry<'_>>> = HashMap::new();
     for entry in entries {
-        if !keep(&mut fuzzy, entry.title, entry.cwd, input.home) {
+        if !keep(&mut fuzzy, entry.title, entry.cwd, entry.gantry, input.home) {
             continue;
         }
         match leaf_of(&entry.key).and_then(|leaf| group_of.get(&leaf)) {
@@ -1269,14 +1272,23 @@ pub(crate) fn labels(paths: &[PathBuf], home: Option<&Path>, gantry: &[String]) 
         .collect()
 }
 
-/// Whether an entry passes the filter (matched against its title and displayed directory).
-pub(crate) fn keep(fuzzy: &mut Option<Fuzzy>, title: &str, cwd: &Path, home: Option<&Path>) -> bool {
-    fuzzy.as_mut().is_none_or(|fuzzy| fuzzy.score(&keep_text(title, cwd, home)).is_some())
+/// Whether an entry passes the filter (matched against its title, displayed directory and Gantry project name).
+pub(crate) fn keep(
+    fuzzy: &mut Option<Fuzzy>,
+    title: &str,
+    cwd: &Path,
+    gantry: Option<&str>,
+    home: Option<&Path>,
+) -> bool {
+    fuzzy.as_mut().is_none_or(|fuzzy| fuzzy.score(&keep_text(title, cwd, gantry, home)).is_some())
 }
 
-/// The text `keep` matches: the title and the displayed directory.
-pub(crate) fn keep_text(title: &str, cwd: &Path, home: Option<&Path>) -> String {
-    format!("{title} {}", display_path(cwd, home))
+/// The text `keep` matches: the title, the displayed directory and the Gantry project name, if any.
+pub(crate) fn keep_text(title: &str, cwd: &Path, gantry: Option<&str>, home: Option<&Path>) -> String {
+    match gantry {
+        Some(name) => format!("{title} {} {name}", display_path(cwd, home)),
+        None => format!("{title} {}", display_path(cwd, home)),
+    }
 }
 
 fn detail_text(session: &SessionInfo) -> Option<String> {
@@ -2429,6 +2441,16 @@ mod tests {
         // A filter hides it, like any project with nothing matching.
         fixture.filter = "zzz".into();
         assert!(fixture.outline().is_empty());
+    }
+
+    #[test]
+    fn the_filter_matches_a_gantry_project_name() {
+        let mut fixture = Fixture::of(vec![], vec![gantry_pane(1, "/r/alpha", "Billing"), shell_pane(2, "/r/beta")]);
+        fixture.gantry_projects = vec!["Billing".into()];
+        fixture.filter = "billing".into();
+        let rows = fixture.rows();
+        assert!(find(&rows, &RowKey::Leaf(1)).is_some());
+        assert!(find(&rows, &RowKey::Leaf(2)).is_none());
     }
 
     #[test]

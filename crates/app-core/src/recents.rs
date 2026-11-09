@@ -128,8 +128,9 @@ impl Prefs {
         self.reverse = false;
     }
 
-    /// Select only the project `key` (the other facets stay as they are).
+    /// Select only the project `key`: every other filter is cleared (the sort stays).
     pub fn only_project(&mut self, key: String) {
+        self.clear_all();
         self.projects = HashSet::from([key]);
     }
 }
@@ -292,6 +293,7 @@ pub fn items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
                     .to_lowercase()
                     .cmp(&session_title(b.session).to_lowercase())
                     .then_with(|| a.session.id.cmp(&b.session.id))
+                    .then_with(|| a.session.host.name().cmp(b.session.host.name()))
             });
             if input.prefs.reverse {
                 rows.reverse();
@@ -328,7 +330,7 @@ pub fn items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
 }
 
 fn newest(a: &SessionInfo, b: &SessionInfo) -> std::cmp::Ordering {
-    b.last_active_ms.cmp(&a.last_active_ms).then_with(|| a.id.cmp(&b.id))
+    b.last_active_ms.cmp(&a.last_active_ms).then_with(|| a.id.cmp(&b.id)).then_with(|| a.host.name().cmp(b.host.name()))
 }
 
 /// The search's words: lowercase runs of letters and digits ("rust_terminal" is two).
@@ -462,9 +464,30 @@ fn is_open(input: &RecentsInput<'_>, session: &SessionInfo) -> bool {
     input.open.contains(&(session.host.clone(), session.id.clone()))
 }
 
-/// Sessions in the list (after the search and the filters), and all closed sessions the pop-up could list.
+/// Sessions in the list (after the search and the filters), and all the pop-up could list: the closed sessions and the
+/// open ones found in their conversation.
 pub fn counts(input: &RecentsInput<'_>) -> (usize, usize) {
-    (listed(input, None).len(), closed_sessions(input).len())
+    let hits: &[SearchHit] = if searching_content(input) { input.hits } else { &[] };
+    let found: HashSet<(&HostId, &str)> = hits.iter().map(|hit| (&hit.host, hit.session_id.as_str())).collect();
+    let open_hits: HashSet<(&HostId, &str)> = input
+        .sessions
+        .iter()
+        .filter(|s| is_open(input, s) && found.contains(&(&s.host, s.id.as_str())))
+        .map(|s| (&s.host, s.id.as_str()))
+        .collect();
+    (listed(input, None).len(), closed_sessions(input).len() + open_hits.len())
+}
+
+/// What the list area says when no session is listed: a title and a line, or `None` while the conversation search
+/// has not answered yet.
+pub fn empty_state(input: &RecentsInput<'_>) -> Option<(&'static str, &'static str)> {
+    if closed_sessions(input).is_empty() && input.query.trim().is_empty() && !input.prefs.is_filtering() {
+        return Some(("No closed sessions yet.", "Sessions you close show up here."));
+    }
+    if searching_content(input) && input.content == ContentState::Waiting {
+        return None;
+    }
+    Some(("No sessions match.", "Clear a filter or change the search."))
 }
 
 /// How many values a filter section shows before "More…".
@@ -681,6 +704,16 @@ mod tests {
                     RecentItem::Session { session, .. } => session.id.clone(),
                 })
                 .collect()
+        }
+
+        fn sorted_clone(&self, sort: Sort) -> Fixture {
+            Fixture {
+                sessions: self.sessions.clone(),
+                open: self.open.clone(),
+                prefs: self.prefs.clone(),
+                ..Fixture::default()
+            }
+            .sorted(sort)
         }
 
         fn sorted(mut self, sort: Sort) -> Fixture {
@@ -1164,13 +1197,72 @@ mod tests {
     }
 
     #[test]
-    fn only_project_replaces_the_project_selection_only() {
+    fn only_project_clears_every_other_filter() {
         let mut prefs = Prefs::default();
         prefs.toggle(Facet::Project, "/r/a");
         prefs.toggle(Facet::Host, "devbox");
+        prefs.toggle(Facet::Dir, "Work");
         prefs.only_project("/r/b".into());
         assert_eq!(prefs.selected(Facet::Project).iter().collect::<Vec<_>>(), ["/r/b"]);
-        assert!(prefs.selected(Facet::Host).contains("devbox"));
+        assert!(prefs.selected(Facet::Host).is_empty());
+        assert!(prefs.selected(Facet::Dir).is_empty());
+    }
+
+    #[test]
+    fn the_count_never_exceeds_its_total() {
+        let mut open = closed("open", "/r/a", 1);
+        open.state = SessionState::Managed { pane: 2 };
+        let mut fixture = Fixture::of(vec![
+            titled("c1", "sound one", "/r/a", 1),
+            titled("c2", "sound two", "/r/a", 2),
+            titled("c3", "sound three", "/r/a", 3),
+            open,
+        ]);
+        fixture.open.insert((HostId::local(), "open".into()));
+        fixture.query = "sound".into();
+        fixture.hits = vec![hit("open", "sound", vec![])];
+        fixture.content = ContentState::Ready;
+        let (matching, total) = fixture.with(counts);
+        assert_eq!(matching, 4);
+        assert!(matching <= total, "{matching} of {total}");
+    }
+
+    #[test]
+    fn the_same_session_on_two_hosts_keeps_one_order() {
+        let remote = SessionInfo { host: HostId::named("devbox"), ..closed("same", "/r/a", 1) };
+        let hosts = |fixture: &Fixture| -> Vec<String> {
+            fixture
+                .with(items)
+                .iter()
+                .filter_map(|item| match item {
+                    RecentItem::Session { session, .. } => Some(session.host.name().to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let one = Fixture::of(vec![closed("same", "/r/a", 1), remote.clone()]);
+        let other = Fixture::of(vec![remote, closed("same", "/r/a", 1)]);
+        for sort in [Sort::Recent, Sort::Name, Sort::Project] {
+            assert_eq!(hosts(&one.sorted_clone(sort)), hosts(&other.sorted_clone(sort)), "{sort:?}");
+        }
+    }
+
+    #[test]
+    fn the_empty_state_says_why_nothing_is_listed() {
+        let mut fixture = Fixture::of(Vec::new());
+        assert_eq!(fixture.with(empty_state), Some(("No closed sessions yet.", "Sessions you close show up here.")));
+        fixture.sessions = vec![closed("a1", "/r/a", 1), closed("b1", "/r/b", 2)];
+        fixture.query = "zzz".into();
+        fixture.content = ContentState::Ready;
+        assert_eq!(fixture.with(empty_state).map(|(title, _)| title), Some("No sessions match."));
+        fixture.content = ContentState::Waiting;
+        fixture.query = "zzz".into();
+        assert_eq!(fixture.with(empty_state), None, "nothing until the conversation search answers");
+        fixture.content = ContentState::Ready;
+        fixture.query = String::new();
+        fixture.prefs.toggle(Facet::Project, "/r/a");
+        fixture.prefs.toggle(Facet::Host, "nowhere");
+        assert_eq!(fixture.with(empty_state).map(|(title, _)| title), Some("No sessions match."));
     }
 
     #[test]

@@ -94,6 +94,8 @@ pub struct RecentsView {
     sections: Vec<FilterSection>,
     more: Option<More>,
     counts: (usize, usize),
+    /// What the list area says while no session is listed (`None` = nothing yet).
+    empty: Option<(&'static str, &'static str)>,
     selected: usize,
     list_state: ListState,
     /// The last conversation search sent (0 = none).
@@ -146,6 +148,7 @@ impl RecentsView {
             sections: Vec::new(),
             more: None,
             counts: (0, 0),
+            empty: None,
             selected: 0,
             list_state: ListState::new(0, ListAlignment::Top, px(200.)),
             request: 0,
@@ -178,7 +181,7 @@ impl RecentsView {
         };
         let mut prefs = self.prefs.clone();
         // A selection the sidebar no longer offers is dropped first, so no filter narrows the list unseen.
-        let (items, sections, counts) = loop {
+        let (items, sections, counts, empty) = loop {
             let input = RecentsInput {
                 sessions: &sessions,
                 open: &self.open,
@@ -193,7 +196,12 @@ impl RecentsView {
             };
             let pruned = recents::prune(&input);
             if pruned == prefs {
-                break (recents::items(&input), recents::filter_sections(&input), recents::counts(&input));
+                break (
+                    recents::items(&input),
+                    recents::filter_sections(&input),
+                    recents::counts(&input),
+                    recents::empty_state(&input),
+                );
             }
             prefs = pruned;
         };
@@ -201,6 +209,13 @@ impl RecentsView {
         self.items = items;
         self.sections = sections;
         self.counts = counts;
+        self.empty = empty;
+        // A "More…" popup whose section no longer has hidden values has nothing left to show.
+        if let Some(more) = &self.more
+            && !self.sections.iter().any(|section| section.facet == more.facet && !section.more.is_empty())
+        {
+            self.more = None;
+        }
         cx.set_global(RecentsPrefs(self.prefs.clone()));
     }
 
@@ -924,10 +939,15 @@ impl RecentsView {
             .justify_center()
             .gap_2()
             .text_color(rgb(theme.tokens.muted))
-            .child(
-                div().text_color(rgb(theme.tokens.text)).font_weight(FontWeight::SEMIBOLD).child("No sessions match."),
-            )
-            .child(div().text_xs().child("Clear a filter or change the search."))
+            .children(self.empty.map(|(title, hint)| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_color(rgb(theme.tokens.text)).font_weight(FontWeight::SEMIBOLD).child(title))
+                    .child(div().text_xs().child(hint))
+            }))
             .children(notes)
             .when(self.prefs.is_filtering(), |empty| {
                 empty.child(

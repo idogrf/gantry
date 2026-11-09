@@ -1278,12 +1278,17 @@ impl SidebarView {
                 .map(|label| div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(label))
         };
         match &row.kind {
-            RowKind::Project { path, label, expanded, urgent } => {
+            RowKind::Project { path, label, expanded, urgent, working } => {
                 let dot = urgent.map_or(theme.tokens.muted, |tone| {
                     let colors = theme.tone(tone);
                     colors.fill.unwrap_or(colors.dot)
                 });
-                let pulsing = urgent.is_some_and(|tone| sweeping(tone, self.animate, true));
+                // The aura says a session in the project is working, whatever color the dot is; the dot itself
+                // pulses only when it is the working blue.
+                let working_colors = theme.tone(Tone::Working);
+                let aura = working_colors.fill.unwrap_or(working_colors.dot);
+                let aura_shown = *working && sweeping(Tone::Working, self.animate, true);
+                let pulsing = *urgent == Some(Tone::Working) && aura_shown;
                 let color = theme.project(path);
                 let dragged = DraggedProject { root: path.clone(), label: label.clone() };
                 // The hairline needs room: with less than `MIN_RULE` left between the name and the dot it is not drawn
@@ -1337,7 +1342,7 @@ impl SidebarView {
                                     .opacity(faded)
                                     .text_color(rgb(theme.tokens.muted)),
                             )
-                            .when(pulsing, |pill| {
+                            .when(aura_shown, |pill| {
                                 // The aura: a circle painted straight to the window (not a laid-out box, which GPUI
                                 // snaps to whole pixels), so it grows and fades smoothly around the dot's center.
                                 let (dot_size, reach) = (f32::from(theme.ui(8.)), f32::from(theme.ui(8.)));
@@ -1365,7 +1370,7 @@ impl SidebarView {
                                                                     * (1.
                                                                         - AURA_FEATHER * layer as f32
                                                                             / AURA_LAYERS as f32));
-                                                                let mut color: Hsla = rgb(dot).into();
+                                                                let mut color: Hsla = rgb(aura).into();
                                                                 color.a = alpha / (AURA_LAYERS - 1) as f32;
                                                                 window.paint_quad(
                                                                     fill(

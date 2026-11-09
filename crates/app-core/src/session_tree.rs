@@ -400,6 +400,8 @@ pub enum RowKind {
         expanded: bool,
         /// The most urgent tone among its sessions (`None` = nothing needs attention), whether or not it is expanded.
         urgent: Option<Tone>,
+        /// A session in it is working, whether or not it is expanded and whatever `urgent` says.
+        working: bool,
     },
     /// A Claude session (in a pane of the layout, or running outside Gantry).
     Session {
@@ -580,14 +582,14 @@ pub fn leaf_tone(status: Option<&SessionStatus>, unseen: Unseen, offline: bool) 
     if offline { Some(Tone::Closed) } else { status.map(|status| status_tone(Some(status), unseen)) }
 }
 
-/// The tone a project's dot shows: the most urgent of `tones` (needs input, then done, unread, working), `None`
+/// The tone a project's dot shows: the most urgent of `tones` (needs input, then done, working, unread), `None`
 /// when none of them needs a color.
 pub fn most_urgent(tones: impl IntoIterator<Item = Tone>) -> Option<Tone> {
     let rank = |tone: Tone| match tone {
         Tone::NeedsInput => Some(4),
         Tone::Done => Some(3),
-        Tone::Unread => Some(2),
-        Tone::Working => Some(1),
+        Tone::Working => Some(2),
+        Tone::Unread => Some(1),
         Tone::Idle | Tone::Elsewhere | Tone::Closed => None,
     };
     tones
@@ -840,12 +842,17 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
             }
         }
         let expanded = filtering || !input.toggled.contains(&path);
-        let urgent = most_urgent(rendered.iter().filter_map(|row| match &row.kind {
-            RowKind::Session { tone, .. } | RowKind::Pane { tone, .. } => Some(*tone),
-            _ => None,
-        }));
+        let tones: Vec<Tone> = rendered
+            .iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::Session { tone, .. } | RowKind::Pane { tone, .. } => Some(*tone),
+                _ => None,
+            })
+            .collect();
+        let urgent = most_urgent(tones.iter().copied());
+        let working = tones.contains(&Tone::Working);
         let mut heading =
-            Row::new(RowKind::Project { label: labels[&path].clone(), path: path.clone(), expanded, urgent });
+            Row::new(RowKind::Project { label: labels[&path].clone(), path: path.clone(), expanded, urgent, working });
         heading.project = Some(path);
         rows.push(heading);
         if expanded {
@@ -1110,7 +1117,8 @@ mod tests {
         use Tone::*;
         assert_eq!(most_urgent([Idle, Working, NeedsInput, Done]), Some(NeedsInput));
         assert_eq!(most_urgent([Working, Unread, Done]), Some(Done));
-        assert_eq!(most_urgent([Idle, Working, Unread]), Some(Unread));
+        assert_eq!(most_urgent([Idle, Working, Unread]), Some(Working));
+        assert_eq!(most_urgent([Idle, Unread, Closed]), Some(Unread));
         assert_eq!(most_urgent([Closed, Working, Elsewhere]), Some(Working));
         assert_eq!(most_urgent([Idle, Closed, Elsewhere]), None);
         assert_eq!(most_urgent([]), None);
@@ -1230,6 +1238,29 @@ mod tests {
                 })
                 .collect()
         }
+    }
+
+    #[test]
+    fn a_project_is_working_whenever_one_of_its_sessions_is_whatever_its_dot_shows() {
+        let mut fixture = Fixture::of(
+            vec![
+                with(managed("w", "/r/app", NOW - 60_000), SessionStatus::Busy),
+                with(session("d", "/r/app", SessionState::Managed { pane: 2 }, NOW - 90_000), SessionStatus::Idle),
+                with(session("i", "/r/web", SessionState::Managed { pane: 3 }, NOW - 90_000), SessionStatus::Idle),
+            ],
+            vec![pane(1, "/r/app", Some("w")), pane(2, "/r/app", Some("d")), pane(3, "/r/web", Some("i"))],
+        );
+        fixture.unseen.insert("d".into());
+        let projects: Vec<(String, Option<Tone>, bool)> = fixture
+            .rows()
+            .into_iter()
+            .filter_map(|row| match row.kind {
+                RowKind::Project { label, urgent, working, .. } => Some((label, urgent, working)),
+                _ => None,
+            })
+            .collect();
+        assert!(projects.contains(&("app".into(), Some(Tone::Done), true)));
+        assert!(projects.contains(&("web".into(), None, false)));
     }
 
     #[test]

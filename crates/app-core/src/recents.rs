@@ -467,6 +467,110 @@ pub fn counts(input: &RecentsInput<'_>) -> (usize, usize) {
     (listed(input, None).len(), closed_sessions(input).len())
 }
 
+/// How many values a filter section shows before "More…".
+pub const SHOWN_PER_FILTER: usize = 5;
+
+/// One value of a filter: a project, a host or a config dir.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilterValue {
+    /// What `Prefs` stores when it is selected.
+    pub key: String,
+    /// Its text.
+    pub label: String,
+    /// The project it stands for (`None` for a host or a config dir), for the project's color.
+    pub project: Option<PathBuf>,
+    /// Sessions that have this value and pass the search and the other sections' selections.
+    pub count: usize,
+    /// Whether it is selected.
+    pub selected: bool,
+}
+
+/// One section of the sidebar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilterSection {
+    /// What it filters by.
+    pub facet: Facet,
+    /// The first [`SHOWN_PER_FILTER`] values, those with the newest sessions first.
+    pub shown: Vec<FilterValue>,
+    /// The others, in the same order (under "More…").
+    pub more: Vec<FilterValue>,
+}
+
+/// The sidebar's sections: every facet that has at least two values among the closed sessions. Values are ordered by
+/// their newest session (ties by label), so the order does not move while searching or ticking.
+pub fn filter_sections(input: &RecentsInput<'_>) -> Vec<FilterSection> {
+    let closed = closed_sessions(input);
+    Facet::ALL
+        .into_iter()
+        .filter_map(|facet| {
+            // key -> (newest session's time, the project)
+            let mut found: HashMap<String, (u64, PathBuf)> = HashMap::new();
+            for session in &closed {
+                if let Some(key) = key_of(input, facet, session) {
+                    let project = (input.project_of)(&session.host, &session.cwd);
+                    let entry = found.entry(key).or_insert((0, project));
+                    entry.0 = entry.0.max(session.last_active_ms);
+                }
+            }
+            if found.len() < 2 {
+                return None;
+            }
+            let paths: Vec<PathBuf> = found.values().map(|(_, project)| project.clone()).collect();
+            let project_labels = labels(&paths, input.home);
+            let mut counted: HashMap<String, usize> = HashMap::new();
+            for row in listed(input, Some(facet)) {
+                if let Some(key) = key_of(input, facet, row.session) {
+                    *counted.entry(key).or_default() += 1;
+                }
+            }
+            let mut values: Vec<(u64, FilterValue)> = found
+                .into_iter()
+                .map(|(key, (newest, project))| {
+                    let label = match facet {
+                        Facet::Project => project_labels[&project].clone(),
+                        Facet::Host if key == HostId::local().name() => "This machine".to_string(),
+                        Facet::Host | Facet::Dir => key.clone(),
+                    };
+                    let value = FilterValue {
+                        count: counted.get(&key).copied().unwrap_or(0),
+                        selected: input.prefs.selected(facet).contains(&key),
+                        project: (facet == Facet::Project).then_some(project),
+                        label,
+                        key,
+                    };
+                    (newest, value)
+                })
+                .collect();
+            values.sort_by(|(a_newest, a), (b_newest, b)| b_newest.cmp(a_newest).then_with(|| a.label.cmp(&b.label)));
+            let mut shown: Vec<FilterValue> = values.into_iter().map(|(_, value)| value).collect();
+            let more = shown.split_off(SHOWN_PER_FILTER.min(shown.len()));
+            Some(FilterSection { facet, shown, more })
+        })
+        .collect()
+}
+
+/// `input.prefs` without the selections that match nothing the sidebar offers: a value that no longer exists, or a
+/// whole section that is left out (fewer than two values). Without this a filter could narrow the list with no control
+/// left to clear it.
+pub fn prune(input: &RecentsInput<'_>) -> Prefs {
+    let sections = filter_sections(input);
+    let mut prefs = input.prefs.clone();
+    for facet in Facet::ALL {
+        let offered: HashSet<&str> = sections
+            .iter()
+            .filter(|section| section.facet == facet)
+            .flat_map(|section| section.shown.iter().chain(&section.more))
+            .map(|value| value.key.as_str())
+            .collect();
+        let gone: Vec<String> =
+            prefs.selected(facet).iter().filter(|key| !offered.contains(key.as_str())).cloned().collect();
+        for key in gone {
+            prefs.toggle(facet, &key);
+        }
+    }
+    prefs
+}
+
 /// The sessions the pop-up lists: those of this machine and of the hosts `connected` says are.
 pub fn listed_sessions<'a>(
     sessions: impl Iterator<Item = &'a SessionInfo>,
@@ -927,6 +1031,95 @@ mod tests {
         assert_eq!(fixture.outline(), ids(&["remote", "local"]));
         fixture.prefs.toggle(Facet::Dir, "Default");
         assert_eq!(fixture.outline(), ids(&["local"]));
+    }
+
+    fn section(fixture: &Fixture, facet: Facet) -> Option<FilterSection> {
+        fixture.with(filter_sections).into_iter().find(|section| section.facet == facet)
+    }
+
+    fn shown(section: &FilterSection) -> Vec<String> {
+        section.shown.iter().map(|value| format!("{} {}", value.label, value.count)).collect()
+    }
+
+    #[test]
+    fn the_five_values_with_the_newest_sessions_are_shown_the_rest_are_more() {
+        let sessions: Vec<SessionInfo> = (0..7).map(|i| closed(&format!("s{i}"), &format!("/r/p{i}"), i + 1)).collect();
+        let fixture = Fixture::of(sessions);
+        let projects = section(&fixture, Facet::Project).expect("seven projects");
+        assert_eq!(shown(&projects), ["p0 1", "p1 1", "p2 1", "p3 1", "p4 1"]);
+        assert_eq!(projects.more.iter().map(|v| v.label.as_str()).collect::<Vec<_>>(), ["p5", "p6"]);
+        assert!(section(&fixture, Facet::Host).is_none(), "one host is not worth a filter");
+        assert!(section(&fixture, Facet::Dir).is_none(), "no config dirs");
+    }
+
+    #[test]
+    fn a_section_with_one_value_is_left_out() {
+        let fixture = Fixture::of(vec![closed("a", "/r/a", 1), closed("b", "/r/a", 2)]);
+        assert!(fixture.with(filter_sections).is_empty());
+    }
+
+    #[test]
+    fn counts_follow_the_search_and_the_other_sections() {
+        let devbox = HostId::named("devbox");
+        let remote = SessionInfo { host: devbox.clone(), ..closed("b-dev", "/r/b", 3) };
+        let mut fixture = Fixture::of(vec![closed("a1", "/r/a", 1), closed("a2", "/r/a", 2), remote]);
+        assert_eq!(shown(&section(&fixture, Facet::Project).unwrap()), ["a 2", "devbox - b 1"]);
+        fixture.prefs.toggle(Facet::Host, "devbox");
+        assert_eq!(
+            shown(&section(&fixture, Facet::Project).unwrap()),
+            ["a 0", "devbox - b 1"],
+            "the host narrows projects"
+        );
+        assert_eq!(
+            shown(&section(&fixture, Facet::Host).unwrap()),
+            ["This machine 2", "devbox 1"],
+            "its own selection does not"
+        );
+        assert!(section(&fixture, Facet::Host).unwrap().shown[1].selected);
+        fixture.query = "a1".into();
+        assert_eq!(
+            shown(&section(&fixture, Facet::Host).unwrap()),
+            ["This machine 1", "devbox 0"],
+            "the search narrows"
+        );
+    }
+
+    #[test]
+    fn project_values_of_two_hosts_are_separate_and_labelled_with_the_host() {
+        let remote = SessionInfo { host: HostId::named("devbox"), ..closed("r", "/r/app", 2) };
+        let fixture = Fixture::of(vec![closed("l", "/r/app", 1), remote]);
+        assert_eq!(shown(&section(&fixture, Facet::Project).unwrap()), ["app 1", "devbox - app 1"]);
+    }
+
+    #[test]
+    fn prune_drops_values_that_no_longer_exist() {
+        let remote = SessionInfo { host: HostId::named("devbox"), ..closed("r", "/r/b", 2) };
+        let mut fixture = Fixture::of(vec![closed("l", "/r/a", 1), remote]);
+        fixture.prefs.toggle(Facet::Project, "/r/gone");
+        fixture.prefs.toggle(Facet::Host, "devbox");
+        let pruned = fixture.with(prune);
+        assert!(pruned.selected(Facet::Project).is_empty());
+        assert!(pruned.selected(Facet::Host).contains("devbox"));
+    }
+
+    #[test]
+    fn prune_drops_a_selection_in_a_section_that_is_left_out() {
+        let mut fixture = Fixture::of(vec![closed("a", "/r/a", 1), closed("b", "/r/b", 2)]);
+        fixture.prefs.toggle(Facet::Host, "devbox");
+        fixture.prefs.toggle(Facet::Dir, "Work");
+        fixture.prefs.set_sort(Sort::Name);
+        let pruned = fixture.with(prune);
+        assert!(!pruned.is_filtering(), "no filter stays active without a control to clear it");
+        assert_eq!(pruned.sort, Sort::Name);
+    }
+
+    #[test]
+    fn no_match_with_filters_leaves_counts_zero_of_total() {
+        let mut fixture = Fixture::of(vec![closed("a", "/r/a", 1), closed("b", "/r/b", 2)]);
+        fixture.prefs.toggle(Facet::Project, &key(&HostId::local(), "/r/a"));
+        fixture.query = "title b".into();
+        assert!(fixture.outline().is_empty());
+        assert_eq!(fixture.with(counts), (0, 2));
     }
 
     #[test]

@@ -214,8 +214,9 @@ pub fn delete_project(name: &str, running: usize) -> DialogSpec {
     spec(
         format!("Delete project {name}?"),
         Some(format!(
-            "{running} {} running in it will be stopped and closed. You can resume Claude conversations later from Recent sessions.",
-            if running == 1 { "session is" } else { "sessions are" }
+            "{running} {} running in it. {} will be stopped and closed. You can resume Claude conversations later from Recent sessions.",
+            if running == 1 { "session is" } else { "sessions are" },
+            if running == 1 { "It" } else { "They" }
         )),
         Layout::Pills,
         vec![
@@ -502,8 +503,14 @@ mod tests {
     fn delete_dialog_copy_mentions_the_count() {
         let one = delete_project("Billing", 1);
         assert_eq!(one.title, "Delete project Billing?");
-        assert!(one.detail.as_deref().unwrap().starts_with("1 session is running"));
-        assert!(delete_project("Billing", 3).detail.as_deref().unwrap().starts_with("3 sessions are running"));
+        assert!(one.detail.as_deref().unwrap().starts_with("1 session is running in it. It will be stopped"));
+        assert!(
+            delete_project("Billing", 3)
+                .detail
+                .as_deref()
+                .unwrap()
+                .starts_with("3 sessions are running in it. They will be stopped")
+        );
         assert_eq!(labels(&one), ["Stop and delete", "Cancel"]);
         assert_eq!(one.escape, 1);
     }

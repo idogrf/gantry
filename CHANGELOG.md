@@ -7,7 +7,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 - **Gantry projects** - Make your own projects, independent of any folder, and drag sessions into them.
-  - Add one with the layers button beside the sidebar filter. Rename or delete it from the heading.
+  - Add one with the new project button beside the sidebar filter. Rename or delete it from the heading.
   - Drag a pane or a split tab onto a project to move it in. Drag it back to its folder, or use "Remove from project", to take it out.
   - "New Claude here" and "New terminal here" on the heading start a session in the project.
   - Closed sessions keep their project in Recent sessions.

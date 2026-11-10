@@ -25,7 +25,7 @@ header: working, idle, needs input, done. Working rows glow.
 
 ### Gantry projects
 
-Group sessions your own way, whatever folder they run in. Make a project with the layers button beside the filter,
+Group sessions your own way, whatever folder they run in. Make a project with the new project button beside the filter,
 drag sessions into it, and start new ones there from its heading.
 
 <p align="center"><img src="docs/images/gantry-project.png" alt="A Gantry project called Bug bash, holding sessions from two folders" width="560"></p>

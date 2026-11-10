@@ -5,6 +5,8 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-10
+
 ### Added
 - **Gantry projects** - Make your own projects, independent of any folder, and drag sessions into them.
   - Add one with the new project button beside the sidebar filter. Rename or delete it from the heading.

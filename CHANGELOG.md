@@ -5,6 +5,22 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-10
+
+### Added
+- **Gantry projects** - Make your own projects, independent of any folder, and drag sessions into them.
+  - Add one with the new project button beside the sidebar filter. Rename or delete it from the heading.
+  - Drag a pane or a split tab onto a project to move it in. Drag it back to its folder, or use "Remove from project", to take it out.
+  - "New Claude here" and "New terminal here" on the heading start a session in the project.
+  - Closed sessions keep their project in Recent sessions.
+- **Sort and filter recent sessions** - The Recent sessions pop-up (`Ctrl+Shift+R`) can sort by recency, name or project, and filter by project, host and config dir.
+
+### Changed
+- **Project status at a glance** - The dot on a project heading is now a pill in the color of its most urgent session.
+
+### Fixed
+- **Unread marks are kept** - A session you marked as unread is still marked after Gantry restarts.
+
 ## [0.13.0] - 2026-11-03
 
 ### Added

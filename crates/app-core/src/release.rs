@@ -1,5 +1,7 @@
 //! GitHub releases: which published releases are newer than this Gantry, and the release notes as drawable blocks.
 
+use std::time::{Duration, SystemTime};
+
 use crate::version::Version;
 
 /// Release links Gantry may open.
@@ -7,6 +9,21 @@ pub const URL_PREFIX: &str = "https://github.com/idogrf/gantry/";
 
 /// Most characters of one release's notes that are kept.
 pub const NOTES_CAP: usize = 20_000;
+
+/// How long a good check stays fresh before the next one is due.
+pub const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Whether a release check is due: none has succeeded yet, or the last one is at least [`CHECK_EVERY`] old. Wall-clock
+/// time, so the hours a laptop spent asleep count; a clock set back before the last check counts as due.
+pub fn due(last: Option<SystemTime>, now: SystemTime) -> bool {
+    match last {
+        None => true,
+        Some(last) => match now.duration_since(last) {
+            Ok(age) => age >= CHECK_EVERY,
+            Err(_) => true,
+        },
+    }
+}
 
 /// A published release.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -239,6 +256,17 @@ mod tests {
             {"tag_name":"nightly","draft":false,"prerelease":false},
             {"tag_name":"0.7.0","draft":false,"prerelease":false}]"#;
         assert!(parse_releases(list).is_empty());
+    }
+
+    #[test]
+    fn a_check_is_due_when_none_succeeded_or_the_last_one_is_old() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10 * 24 * 3600);
+        assert!(due(None, now));
+        assert!(!due(Some(now), now));
+        assert!(!due(Some(now - CHECK_EVERY + Duration::from_secs(1)), now));
+        assert!(due(Some(now - CHECK_EVERY), now));
+        // A clock set back before the last check: ask again.
+        assert!(due(Some(now + Duration::from_secs(60)), now));
     }
 
     #[test]

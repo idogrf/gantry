@@ -10,6 +10,7 @@ use protocol::host::{HostId, project_key, split_project_key};
 use protocol::message::SessionInfo;
 
 use crate::fuzzy::Fuzzy;
+use crate::gantry_project::{self, Membership};
 use crate::session_tree::{Tone, display_path};
 
 /// A pane of the workspace, as the launcher sees it.
@@ -166,6 +167,28 @@ pub fn recent_folders(
         b.last_active_ms.cmp(&a.last_active_ms).then_with(|| (&a.host, &a.path).cmp(&(&b.host, &b.path)))
     });
     folders
+}
+
+/// The folder the sessions and panes of the Gantry project `project` most recently ran in: the newest listed session
+/// in it whose folder exists, else the last of `leaves` (host, folder, project) in it.
+pub fn last_folder_of(
+    project: &str,
+    sessions: &[&SessionInfo],
+    membership: &Membership,
+    leaves: &[(HostId, PathBuf, Option<String>)],
+) -> Option<(HostId, PathBuf)> {
+    let newest = sessions
+        .iter()
+        .filter(|session| session.cwd_exists)
+        .filter(|session| membership.sessions.get(&session.id).is_some_and(|name| gantry_project::same(name, project)))
+        .max_by_key(|session| session.last_active_ms);
+    newest.map(|session| (session.host.clone(), session.cwd.clone())).or_else(|| {
+        leaves
+            .iter()
+            .rev()
+            .find(|(_, _, name)| name.as_deref().is_some_and(|name| gantry_project::same(name, project)))
+            .map(|(host, folder, _)| (host.clone(), folder.clone()))
+    })
 }
 
 /// What the typed text means.
@@ -513,5 +536,31 @@ mod tests {
     fn favorite_keys_per_host() {
         assert_eq!(favorite_key(&devbox(), Path::new("/work")), PathBuf::from("ssh://devbox/work"));
         assert_eq!(favorite_key(&local(), Path::new("/a")), PathBuf::from("/a"));
+    }
+
+    #[test]
+    fn last_folder_of_picks_the_most_recent_session_folder() {
+        let local = HostId::local();
+        let devbox = HostId::named("devbox");
+        let (mut a, mut b, mut c) =
+            (info(&local, "/a", 5, true), info(&devbox, "/b", 9, true), info(&local, "/c", 20, true));
+        let mut gone = info(&local, "/gone", 30, false);
+        for (session, id) in [(&mut a, "a"), (&mut b, "b"), (&mut c, "c"), (&mut gone, "gone")] {
+            session.id = id.into();
+        }
+        let mut membership = Membership::default();
+        for id in ["a", "b", "gone"] {
+            membership.sessions.insert(id.into(), "Billing".into());
+        }
+        let sessions = [&a, &b, &c, &gone];
+        assert_eq!(last_folder_of("billing", &sessions, &membership, &[]), Some((devbox.clone(), PathBuf::from("/b"))));
+        // Without a listed session the newest leaf of the project is used.
+        let leaves = vec![
+            (local.clone(), PathBuf::from("/x"), Some("Billing".to_string())),
+            (devbox.clone(), PathBuf::from("/y"), Some("Billing".to_string())),
+            (local.clone(), PathBuf::from("/z"), None),
+        ];
+        assert_eq!(last_folder_of("Billing", &[], &membership, &leaves), Some((devbox, PathBuf::from("/y"))));
+        assert_eq!(last_folder_of("Other", &sessions, &membership, &leaves), None);
     }
 }

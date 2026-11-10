@@ -115,7 +115,8 @@ impl WorkspaceView {
                     Some(TakeOverTarget::NewPane { cwd, split, container }) => {
                         let axis = (split && self.workspace.can_split()).then_some(Axis::Horizontal);
                         let launch = self.resume_launch(&host, &session, cwd, container, cx);
-                        self.open_launch(launch, axis, None, host, window, cx);
+                        let project = self.workspace.resume_project_for(&session);
+                        self.open_launch(launch, axis, None, host, project, window, cx);
                     }
                     Some(TakeOverTarget::Leaf(leaf)) => {
                         let session_dir = self
@@ -198,7 +199,8 @@ impl WorkspaceView {
                     place => {
                         let container = place.and_then(|place| place.host_folder);
                         let launch = self.resume_launch(&host, &session, cwd, container, cx);
-                        self.open_launch(launch, axis, None, host, window, cx);
+                        let project = self.workspace.resume_project_for(&session);
+                        self.open_launch(launch, axis, None, host, project, window, cx);
                     }
                 }
             }

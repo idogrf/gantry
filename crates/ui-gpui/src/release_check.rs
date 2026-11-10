@@ -1,4 +1,4 @@
-//! The daily check for a newer release: one blocking GET of GitHub's releases list, with the last `ETag`.
+//! The check for a newer release: one blocking GET of GitHub's releases list, with the last `ETag`.
 
 use std::time::Duration;
 
@@ -14,8 +14,9 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// Wait after the window opens before the first check.
 pub(crate) const FIRST_DELAY: Duration = Duration::from_secs(30);
 
-/// Time between checks.
-pub(crate) const INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// How often the timer asks `app_core::release::due` whether a check is due. Short, so a laptop that was asleep checks
+/// soon after it wakes; the check itself runs once per `release::CHECK_EVERY`.
+pub(crate) const TICK: Duration = Duration::from_secs(5 * 60);
 
 /// What the Settings "Check now" row shows; the workspace keeps it current.
 #[derive(Clone, Debug, PartialEq, Eq)]

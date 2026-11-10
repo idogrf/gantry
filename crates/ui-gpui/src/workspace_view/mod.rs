@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use app_core::attention::{AlertKind, AttentionTracker};
 use app_core::host_state::HostState;
@@ -112,6 +112,8 @@ pub(super) enum DialogAction {
     Disconnect(HostId),
     /// Close these leaves: 0 closes.
     ClosePanes(Vec<NodeId>),
+    /// Delete the Gantry project of this name: 0 stops its running sessions and closes its panes.
+    DeleteProject(String),
     /// Take over `session` on `host`: 0 asks the daemon to stop it and remembers where to resume.
     TakeOver { host: HostId, session: String, target: TakeOverTarget },
     /// The session ignored the stop request: 0 force quits it, any other choice gives up the take over.
@@ -130,6 +132,8 @@ pub(super) struct DevContainerOpen {
     axis: Option<Axis>,
     cwd_from: Option<PaneKey>,
     host: HostId,
+    /// The Gantry project the new session goes into.
+    project: Option<String>,
     /// The folder the container mounts, on the host.
     host_folder: PathBuf,
 }
@@ -236,6 +240,8 @@ struct PendingOpen {
     cwd_from: Option<PaneKey>,
     /// The host a split runs on (the source pane's); `local` otherwise.
     host: HostId,
+    /// The Gantry project the new session goes into.
+    project: Option<String>,
 }
 
 /// One connected host's daemon.
@@ -415,15 +421,17 @@ pub struct WorkspaceView {
     update_error: Option<String>,
     /// Whether `checkForUpdates` is on.
     check_updates: bool,
-    /// A manual check found releases while the daily check is off: the notice still shows.
+    /// A manual check found releases while the scheduled check is off: the notice still shows.
     manual_found: bool,
     /// The published releases the last good check found, newest first.
     releases: Vec<Release>,
     /// The `ETag` of that answer.
     release_etag: Option<String>,
+    /// When the last release check succeeded; the next one is due `release::CHECK_EVERY` later.
+    last_release_check: Option<SystemTime>,
     /// The open release notes card; its focus handle takes Esc.
     release_card: Option<FocusHandle>,
-    /// The daily check's timer.
+    /// The release check's timer.
     release_task: Option<Task<()>>,
     /// What is known about the git repos on screen.
     git: GitRepos,
@@ -454,9 +462,6 @@ pub struct WorkspaceView {
     attention: AttentionTracker,
     /// Leaves with an alert the user has not seen yet.
     unseen: HashMap<NodeId, AlertKind>,
-    /// Leaves marked unread by hand: they keep the mark, even in view, until Claude's status changes or the user marks
-    /// them read.
-    marked_unread: HashSet<NodeId>,
     _activation: Subscription,
     /// The theme whose terminal colors the daemon was last told.
     sent_palette: Option<Preset>,
@@ -661,6 +666,7 @@ impl WorkspaceView {
             manual_found: false,
             releases: Vec::new(),
             release_etag: None,
+            last_release_check: None,
             release_card: None,
             release_task: None,
             git: GitRepos::default(),
@@ -679,7 +685,6 @@ impl WorkspaceView {
             welcome_items: RefCell::new(None),
             attention: AttentionTracker::default(),
             unseen: HashMap::new(),
-            marked_unread: HashSet::new(),
             _activation: activation,
             sent_palette: None,
             _theme: theme_changed,
@@ -700,6 +705,9 @@ impl WorkspaceView {
         for leaf in leaves {
             this.add_slot(leaf, window, cx);
         }
+        // A mark made by hand (`Leaf.unread`) outlives a restart, and so does the alert it stands on.
+        this.unseen = this.workspace.unread_leaves().map(|leaf| (leaf, AlertKind::Finished)).collect();
+        this.sync_unseen(cx);
         for (leaf, key) in &restored.attach {
             let launch = this.workspace.leaves[leaf].launch.clone();
             this.slots[leaf].view.update(cx, |view, cx| view.attach(key.pane, launch, cx));

@@ -23,6 +23,13 @@ header: working, idle, needs input, done. Working rows glow.
 
 <p align="center"><img src="docs/images/sidebar-status.png" alt="The sidebar: sessions grouped by project, colored by status" width="560"></p>
 
+### Gantry projects
+
+Group sessions your own way, whatever folder they run in. Make a project with the new project button beside the filter,
+drag sessions into it, and start new ones there from its heading.
+
+<p align="center"><img src="docs/images/gantry-project.png" alt="A Gantry project called Bug bash, holding sessions from two folders" width="560"></p>
+
 ### Tabs and splits
 
 Split any pane right or down, with Claude or a plain shell. Layouts are saved and restored.
@@ -33,7 +40,8 @@ Drag a tab from the sidebar onto a pane to split it, or drag a pane by its heade
 
 ### Recent sessions and search
 
-Find a past session by title, or search inside conversations (your prompts and Claude's replies).
+Find a past session by title, or search inside conversations (your prompts and Claude's replies). Sort by recency,
+name or project, and filter by project, host and config dir.
 
 ![Searching inside conversations from the recent sessions list](docs/images/search-overlay.png)
 
@@ -42,7 +50,11 @@ Find a past session by title, or search inside conversations (your prompts and C
 - **Last prompt card.** Each Claude pane shows its newest prompt above the terminal, so you remember what you asked.
 - **Mark as unread.** Flag a session to come back to it later. It stays flagged until Claude's status changes or you
   mark it as read.
-- **Project colors.** Each project gets its own color, automatic or chosen by you.
+- **Project colors.** Each project gets its own color, automatic or chosen by you. Tabs can have a color of their own.
+- **Git view.** A branch chip for each session, a panel with the changed files and commits, and a diff page. Read
+  only: Gantry never stages, commits or switches branches.
+- **Compact sidebar.** Collapse the sidebar to a thin column of status-colored tiles.
+- **Drag to reorder.** Drag tabs and projects to put them in the order you want.
 
 ## Never miss it
 
@@ -68,7 +80,8 @@ A "need input" pill in the title bar jumps to the next session waiting for you.
 Close the window and your sessions continue, on this machine or on any SSH host.
 
 - **Sessions that outlive the window.** A per-profile daemon owns every PTY, so closing the GUI does not end your
-  sessions. Reopen it and it reattaches. Finished panes offer Continue (`claude --resume`) or Restart.
+  sessions. Reopen it and it reattaches. Finished panes offer Resume conversation (`claude --resume`) or Restart
+  terminal.
 - **SSH hosts.** Connect to remote SSH hosts (currently Linux). Their sessions sit in the same sidebar, with the same
   status colors, search and recent sessions. [Setup guide](docs/ssh-hosts.md).
 - **Dev containers.** Sessions that run in a dev container are listed under their host folder and resumed inside it.
@@ -102,8 +115,8 @@ in a hand-editable `settings.json` that applies live.
 ## Privacy
 
 Gantry reads Claude's session files on your machine, read-only, to show status and search. It has no telemetry and
-sends nothing about you or your sessions anywhere. The only network call it makes itself is a daily check of this
-project's GitHub releases for a newer version; turn it off in Settings > Window > Updates. SSH connections go only to
+sends nothing about you or your sessions anywhere. The only network call it makes itself is a check of this
+project's GitHub releases for a newer version, when it opens and every few hours; turn it off in Settings > Window > Updates. SSH connections go only to
 the hosts you add.
 
 ## Install
@@ -185,10 +198,12 @@ Default shortcuts. All of them can be changed in Settings.
 | Split down (Claude) | `Ctrl+Shift+E` | `Cmd+E` |
 | Split with a terminal | add `Alt` | add `Option` |
 | New terminal (same folder) | `Ctrl+Shift+Alt+T` | `Cmd+Option+T` |
-| Move focus between panes | `Ctrl+Shift+Arrows` | `Cmd+Arrows` |
+| Move focus between panes | `Ctrl+Shift+Arrows` | `Cmd+Option+Arrows` |
 | Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` | `Cmd+Shift+]` / `Cmd+Shift+[` |
+| Back / forward through visited tabs (or the mouse side buttons) | `Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown` | `Cmd+[` / `Cmd+]` |
 | Close pane | `Ctrl+Shift+W` | `Cmd+W` |
-| Collapse / expand sidebar | `Ctrl+Shift+B` | `Cmd+B` |
+| Compact / expand sidebar | `Ctrl+Shift+B` | `Cmd+B` |
+| Git panel | `Ctrl+Shift+G` | `Cmd+Shift+G` |
 | Settings | `Ctrl+,` | `Cmd+,` |
 | Zoom in / out / reset | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | `Cmd+=` / `Cmd+-` / `Cmd+0` |
 

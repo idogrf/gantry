@@ -11,8 +11,8 @@ use app_core::settings::{ProjectColors, StatusFills};
 use app_core::theme_colors::{Preset, Tokens, ToneColors, tone_colors};
 use app_core::workspace::DirBadge;
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Div, ElementId, FontWeight, Global, IntoElement, ParentElement, Pixels,
-    Styled, Svg, div, hsla, linear_color_stop, linear_gradient, px, relative, rgb, rgba, svg,
+    Animation, AnimationExt, AnyElement, App, Div, ElementId, FontWeight, Global, Hsla, IntoElement, ParentElement,
+    Pixels, Styled, Svg, div, hsla, linear_color_stop, linear_gradient, px, relative, rgb, rgba, svg,
 };
 
 use crate::assets::{CONTAINER_ICON, PIN_ICON, SSH_ICON};
@@ -161,8 +161,47 @@ pub(crate) fn sweeping(tone: Tone, enabled: bool, window_active: bool) -> bool {
 /// from the left and leaves at the right) and its strength, which fades in and out at the ends so the clip at the
 /// track's edges never shows.
 pub(crate) fn sweep_band(progress: f32) -> (f32, f32) {
+    band_at(progress, SWEEP_BAND)
+}
+
+/// [`sweep_band`] for a band `band` of the track wide.
+fn band_at(progress: f32, band: f32) -> (f32, f32) {
     let progress = progress.clamp(0., 1.);
-    (progress * (1. + SWEEP_BAND) - SWEEP_BAND, (std::f32::consts::PI * progress).sin())
+    (progress * (1. + band) - band, (std::f32::consts::PI * progress).sin())
+}
+
+/// Width of the glow over a project's pill, as a fraction of the pill.
+const PILL_BAND: f32 = 0.40;
+/// How strong that glow is at its middle: it is drawn in the status color, over the pale fill.
+const PILL_PEAK: f32 = 0.9;
+
+/// The Working glow of a project's pill: a band in `color` (the status color) over the pill's pale fill. Put it
+/// first inside a relatively positioned pill; `inset` is the pill's corner radius. It runs on the clock of every
+/// other glow.
+pub(crate) fn pill_sweep(id: impl Into<ElementId>, inset: Pixels, color: u32) -> impl IntoElement {
+    let tint: Hsla = rgb(color).into();
+    let glow = move |alpha: f32| Hsla { a: alpha, ..tint };
+    div().absolute().top_0().bottom_0().left(inset).right(inset).overflow_hidden().child(
+        div().absolute().top_0().bottom_0().w(relative(PILL_BAND)).flex().with_animation(
+            id,
+            Animation::new(SWEEP_PERIOD).repeat_synced().with_max_fps(SWEEP_FPS),
+            move |band, progress| {
+                let (left, strength) = band_at(progress, PILL_BAND);
+                let alpha = PILL_PEAK * strength;
+                band.left(relative(left))
+                    .child(div().h_full().flex_1().bg(linear_gradient(
+                        90.,
+                        linear_color_stop(glow(0.), 0.),
+                        linear_color_stop(glow(alpha), 1.),
+                    )))
+                    .child(div().h_full().flex_1().bg(linear_gradient(
+                        90.,
+                        linear_color_stop(glow(alpha), 0.),
+                        linear_color_stop(glow(0.), 1.),
+                    )))
+            },
+        ),
+    )
 }
 
 /// The Working glow: put it first inside a relatively positioned, filled row, tab or header. It runs on a track

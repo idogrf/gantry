@@ -6,20 +6,18 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [Unreleased]
 
 ### Added
-- **Gantry projects** - Make a project by hand, independent of any folder, and put sessions in it. A project behaves like any other wherever projects show: sidebar, compact sidebar, title bar, pane headers, colors and Recent sessions.
-  - Create, rename and delete: the layers button beside the filter (also the first tile of the compact column) adds an empty heading with a name field (Enter creates, Esc cancels; a name another project has, in any case, is refused). Rename is in the heading's right-click menu. A hover × on the heading deletes it, after a dialog when sessions run in it (they are stopped and their panes closed); closed sessions keep their name in Recent sessions.
-  - Drag in: drag a pane or a split tab's heading onto a project, on its heading or between its rows, to put it there; a pane of a split tab becomes a tab of its own. Drag a row onto its own folder's project to take it back out (when that folder is not listed, a drop-in zone for it appears below the folders while you drag), or use "Remove from project" in the row's right-click menu. A split of a pane in a project stays in it. In every sidebar drag that would move the item, the whole target project is boxed and a line shows where it lands; a drop that would change nothing shows no cue.
-  - Launch into it: "New Claude here" on the heading opens the launcher on the folder the project last used, asking in which folder the session should open, with the project as a removable chip; "New terminal here" opens a shell in your home folder at once.
-  - Recent sessions: a project's closed sessions are listed under its name, the Project filter lists it with the layers icon, and resuming one of a deleted project makes the project again.
-- **Sort and filter recent sessions** - The Recent sessions pop-up (`Ctrl+Shift+R`) has a sort bar (Recent, Name or Project, with a reverse button; `Tab` switches the sort) and a sidebar of filters by Project, Host and Config dir. Each filter shows the five with the newest sessions and keeps the rest under More…, and a round-arrow button resets them all. The sort and filters stay while Gantry is open.
+- **Gantry projects** - Make your own projects, independent of any folder, and drag sessions into them.
+  - Add one with the new project button beside the sidebar filter. Rename or delete it from the heading.
+  - Drag a pane or a split tab onto a project to move it in. Drag it back to its folder, or use "Remove from project", to take it out.
+  - "New Claude here" and "New terminal here" on the heading start a session in the project.
+  - Closed sessions keep their project in Recent sessions.
+- **Sort and filter recent sessions** - The Recent sessions pop-up (`Ctrl+Shift+R`) can sort by recency, name or project, and filter by project, host and config dir.
 
 ### Changed
-- **Project pill shows status** - The dot on a project heading is now a small rounded rectangle, three dots wide, that shows the most urgent session in the project (needs input, then done, working, unread), in the same colors as the session rows. With nothing to act on it is grey. The project color stays on the name and the line. It counts the sessions of a collapsed project too, and the compact sidebar shows it as well. While any session in the project is working, a band in the status color sweeps across it, like the glow on a working session row.
-- **Search keeps your order** - A search in the Recent sessions pop-up only narrows the list and no longer ranks it, so a recent session that matches loosely is no longer listed below an older one that matches well. The list is in the sort you picked, newest first by default, and every row names its project.
-- **Unread marks are kept** - A session you marked as unread is still marked after Gantry restarts. The mark still goes away when Claude starts working again or you mark it as read.
+- **Project status at a glance** - The dot on a project heading is now a pill in the color of its most urgent session.
 
-### Removed
-- **Recent sessions settings** - "Sessions per project" and "Project chips" in Settings > Sessions are gone: the pop-up lists every session and the Project filter replaces the chips.
+### Fixed
+- **Unread marks are kept** - A session you marked as unread is still marked after Gantry restarts.
 
 ## [0.13.0] - 2026-11-03
 

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use app_core::session_tree::{Tone, display_path};
-use app_core::settings::{Problem, Settings, hex, remove_ssh_host};
+use app_core::settings::{Problem, Settings, remove_ssh_host};
 use app_core::snapshot::Rgb;
 use app_core::text_field::TextField;
 use gpui::{
@@ -212,6 +212,8 @@ pub(crate) enum SettingsEvent {
     ReconnectHost(String),
     /// Ask GitHub for a newer release now.
     CheckNow,
+    /// Open the custom color picker for a status fill.
+    CustomColor(app_core::session_tree::Tone),
 }
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -225,9 +227,6 @@ pub(crate) struct SettingsView {
     /// Installed monospace families (without the platform default), found when the page opened.
     families: Vec<String>,
     popover: Option<Popover>,
-    /// The color picker's hex field.
-    hex: TextField,
-    hex_focus: FocusHandle,
     /// The volume being dragged, written when the button is released.
     volume_drag: Option<f32>,
     slider_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -282,8 +281,6 @@ impl SettingsView {
             stops: HashMap::new(),
             families: installed_monospace(cx),
             popover: None,
-            hex: TextField::default(),
-            hex_focus: cx.focus_handle(),
             volume_drag: None,
             slider_bounds: Rc::new(Cell::new(Bounds::default())),
             body_scroll: ScrollHandle::new(),

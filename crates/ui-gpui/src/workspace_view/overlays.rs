@@ -20,7 +20,7 @@ use gpui::{Context, Focusable, PathPromptOptions, Window, prelude::*};
 use protocol::host::HostId;
 use protocol::message::{PaletteColors, SessionInfo, SessionStatus};
 
-use app_core::session_tree::status_tone;
+use app_core::session_tree::{Tone, status_tone};
 
 use crate::askpass_view::{AskpassEvent, AskpassView};
 use crate::color_picker_view::{ColorPickerEvent, ColorPickerView};
@@ -393,6 +393,17 @@ impl WorkspaceView {
                 .map(|tint| tint.value(theme.preset))
                 .or_else(|| self.leaf_project_color(*leaf, cx)),
             ColorTarget::Project(root) => theme.project(root),
+            ColorTarget::Status(tone) => {
+                let fills = &cx.global::<SettingsStore>().settings().status_fills;
+                let stored = match tone {
+                    Tone::NeedsInput => fills.needs_input,
+                    Tone::Working => fills.working,
+                    Tone::Done => fills.done,
+                    Tone::Idle => fills.idle,
+                    _ => fills.unread,
+                };
+                stored.or(theme.tone(*tone).fill)
+            }
         };
         let initial = current.unwrap_or(theme.tokens.accent);
         let view = cx.new(|cx| ColorPickerView::new(target, initial, cx));
@@ -408,6 +419,19 @@ impl WorkspaceView {
                     ColorTarget::Project(root) => SettingsStore::update(cx, |settings| {
                         settings.project_colors.folders.insert(root.clone(), *tint);
                     }),
+                    ColorTarget::Status(tone) => {
+                        let fill = Some(tint.value(crate::theme::theme(cx).preset));
+                        SettingsStore::update(cx, |settings| {
+                            let fills = &mut settings.status_fills;
+                            match tone {
+                                Tone::NeedsInput => fills.needs_input = fill,
+                                Tone::Working => fills.working = fill,
+                                Tone::Done => fills.done = fill,
+                                Tone::Idle => fills.idle = fill,
+                                _ => fills.unread = fill,
+                            }
+                        });
+                    }
                 }
             }
             this.color_picker = None;
@@ -601,6 +625,7 @@ impl WorkspaceView {
                     SettingsEvent::DetectClaudeDirs => this.show_setup(SetupMode::Rerun, window, cx),
                     SettingsEvent::AddSshHost => this.open_ssh_wizard(WizardStart::Add, window, cx),
                     SettingsEvent::CheckNow => this.check_releases(true, cx),
+                    SettingsEvent::CustomColor(tone) => this.show_color_picker(ColorTarget::Status(*tone), window, cx),
                     SettingsEvent::HostRenamed { from, to, reconnect } => {
                         this.host_renamed(&HostId::named(from), &HostId::named(to), *reconnect, window, cx)
                     }

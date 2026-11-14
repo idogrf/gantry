@@ -124,6 +124,35 @@ pub struct StatusFills {
     pub done: Option<u32>,
     /// Fill for an idle session.
     pub idle: Option<u32>,
+    /// Fill for a session marked unread by hand (`None` = a faded Done).
+    pub unread: Option<u32>,
+}
+
+/// A status fill with no color at all: opacity 0, written `"transparent"`.
+pub const TRANSPARENT: u32 = 0xff00_0000;
+
+/// A status fill: `0xRRGGBB` with the transparency (255 - opacity) in the top byte, so a plain `0xRRGGBB` is opaque.
+/// Opacity 0 is always [`TRANSPARENT`].
+pub fn with_alpha(rgb: u32, alpha: u8) -> u32 {
+    if alpha == 0 { TRANSPARENT } else { (u32::from(255 - alpha) << 24) | (rgb & 0xff_ffff) }
+}
+
+/// A status fill's opacity, 0..=255.
+pub fn fill_alpha(fill: u32) -> u8 {
+    255 - (fill >> 24) as u8
+}
+
+/// `#rrggbb`, `#rrggbbaa` or `transparent` as a status fill.
+pub fn parse_fill(text: &str) -> Option<u32> {
+    if text == "transparent" {
+        return Some(TRANSPARENT);
+    }
+    let digits = text.strip_prefix('#')?;
+    if digits.len() == 8 && digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        let value = u32::from_str_radix(digits, 16).ok()?;
+        return Some(with_alpha(value >> 8, (value & 0xff) as u8));
+    }
+    parse_hex(text)
 }
 
 /// Terminal font (`family: None` = the platform default).
@@ -518,6 +547,15 @@ pub fn hex(color: u32) -> String {
     format!("#{:06x}", color & 0xff_ffff)
 }
 
+/// A status fill as written: `#rrggbb` when opaque, `transparent`, else `#rrggbbaa`.
+pub fn fill_text(fill: u32) -> String {
+    match fill_alpha(fill) {
+        255 => hex(fill),
+        0 => "transparent".into(),
+        alpha => format!("{}{alpha:02x}", hex(fill)),
+    }
+}
+
 /// Read `path`. A missing file gives defaults, no problems, and an empty `raw`.
 pub fn load(path: &Path) -> Loaded {
     match std::fs::read_to_string(path) {
@@ -630,6 +668,19 @@ impl Reader {
             }),
             _ => {
                 self.problem(&format!("{prefix}{key}"), "expected a #rrggbb color".into());
+                None
+            }
+        }
+    }
+
+    fn fill(&mut self, map: &Map<String, Value>, prefix: &str, key: &str) -> Option<u32> {
+        match map.get(key)? {
+            Value::String(text) => parse_fill(text).or_else(|| {
+                self.problem(&format!("{prefix}{key}"), format!("\"{text}\" is not a #rrggbb or #rrggbbaa color"));
+                None
+            }),
+            _ => {
+                self.problem(&format!("{prefix}{key}"), "expected a #rrggbb or #rrggbbaa color".into());
                 None
             }
         }
@@ -837,10 +888,11 @@ impl Reader {
 
         let colors = self.object(raw, "", "statusColors");
         let status_fills = StatusFills {
-            needs_input: self.color(&colors, "statusColors.", "needsInput"),
-            working: self.color(&colors, "statusColors.", "working"),
-            done: self.color(&colors, "statusColors.", "done"),
-            idle: self.color(&colors, "statusColors.", "idle"),
+            needs_input: self.fill(&colors, "statusColors.", "needsInput"),
+            working: self.fill(&colors, "statusColors.", "working"),
+            done: self.fill(&colors, "statusColors.", "done"),
+            idle: self.fill(&colors, "statusColors.", "idle"),
+            unread: self.fill(&colors, "statusColors.", "unread"),
         };
 
         let selection = self.color(raw, "", "selection");
@@ -999,9 +1051,10 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         ("working", settings.status_fills.working),
         ("done", settings.status_fills.done),
         ("idle", settings.status_fills.idle),
+        ("unread", settings.status_fills.unread),
     ];
     for (key, fill) in fills {
-        add(&["statusColors", key], fill.map_or(Value::Null, |color| hex(color).into()), fill.is_some());
+        add(&["statusColors", key], fill.map_or(Value::Null, |color| fill_text(color).into()), fill.is_some());
     }
     add(
         &["selection"],
@@ -1397,6 +1450,34 @@ mod tests {
     }
 
     #[test]
+    fn unread_fill_is_a_color_or_transparent() {
+        let loaded = parse(r#"{"statusColors": {"unread": "transparent"}}"#);
+        assert!(loaded.problems.is_empty());
+        assert_eq!(loaded.settings.unwrap().status_fills.unread, Some(TRANSPARENT));
+        let loaded = parse(r##"{"statusColors": {"unread": "#aabbcc"}}"##);
+        assert_eq!(loaded.settings.unwrap().status_fills.unread, Some(0xaabbcc));
+        let loaded = parse(r#"{"statusColors": {"unread": "clear"}}"#);
+        assert_eq!(loaded.settings.unwrap().status_fills.unread, None);
+        assert_eq!(loaded.problems[0].key, "statusColors.unread");
+        assert_eq!(fill_text(TRANSPARENT), "transparent");
+        assert_eq!(fill_text(0xaabbcc), "#aabbcc");
+    }
+
+    #[test]
+    fn a_fill_can_carry_its_opacity() {
+        let half = parse_fill("#aabbcc80").unwrap();
+        assert_eq!((half & 0xff_ffff, fill_alpha(half)), (0xaabbcc, 0x80));
+        assert_eq!(fill_text(half), "#aabbcc80");
+        assert_eq!(parse_fill("#aabbccff"), Some(0xaabbcc));
+        assert_eq!(parse_fill("#aabbcc00"), Some(TRANSPARENT));
+        assert_eq!(fill_alpha(0xaabbcc), 255);
+        assert_eq!(with_alpha(0x123456, 0), TRANSPARENT);
+        let loaded = parse(r##"{"statusColors": {"done": "#aabbcc80"}}"##);
+        assert!(loaded.problems.is_empty());
+        assert_eq!(loaded.settings.unwrap().status_fills.done, Some(half));
+    }
+
+    #[test]
     fn round_trip() {
         let settings = Settings {
             theme: ThemeChoice::MistLight,
@@ -1405,6 +1486,7 @@ mod tests {
                 working: Some(0x445566),
                 done: Some(0x778899),
                 idle: Some(0xaabbcc),
+                unread: Some(with_alpha(0xddeeff, 0x40)),
             },
             selection: Some(0xff7eb6),
             terminal_font: TerminalFont { family: Some("Fira Code".into()), size: 17.5, line_height: 1.45 },

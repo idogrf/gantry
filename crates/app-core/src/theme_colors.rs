@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::palette::{self, Palette};
 use crate::session_tree::Tone;
-use crate::settings::{StatusFills, ThemeChoice};
+use crate::settings::{StatusFills, ThemeChoice, fill_alpha};
 
 /// Which preset is drawn (`System` resolves to one of these).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,25 +260,45 @@ fn default_tone_colors(preset: Preset, tone: Tone) -> ToneColors {
 
 /// The colors of `tone` in `preset`, with the user's fills applied (via [`derive`]) where set and readable.
 pub fn tone_colors(preset: Preset, fills: &StatusFills, tone: Tone) -> ToneColors {
-    if tone == Tone::Unread {
-        return unread_colors(preset, fills);
-    }
     let custom = match tone {
         Tone::NeedsInput => fills.needs_input,
         Tone::Working => fills.working,
         Tone::Done => fills.done,
         Tone::Idle => fills.idle,
-        Tone::Unread | Tone::Elsewhere | Tone::Closed => None,
+        Tone::Unread => fills.unread,
+        Tone::Elsewhere | Tone::Closed => None,
     };
     let t = tokens(preset);
-    match custom {
-        Some(fill) if readable_fill(fill, &t) => derive(fill, &t),
+    let fallback = || match tone {
+        Tone::Unread => unread_colors(preset, fills),
         _ => default_tone_colors(preset, tone),
+    };
+    match custom {
+        Some(fill) if usable_fill(fill, &t) => match fill_alpha(fill) {
+            255 => derive(fill, &t),
+            0 => ToneColors { fill: None, ink: t.text, dot: fallback().dot },
+            _ => {
+                let shown = effective_fill(fill, &t);
+                ToneColors { fill: Some(shown), ink: derive(shown, &t).ink, dot: derive(fill & 0xff_ffff, &t).dot }
+            }
+        },
+        _ => fallback(),
     }
 }
 
-/// A row marked unread by hand: the Done colors with the fill faded into the surface, so it reads as quieter than an
-/// alert. Follows a custom Done fill.
+/// The opaque color a status `fill` shows: blended over the surface by its opacity (see
+/// [`crate::settings::with_alpha`]).
+pub fn effective_fill(fill: u32, tokens: &Tokens) -> u32 {
+    mix(fill & 0xff_ffff, tokens.surface, f32::from(fill_alpha(fill)) / 255.0)
+}
+
+/// Whether a status `fill` may be used: no fill at all, or text readable on the color it shows.
+pub fn usable_fill(fill: u32, tokens: &Tokens) -> bool {
+    fill_alpha(fill) == 0 || readable_fill(effective_fill(fill, tokens), tokens)
+}
+
+/// A row marked unread by hand with no fill of its own: the Done colors with the fill faded into the surface, so it
+/// reads as quieter than an alert. Follows a custom Done fill.
 fn unread_colors(preset: Preset, fills: &StatusFills) -> ToneColors {
     let done = tone_colors(preset, fills, Tone::Done);
     let t = tokens(preset);
@@ -556,6 +576,45 @@ mod tests {
             );
             let fills = StatusFills { done: Some(0xffe08a), ..StatusFills::default() };
             assert_ne!(tone_colors(preset, &fills, Tone::Unread), unread);
+        }
+    }
+
+    #[test]
+    fn a_see_through_fill_is_blended_over_the_surface() {
+        for preset in PRESETS {
+            let t = tokens(preset);
+            let half = crate::settings::with_alpha(0xe9c6ef, 0x80);
+            let fills = StatusFills { done: Some(half), ..StatusFills::default() };
+            let shown = effective_fill(half, &t);
+            assert_eq!(shown, mix(0xe9c6ef, t.surface, 128.0 / 255.0));
+            if usable_fill(half, &t) {
+                let colors = tone_colors(preset, &fills, Tone::Done);
+                assert_eq!(colors.fill, Some(shown));
+                assert!(contrast(colors.ink, shown) >= 4.5, "{preset:?}");
+                assert_eq!(colors.dot, derive(0xe9c6ef, &t).dot);
+            }
+        }
+        assert_eq!(effective_fill(0xe9c6ef, &tokens(Preset::Mist)), 0xe9c6ef);
+        assert!(usable_fill(crate::settings::with_alpha(0xe9c6ef, 0x80), &tokens(Preset::MistLight)));
+        assert!(usable_fill(crate::settings::TRANSPARENT, &tokens(Preset::Mist)));
+    }
+
+    #[test]
+    fn unread_takes_its_own_fill_or_none() {
+        for preset in PRESETS {
+            let t = tokens(preset);
+            let done = tone_colors(preset, &StatusFills::default(), Tone::Done);
+            let fills = StatusFills { unread: Some(0xe9c6ef), ..StatusFills::default() };
+            assert_eq!(tone_colors(preset, &fills, Tone::Unread), derive(0xe9c6ef, &t));
+            let fills = StatusFills { unread: Some(crate::settings::TRANSPARENT), ..StatusFills::default() };
+            let clear = tone_colors(preset, &fills, Tone::Unread);
+            assert_eq!(clear, ToneColors { fill: None, ink: t.text, dot: done.dot });
+            assert!(contrast(clear.ink, t.surface) >= 4.5, "{preset:?}");
+            let fills = StatusFills { unread: Some(0x808080), ..StatusFills::default() };
+            assert_eq!(
+                tone_colors(preset, &fills, Tone::Unread),
+                tone_colors(preset, &StatusFills::default(), Tone::Unread)
+            );
         }
     }
 

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use app_core::settings::{self, Loaded, Problem, Settings};
 use app_core::shortcuts::{self, Check, Platform};
-use app_core::theme_colors::{readable_fill, resolve, tokens};
+use app_core::theme_colors::{resolve, tokens, usable_fill};
 use app_core::workspace::{ClaudeDirs, DirBadge, ResolvedDir};
 use gpui::{App, Global, Task, WindowAppearance};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -168,8 +168,9 @@ fn apply(cx: &mut App) {
         ("working", &mut fills.working),
         ("done", &mut fills.done),
         ("idle", &mut fills.idle),
+        ("unread", &mut fills.unread),
     ] {
-        if fill.is_some_and(|color| !readable_fill(color, &tokens)) {
+        if fill.is_some_and(|color| !usable_fill(color, &tokens)) {
             *fill = None;
             problems.push(Problem { key: format!("statusColors.{name}"), message: "too low contrast".into() });
         }

@@ -133,6 +133,8 @@ pub enum ColorTarget {
     Pane(NodeId),
     /// A project, by its root.
     Project(PathBuf),
+    /// A status fill in Settings, by its tone.
+    Status(Tone),
 }
 
 /// One pickable menu entry.

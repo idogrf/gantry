@@ -6748,6 +6748,7 @@ dependencies = [
  "protocol",
  "rodio",
  "serde_json",
+ "sha2",
  "tempfile",
  "tracing",
  "ureq",

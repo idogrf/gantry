@@ -74,6 +74,7 @@ impl WorkspaceView {
                 self.release_etag = None;
                 self.release_card = None;
                 self.set_check_row(CheckStatus::Idle, cx);
+                self.publish_update_row(cx);
                 cx.notify();
             }
         }
@@ -625,6 +626,9 @@ impl WorkspaceView {
                     SettingsEvent::DetectClaudeDirs => this.show_setup(SetupMode::Rerun, window, cx),
                     SettingsEvent::AddSshHost => this.open_ssh_wizard(WizardStart::Add, window, cx),
                     SettingsEvent::CheckNow => this.check_releases(true, cx),
+                    SettingsEvent::DownloadUpdate => this.start_self_update(cx),
+                    SettingsEvent::CancelUpdate => this.cancel_self_update(cx),
+                    SettingsEvent::RestartToUpdate => this.restart_and_update(cx),
                     SettingsEvent::CustomColor(tone) => this.show_color_picker(ColorTarget::Status(*tone), window, cx),
                     SettingsEvent::HostRenamed { from, to, reconnect } => {
                         this.host_renamed(&HostId::named(from), &HostId::named(to), *reconnect, window, cx)

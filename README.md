@@ -152,6 +152,10 @@ the hosts you add.
 
 To remove it, run `./install.sh --uninstall` from the same folder.
 
+Updating: when a new release is out, the title bar shows an update pill. Download and install (also in Settings > Window >
+Updates) fetches the release, checks its SHA-256 and runs the installer for you; Restart and update then reopens
+Gantry. This works for installs in `~/.local/bin`; an RPM or other system install updates through its package.
+
 Gantry needs glibc 2.35 or newer (Ubuntu 22.04+, Fedora).
 
 ### macOS
@@ -164,6 +168,13 @@ quarantine flag once, then open it as usual:
 ```sh
 xattr -dr com.apple.quarantine /Applications/Gantry.app
 ```
+
+#### Updating
+
+Download and install in the title bar's update card (or Settings > Window > Updates) replaces `Gantry.app` in place;
+Restart and update then opens the new version. It needs the app to be in Applications (or another normal folder): an app still running from the disk
+image, or one macOS moved to a temporary location, shows the release page instead. Drag it to Applications and open it
+from there.
 
 #### Permission prompts
 

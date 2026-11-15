@@ -6,6 +6,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [Unreleased]
 
 ### Added
+- **Update from the title bar** - When a new release is out, Download and install fetches it, checks it and installs it; Restart and update then finishes the job. Also in Settings > Window > Updates.
+  - Linux: works for installs in `~/.local/bin` (the tarball's `install.sh`); elsewhere (an RPM or any system install) the card says why and keeps Open release page.
+  - Mac: replaces `Gantry.app` in place. The first install still needs Open Anyway; a Mac app still on its disk image has to be dragged to Applications first.
 - **Unread color** - Settings > Appearance > Status colors has an Unread row for sessions you marked as unread. Pick any fill, or Transparent to show only the pin.
 
 ### Changed

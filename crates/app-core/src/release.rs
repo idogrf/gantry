@@ -25,6 +25,17 @@ pub fn due(last: Option<SystemTime>, now: SystemTime) -> bool {
     }
 }
 
+/// A file attached to a release.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Asset {
+    /// The file name.
+    pub name: String,
+    /// The download address (`browser_download_url`).
+    pub url: String,
+    /// The size in bytes.
+    pub size: u64,
+}
+
 /// A published release.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Release {
@@ -36,6 +47,8 @@ pub struct Release {
     pub notes: String,
     /// The release page; empty when it is not under [`URL_PREFIX`].
     pub url: String,
+    /// The files attached to the release that have a name and a download address.
+    pub assets: Vec<Asset>,
 }
 
 /// A newer release than this window runs.
@@ -121,11 +134,37 @@ fn parse_release(entry: &serde_json::Value) -> Option<Release> {
     }
     let version = Version::parse(entry.get("tag_name")?.as_str()?.strip_prefix('v')?)?;
     let url = text("html_url");
+    let assets = entry
+        .get("assets")
+        .and_then(serde_json::Value::as_array)
+        .map(|assets| {
+            assets
+                .iter()
+                .filter_map(|asset| {
+                    Some(Asset {
+                        name: asset.get("name")?.as_str()?.to_owned(),
+                        url: asset.get("browser_download_url")?.as_str()?.to_owned(),
+                        size: asset.get("size").and_then(serde_json::Value::as_u64).unwrap_or(0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Some(Release {
         version,
         date: text("published_at").chars().take(10).collect(),
         notes: text("body").chars().take(NOTES_CAP).collect(),
         url: if url.starts_with(URL_PREFIX) { url.to_owned() } else { String::new() },
+        assets,
+    })
+}
+
+/// The lowercase SHA-256 digest listed for `name` in a `SHA256SUMS` file; `None` when absent or malformed.
+pub fn sum_for(sums: &str, name: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let (digest, file) = line.split_once("  ").or_else(|| line.split_once(" *"))?;
+        (file == name).then_some(())?;
+        (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())).then(|| digest.to_ascii_lowercase())
     })
 }
 
@@ -193,7 +232,13 @@ mod tests {
     }
 
     fn release(version: &str) -> Release {
-        Release { version: v(version), date: String::new(), notes: String::new(), url: String::new() }
+        Release {
+            version: v(version),
+            date: String::new(),
+            notes: String::new(),
+            url: String::new(),
+            assets: Vec::new(),
+        }
     }
 
     fn entry(tag: &str, body: &str) -> String {
@@ -347,5 +392,38 @@ mod tests {
     fn parse_bold_handles_non_ascii() {
         let parsed = parse_bold("שלום **עולם**");
         assert_eq!(&parsed.text[parsed.bold[0].clone()], "עולם");
+    }
+
+    #[test]
+    fn parses_assets() {
+        let json = r#"[{"tag_name":"v0.15.0","assets":[
+            {"name":"gantry-0.15.0-x86_64-linux.tar.gz","browser_download_url":"https://github.com/idogrf/gantry/releases/download/v0.15.0/gantry-0.15.0-x86_64-linux.tar.gz","size":123},
+            {"name":"nourl","size":1},
+            {"name":"SHA256SUMS","browser_download_url":"https://github.com/idogrf/gantry/releases/download/v0.15.0/SHA256SUMS","size":9}]},
+            {"tag_name":"v0.14.0"}]"#;
+        let releases = parse_releases(json);
+        assert_eq!(releases[0].assets.len(), 2);
+        assert_eq!(
+            releases[0].assets[0],
+            Asset {
+                name: "gantry-0.15.0-x86_64-linux.tar.gz".to_owned(),
+                url: "https://github.com/idogrf/gantry/releases/download/v0.15.0/gantry-0.15.0-x86_64-linux.tar.gz"
+                    .to_owned(),
+                size: 123,
+            }
+        );
+        assert!(releases[1].assets.is_empty());
+    }
+
+    #[test]
+    fn sum_for_finds_the_line() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let sums = format!("{a}  gantry-0.15.0-x86_64-linux.tar.gz\n{b}  gantry-0.15.0-aarch64-macos.dmg\n");
+        assert_eq!(sum_for(&sums, "gantry-0.15.0-aarch64-macos.dmg"), Some(b.clone()));
+        assert_eq!(sum_for(&sums, "missing"), None);
+        assert_eq!(sum_for(&format!("{}  x\n", "a".repeat(63)), "x"), None);
+        assert_eq!(sum_for(&format!("{}  x\n", "AB".repeat(32)), "x"), Some("ab".repeat(32)));
+        assert_eq!(sum_for(&format!("{b} *x\n"), "x"), Some(b));
     }
 }

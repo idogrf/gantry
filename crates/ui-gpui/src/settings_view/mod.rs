@@ -212,6 +212,12 @@ pub(crate) enum SettingsEvent {
     ReconnectHost(String),
     /// Ask GitHub for a newer release now.
     CheckNow,
+    /// Download and install the newest release (or try again after a failure).
+    DownloadUpdate,
+    /// Stop the running download.
+    CancelUpdate,
+    /// Start the installed newer Gantry and quit.
+    RestartToUpdate,
     /// Open the custom color picker for a status fill.
     CustomColor(app_core::session_tree::Tone),
 }
@@ -262,6 +268,7 @@ pub(crate) struct SettingsView {
     ssh_message: Option<String>,
     _host_statuses: Subscription,
     _check_row: Subscription,
+    _update_row: Subscription,
 }
 
 impl SettingsView {
@@ -302,6 +309,7 @@ impl SettingsView {
             ssh_message: None,
             _host_statuses: cx.observe_global::<ssh_hosts::HostStatuses>(|_, cx| cx.notify()),
             _check_row: cx.observe_global::<crate::release_check::CheckRow>(|_, cx| cx.notify()),
+            _update_row: cx.observe_global::<crate::self_update::UpdateRow>(|_, cx| cx.notify()),
         }
     }
 

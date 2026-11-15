@@ -31,8 +31,10 @@ pub(crate) struct UpdateRow {
     pub offer: Offer,
     /// The update run.
     pub run: Run,
-    /// A newer version is installed and Restart and update is offered.
-    pub restart_ready: bool,
+    /// The newest release's page, while one newer than this Gantry is offered.
+    pub page: Option<String>,
+    /// The version Restart and update runs, while it is offered.
+    pub restart_ready: Option<Version>,
 }
 
 impl Global for UpdateRow {}

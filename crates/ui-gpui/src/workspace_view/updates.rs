@@ -116,7 +116,11 @@ impl WorkspaceView {
             // A running update keeps the offer it started from: no probe file in the install folder on every percent.
             offer: if self.self_update.busy() { cx.global::<UpdateRow>().offer.clone() } else { self.update_offer() },
             run: self.self_update.clone(),
-            restart_ready: self.update_notice().is_some(),
+            page: self
+                .online_notice()
+                .and_then(|online| online.newer.first().map(|release| release.url.clone()))
+                .filter(|url| !url.is_empty()),
+            restart_ready: self.update_notice().map(|update| update.target),
         };
         if *cx.global::<UpdateRow>() != row {
             cx.set_global(row);

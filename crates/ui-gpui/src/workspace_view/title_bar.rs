@@ -371,14 +371,21 @@ impl WorkspaceView {
                         .on_click(cx.listener(|this, _, _, cx| this.cancel_self_update(cx))),
                 ),
             Run::Installing { .. } => foot.children(row.run.line().map(muted)),
-            Run::Failed { detail, .. } => foot
-                .children(row.run.line().map(|line| div().text_xs().text_color(rgb(theme.tokens.danger)).child(line)))
-                .child(muted(detail.clone()))
-                .child(
-                    card_button("retry-update", "Retry", true, theme)
-                        .on_click(cx.listener(|this, _, _, cx| this.start_self_update(cx))),
+            Run::Failed { detail, .. } => {
+                // Retry only while the release can still be installed here.
+                let retry = matches!(row.offer, Offer::Install(..));
+                foot.children(
+                    row.run.line().map(|line| div().text_xs().text_color(rgb(theme.tokens.danger)).child(line)),
                 )
-                .children(open_page(false)),
+                .child(muted(detail.clone()))
+                .when(retry, |foot| {
+                    foot.child(
+                        card_button("retry-update", "Retry", true, theme)
+                            .on_click(cx.listener(|this, _, _, cx| this.start_self_update(cx))),
+                    )
+                })
+                .children(open_page(!retry))
+            }
             Run::Idle | Run::Done(_) => match row.offer {
                 Offer::Install(..) => foot
                     .child(

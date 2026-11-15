@@ -1,6 +1,6 @@
 //! Click to update: the one update run, what this Gantry can install, and the `UpdateRow` global.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -24,8 +24,13 @@ impl WorkspaceView {
         }
         let endpoint = release_check::endpoint();
         let extra_origin = if test_server { origin_of(&endpoint) } else { None };
+        // A binary an install replaced reads as "<path> (deleted)": its path is the new file's.
+        let exe = std::env::current_exe().map(|exe| {
+            let text = exe.to_string_lossy();
+            text.strip_suffix(" (deleted)").map_or_else(|| exe.clone(), PathBuf::from)
+        });
         let (Some(exe), Some(home)) = (
-            std::env::current_exe().and_then(|exe| exe.canonicalize()).ok(),
+            exe.and_then(|exe| exe.canonicalize()).ok(),
             std::env::home_dir().and_then(|home| home.canonicalize().ok()),
         ) else {
             return Offer::NotHere(None);
@@ -108,7 +113,8 @@ impl WorkspaceView {
     pub(super) fn publish_update_row(&mut self, cx: &mut Context<Self>) {
         let row = UpdateRow {
             latest: self.releases.iter().map(|release| release.version).max(),
-            offer: self.update_offer(),
+            // A running update keeps the offer it started from: no probe file in the install folder on every percent.
+            offer: if self.self_update.busy() { cx.global::<UpdateRow>().offer.clone() } else { self.update_offer() },
             run: self.self_update.clone(),
             restart_ready: self.update_notice().is_some(),
         };

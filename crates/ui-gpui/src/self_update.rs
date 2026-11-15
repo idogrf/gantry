@@ -155,6 +155,10 @@ fn download(
             progress(now);
         }
     }
+    // The whole file is in even when its size was unknown or wrong: the run moves on to checking and installing.
+    if shown.is_none_or(|shown| shown < 100) {
+        progress(100);
+    }
     out.sync_all().map_err(download_failed)?;
     Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
 }
@@ -386,6 +390,21 @@ mod tests {
         assert_eq!(seen.last(), Some(&100));
         assert!(seen.windows(2).all(|pair| pair[0] < pair[1]), "{seen:?}");
         assert!(setup.tmp_is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs the Linux install.sh: Linux only")]
+    fn ends_at_100_without_a_known_size() {
+        let close_delimited = |bytes: &[u8]| {
+            let mut response = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+            response.extend_from_slice(bytes);
+            response
+        };
+        let mut setup = Setup::new(close_delimited, good_sums, "9.9.9");
+        setup.pick.file.size = 0;
+        let mut seen = Vec::new();
+        assert_eq!(setup.run(false, &mut |n| seen.push(n)), Ok(v("9.9.9")));
+        assert_eq!(seen.last(), Some(&100), "{seen:?}");
     }
 
     #[test]

@@ -74,6 +74,7 @@ impl WorkspaceView {
                 self.release_etag = None;
                 self.release_card = None;
                 self.set_check_row(CheckStatus::Idle, cx);
+                self.publish_update_row(cx);
                 cx.notify();
             }
         }

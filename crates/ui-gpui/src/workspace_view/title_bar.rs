@@ -2,12 +2,13 @@ use super::{OpenSettings, SIDEBAR_EDGE, WorkspaceView};
 use std::time::{Duration, SystemTime};
 
 use app_core::release::{self, CheckStatus, Inline, NotesBlock, Online, Release};
+use app_core::self_update::{Offer, Run};
 use app_core::sidebar_compact;
 use app_core::version::{self, Update, Version};
 use daemon::paths::{Paths, current_profile};
 use gpui::{
     Context, Decorations, Div, FocusHandle, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent,
-    StyledText, Task, Window, div, img, prelude::*, px, rgb,
+    StyledText, Task, Window, div, img, prelude::*, px, relative, rgb,
 };
 
 use app_core::session_tree::{Tone, display_path, leaf_tone, status_tone, tone_word};
@@ -15,6 +16,7 @@ use app_core::session_tree::{Tone, display_path, leaf_tone, status_tone, tone_wo
 use crate::assets::LOGO;
 use crate::hover_card::{self, HoverCard};
 use crate::release_check::{self, CheckRow};
+use crate::self_update::UpdateRow;
 use crate::settings_store::SettingsStore;
 use crate::theme::{
     RADIUS, RADIUS_SMALL, Theme, container_icon, dir_badge, pane_marker, pin_icon, ssh_icon, sweeping, theme,
@@ -31,6 +33,7 @@ impl WorkspaceView {
     #[cfg(target_os = "linux")]
     pub(crate) fn installed_version(&mut self, version: Version, cx: &mut Context<Self>) {
         self.installed = Some(version);
+        self.publish_update_row(cx);
         cx.notify();
     }
 
@@ -109,6 +112,7 @@ impl WorkspaceView {
             let status = if failed { CheckStatus::Failed } else { release::check_status(running, &self.releases) };
             self.set_check_row(status, cx);
         }
+        self.publish_update_row(cx);
         cx.notify();
     }
 
@@ -237,7 +241,7 @@ impl WorkspaceView {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(theme.tokens.accent))
                         .cursor_pointer()
-                        .child(online.pill())
+                        .child(self.self_update.pill().unwrap_or_else(|| online.pill()))
                         .on_click(cx.listener(|this, _, window, cx| {
                             let focus = cx.focus_handle();
                             window.focus(&focus, cx);
@@ -342,30 +346,52 @@ impl WorkspaceView {
             )
             .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(format!("This window runs {running}.")))
             .child(div().id("release-notes").max_h(theme.ui(380.)).overflow_y_scroll().child(notes))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(theme.tokens.muted))
-                    .child("Download it from the release page and install as before."),
-            )
-            .when_some(url, |card, url| {
-                card.child(
-                    div()
-                        .id("open-release-page")
-                        .h(theme.ui(32.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(RADIUS_SMALL))
-                        .bg(rgb(theme.tokens.accent))
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme.tokens.on_accent))
-                        .cursor_pointer()
-                        .child("Open release page")
-                        .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
-                )
+            .child(self.render_update_actions(url, theme, cx))
+    }
+
+    /// The release card's foot, by what this Gantry can do and how far the update run is.
+    fn render_update_actions(&self, url: Option<String>, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let row = cx.global::<UpdateRow>().clone();
+        let foot = div().flex().flex_col().gap(theme.ui(10.));
+        let muted = |text: String| div().text_xs().text_color(rgb(theme.tokens.muted)).child(text);
+        let open_page = |primary: bool| {
+            url.clone().map(|url| {
+                card_button("open-release-page", "Open release page", primary, theme)
+                    .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
             })
+        };
+        match &row.run {
+            Run::Downloading { percent, .. } => foot
+                .children(row.run.line().map(|line| div().text_xs().text_color(rgb(theme.tokens.text)).child(line)))
+                .child(div().h(theme.ui(4.)).w_full().rounded_full().bg(rgb(theme.tokens.line)).child(
+                    div().h_full().w(relative(f32::from(*percent) / 100.)).rounded_full().bg(rgb(theme.tokens.accent)),
+                ))
+                .child(
+                    card_button("cancel-update", "Cancel", false, theme)
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_self_update(cx))),
+                ),
+            Run::Installing { .. } => foot.children(row.run.line().map(muted)),
+            Run::Failed { detail, .. } => foot
+                .children(row.run.line().map(|line| div().text_xs().text_color(rgb(theme.tokens.danger)).child(line)))
+                .child(muted(detail.clone()))
+                .child(
+                    card_button("retry-update", "Retry", true, theme)
+                        .on_click(cx.listener(|this, _, _, cx| this.start_self_update(cx))),
+                )
+                .children(open_page(false)),
+            Run::Idle | Run::Done(_) => match row.offer {
+                Offer::Install(..) => foot
+                    .child(
+                        card_button("download-and-install", "Download and install", true, theme)
+                            .on_click(cx.listener(|this, _, _, cx| this.start_self_update(cx))),
+                    )
+                    .children(open_page(false)),
+                Offer::NotHere(Some(line)) => foot.child(muted(line)).children(open_page(true)),
+                Offer::NotHere(None) | Offer::None => foot
+                    .child(muted("Download it from the release page and install as before.".to_string()))
+                    .children(open_page(true)),
+            },
+        }
     }
 
     /// The middle of the title bar: `Settings`, or the project and the focused session's chip.
@@ -503,6 +529,28 @@ pub(crate) fn round_button(
         .cursor_pointer()
         .child(label)
         .on_click(on_click)
+}
+
+/// A full-width button of the release card: accent when `primary`, else outlined.
+fn card_button(id: &'static str, label: &'static str, primary: bool, theme: &Theme) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .h(theme.ui(32.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(RADIUS_SMALL))
+        .text_sm()
+        .font_weight(FontWeight::SEMIBOLD)
+        .cursor_pointer()
+        .map(|button| {
+            if primary {
+                button.bg(rgb(theme.tokens.accent)).text_color(rgb(theme.tokens.on_accent))
+            } else {
+                button.border_1().border_color(rgb(theme.tokens.line)).text_color(rgb(theme.tokens.text))
+            }
+        })
+        .child(label)
 }
 
 /// `inline` with its bold parts drawn bold.

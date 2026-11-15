@@ -1,8 +1,5 @@
 //! Click to update: downloads a release file, checks its SHA-256, installs it and confirms the new version.
 
-// The UI starts a run in a later change; until then only the tests call it.
-#![allow(dead_code)]
-
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -11,8 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use app_core::release::{Asset, sum_for};
-use app_core::self_update::{Pick, Step, Target, percent};
+use app_core::self_update::{Offer, Pick, Run, Step, Target, percent};
 use app_core::version::Version;
+use gpui::Global;
 use sha2::{Digest, Sha256};
 
 use crate::update_watch::{PROBE_TIMEOUT, probe};
@@ -23,6 +21,21 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a whole download may take.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// What the update UI shows, published by the workspace for the release card and Settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct UpdateRow {
+    /// The newest published release known.
+    pub latest: Option<Version>,
+    /// Whether this Gantry can install it.
+    pub offer: Offer,
+    /// The update run.
+    pub run: Run,
+    /// A newer version is installed and Restart and update is offered.
+    pub restart_ready: bool,
+}
+
+impl Global for UpdateRow {}
 
 /// Why an update run stopped.
 #[derive(Clone, Debug, PartialEq, Eq)]

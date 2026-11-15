@@ -1,0 +1,126 @@
+//! Click to update: the one update run, what this Gantry can install, and the `UpdateRow` global.
+
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use app_core::self_update::{self, Offer, Platform, Run, install_target, origin_of, pick};
+use gpui::Context;
+
+use super::WorkspaceView;
+use crate::release_check;
+use crate::self_update::{Failure, UpdateRow};
+
+impl WorkspaceView {
+    /// What the release card offers for the newest release: nothing without one, else whether and how this Gantry can
+    /// install it.
+    pub(super) fn update_offer(&self) -> Offer {
+        let Some(online) = self.online_notice() else { return Offer::None };
+        let Some(platform) = Platform::current() else { return Offer::NotHere(None) };
+        // A debug build only updates from the test server (`GANTRY_UPDATE_URL`), whose address its files may use.
+        let test_server = cfg!(debug_assertions) && std::env::var("GANTRY_UPDATE_URL").is_ok_and(|url| !url.is_empty());
+        if cfg!(debug_assertions) && !test_server {
+            return Offer::NotHere(None);
+        }
+        let endpoint = release_check::endpoint();
+        let extra_origin = if test_server { origin_of(&endpoint) } else { None };
+        let (Some(exe), Some(home)) = (
+            std::env::current_exe().and_then(|exe| exe.canonicalize()).ok(),
+            std::env::home_dir().and_then(|home| home.canonicalize().ok()),
+        ) else {
+            return Offer::NotHere(None);
+        };
+        let release = self.releases.iter().find(|release| release.version == online.latest);
+        self_update::offer(
+            install_target(platform, &exe, &home, writable),
+            release.and_then(|release| pick(release, platform, extra_origin)),
+        )
+    }
+
+    /// Downloads and installs the newest release, unless a run is already going or it cannot be installed here.
+    pub(super) fn start_self_update(&mut self, cx: &mut Context<Self>) {
+        if self.self_update.busy() {
+            return;
+        }
+        let (Some(online), Offer::Install(target, pick)) = (self.online_notice(), self.update_offer()) else {
+            self.publish_update_row(cx);
+            return;
+        };
+        let version = online.latest;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.self_update_cancel = Some(cancel.clone());
+        self.self_update = Run::Downloading { version, percent: 0 };
+        self.publish_update_row(cx);
+        cx.notify();
+        let (sender, progress) = async_channel::unbounded::<u8>();
+        let work = cx.background_executor().spawn(async move {
+            crate::self_update::run(&pick, &target, version, &cancel, &mut |percent| {
+                let _ = sender.try_send(percent);
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            // The channel closes when the run returns (its sender is dropped with it).
+            while let Ok(percent) = progress.recv().await {
+                if this.update(cx, |view, cx| view.self_update_progress(percent, cx)).is_err() {
+                    return;
+                }
+            }
+            let result = work.await;
+            let _ = this.update(cx, |view, cx| view.self_update_finished(result, cx));
+        })
+        .detach();
+    }
+
+    /// Stops the download; the run ends as Idle when the engine notices.
+    pub(super) fn cancel_self_update(&mut self, cx: &mut Context<Self>) {
+        if let (Run::Downloading { .. }, Some(cancel)) = (&self.self_update, &self.self_update_cancel) {
+            cancel.store(true, Ordering::Relaxed);
+            cx.notify();
+        }
+    }
+
+    /// A new download percentage; the whole file is in at 100, then it is checked and installed.
+    fn self_update_progress(&mut self, percent: u8, cx: &mut Context<Self>) {
+        let Run::Downloading { version, .. } = self.self_update else { return };
+        self.self_update =
+            if percent >= 100 { Run::Installing { version } } else { Run::Downloading { version, percent } };
+        self.publish_update_row(cx);
+        cx.notify();
+    }
+
+    /// The run's answer. A good install is the installed version, so the install notice and its Restart and update
+    /// take over (on Linux the binary watcher reports the same version).
+    fn self_update_finished(&mut self, result: Result<app_core::version::Version, Failure>, cx: &mut Context<Self>) {
+        self.self_update_cancel = None;
+        self.self_update = match result {
+            Ok(version) => {
+                self.installed = Some(version);
+                Run::Done(version)
+            }
+            Err(Failure::Cancelled) => Run::Idle,
+            Err(Failure::At(step, detail)) => Run::Failed { step, detail },
+        };
+        self.publish_update_row(cx);
+        cx.notify();
+    }
+
+    /// Publishes what the release card and Settings show, when it changed.
+    pub(super) fn publish_update_row(&mut self, cx: &mut Context<Self>) {
+        let row = UpdateRow {
+            latest: self.releases.iter().map(|release| release.version).max(),
+            offer: self.update_offer(),
+            run: self.self_update.clone(),
+            restart_ready: self.update_notice().is_some(),
+        };
+        if *cx.global::<UpdateRow>() != row {
+            cx.set_global(row);
+        }
+    }
+}
+
+/// Whether a file can be made (and removed) in `dir`.
+fn writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".gantry-update-probe-{}", std::process::id()));
+    let made = std::fs::File::create(&probe).is_ok();
+    made && std::fs::remove_file(&probe).is_ok()
+}

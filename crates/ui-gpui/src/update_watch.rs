@@ -164,14 +164,17 @@ pub(crate) fn restart_command(path: &Path, resume_sessions: bool) -> Command {
     restart_command_for(path, resume_sessions, cfg!(target_os = "macos"))
 }
 
-/// [`restart_command`] for macOS (`open -n` on the `.app` three levels above `path`) or another system.
+/// [`restart_command`] for macOS (`open -n` on the `.app` three levels above `path`, when there is one) or another
+/// system (the binary itself).
 fn restart_command_for(path: &Path, resume_sessions: bool, macos: bool) -> Command {
-    let mut command = if macos {
-        let mut open = Command::new("open");
-        open.arg("-n").arg(path.ancestors().nth(3).unwrap_or(path)).arg("--args");
-        open
-    } else {
-        Command::new(path)
+    let bundle = path.ancestors().nth(3).filter(|app| app.extension().is_some_and(|ext| ext == "app"));
+    let mut command = match bundle {
+        Some(app) if macos => {
+            let mut open = Command::new("open");
+            open.arg("-n").arg(app).arg("--args");
+            open
+        }
+        _ => Command::new(path),
     };
     if resume_sessions {
         command.arg("--resume-sessions");
@@ -288,5 +291,13 @@ mod tests {
         assert_eq!(restart_command_for(path, true, true).get_program(), "open");
         assert_eq!(args(true), ["-n", "/Applications/Gantry.app", "--args", "--resume-sessions"]);
         assert_eq!(args(false), ["-n", "/Applications/Gantry.app", "--args"]);
+    }
+
+    #[test]
+    fn restart_command_outside_a_bundle_runs_the_binary_on_macos_too() {
+        let path = std::path::Path::new("/Users/me/gantry/target/debug/gantry");
+        let command = restart_command_for(path, true, true);
+        assert_eq!(command.get_program(), path.as_os_str());
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["--resume-sessions"]);
     }
 }

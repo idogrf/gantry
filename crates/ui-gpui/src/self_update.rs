@@ -194,7 +194,9 @@ fn swap(app: &Path) -> Result<(), Failure> {
     let (staged, old) = beside(app);
     std::fs::rename(app, &old).map_err(rename_failed)?;
     if let Err(error) = std::fs::rename(&staged, app) {
-        let _ = std::fs::rename(&old, app);
+        if let Err(back) = std::fs::rename(&old, app) {
+            tracing::warn!("old app not moved back from {} to {}: {back}", old.display(), app.display());
+        }
         return Err(rename_failed(error));
     }
     if let Err(error) = std::fs::remove_dir_all(&old) {
@@ -469,6 +471,17 @@ mod tests {
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(result, Err(Failure::At(Step::Permission, _))), "{result:?}");
         assert_eq!(reports(&app), Some(v("0.1.0")));
+    }
+
+    #[test]
+    fn swap_without_a_staged_bundle_puts_the_old_one_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("Applications/Gantry.app");
+        script(&app.join("Contents/MacOS/gantry"), "echo \"gantry 0.1.0 (old)\"");
+        let result = swap(&app);
+        assert!(matches!(result, Err(Failure::At(Step::Install, _))), "{result:?}");
+        assert_eq!(reports(&app), Some(v("0.1.0")));
+        assert!(!dir.path().join("Applications/.Gantry.app.old").exists());
     }
 
     const DMG: &str = "gantry-9.9.9-aarch64-macos.dmg";

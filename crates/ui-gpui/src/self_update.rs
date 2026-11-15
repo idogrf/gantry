@@ -1,0 +1,368 @@
+//! Click to update: downloads a release file, checks its SHA-256, installs it and confirms the new version.
+
+// The UI starts a run in a later change; until then only the tests call it.
+#![allow(dead_code)]
+
+use std::fs::File;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use app_core::release::{Asset, sum_for};
+use app_core::self_update::{Pick, Step, Target, percent};
+use app_core::version::Version;
+use sha2::{Digest, Sha256};
+
+use crate::update_watch::{PROBE_TIMEOUT, probe};
+
+/// How long connecting to the server may take.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the server may take to answer a request.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a whole download may take.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// Why an update run stopped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Failure {
+    /// The user cancelled it.
+    Cancelled,
+    /// A step failed, with the detail.
+    At(Step, String),
+}
+
+/// Downloads `pick`, checks it, installs it over `target` and confirms that the install reports `version`.
+pub(crate) fn run(
+    pick: &Pick,
+    target: &Target,
+    version: Version,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u8),
+) -> Result<Version, Failure> {
+    run_in(&std::env::temp_dir(), &[], pick, target, version, cancel, progress)
+}
+
+/// [`run`] with its working folder made under `tmp_parent` and `env` added to the installer's environment.
+pub(crate) fn run_in(
+    tmp_parent: &Path,
+    env: &[(&str, &Path)],
+    pick: &Pick,
+    target: &Target,
+    version: Version,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u8),
+) -> Result<Version, Failure> {
+    let tmp = TempDir::new(tmp_parent).map_err(|error| Failure::At(Step::Download, error.to_string()))?;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(DOWNLOAD_TIMEOUT))
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_recv_response(Some(RESPONSE_TIMEOUT))
+        .build()
+        .into();
+    let file = tmp.0.join(&pick.file.name);
+    let digest = download(&agent, &pick.file, &file, cancel, progress)?;
+    let sums = download_text(&agent, &pick.sums)?;
+    let Some(expected) = sum_for(&sums, &pick.file.name) else {
+        return Err(Failure::At(Step::Hash, format!("{} lists no checksum for {}", pick.sums.name, pick.file.name)));
+    };
+    if expected != digest {
+        return Err(Failure::At(Step::Hash, format!("expected {expected}, got {digest}")));
+    }
+    match target {
+        Target::Linux { home } => install_linux(&file, &tmp.0, home, env, version)?,
+        Target::Mac { .. } => return Err(Failure::At(Step::Install, "not on this platform".into())),
+    }
+    match probe(&target.installed_binary(), PROBE_TIMEOUT) {
+        Some(installed) if installed == version => Ok(installed),
+        Some(installed) => Err(Failure::At(Step::Version, format!("it reports {installed}"))),
+        None => Err(Failure::At(Step::Version, "it did not report a version".into())),
+    }
+}
+
+/// A fresh folder, removed when dropped.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(parent: &Path) -> std::io::Result<TempDir> {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_nanos());
+        let mut attempt = 0u32;
+        loop {
+            let path = parent.join(format!("gantry-update-{}-{nanos}-{attempt}", std::process::id()));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(TempDir(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt < 100 => attempt += 1,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn download_failed(error: impl std::fmt::Display) -> Failure {
+    Failure::At(Step::Download, error.to_string())
+}
+
+/// Streams `asset` into `path`, reporting each new whole percent; returns the file's SHA-256 in lowercase hex.
+fn download(
+    agent: &ureq::Agent,
+    asset: &Asset,
+    path: &Path,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u8),
+) -> Result<String, Failure> {
+    let mut response = agent.get(&asset.url).call().map_err(download_failed)?;
+    let total = response.body().content_length().or(Some(asset.size));
+    let mut reader = response.body_mut().as_reader();
+    let mut out = File::create(path).map_err(download_failed)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut done = 0u64;
+    let mut shown = None;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Failure::Cancelled);
+        }
+        let read = reader.read(&mut buffer).map_err(download_failed)?;
+        if read == 0 {
+            break;
+        }
+        out.write_all(&buffer[..read]).map_err(download_failed)?;
+        hasher.update(&buffer[..read]);
+        done += read as u64;
+        let now = percent(done, total);
+        if shown != Some(now) {
+            shown = Some(now);
+            progress(now);
+        }
+    }
+    out.sync_all().map_err(download_failed)?;
+    Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Fetches a small text file such as `SHA256SUMS`.
+fn download_text(agent: &ureq::Agent, asset: &Asset) -> Result<String, Failure> {
+    let mut response = agent.get(&asset.url).call().map_err(download_failed)?;
+    response.body_mut().read_to_string().map_err(download_failed)
+}
+
+/// Unpacks the tarball into `tmp` and runs its `install.sh` for `home`.
+fn install_linux(file: &Path, tmp: &Path, home: &Path, env: &[(&str, &Path)], version: Version) -> Result<(), Failure> {
+    let mut tar = Command::new("tar");
+    tar.arg("-xzf").arg(file).arg("-C").arg(tmp);
+    run_step(&mut tar)?;
+    let mut install = Command::new("sh");
+    install.arg(tmp.join(format!("gantry-{version}/install.sh"))).env("HOME", home);
+    for (key, value) in env {
+        install.env(key, value);
+    }
+    run_step(&mut install)
+}
+
+/// Runs an install command; a failure carries the end of its error output.
+fn run_step(command: &mut Command) -> Result<(), Failure> {
+    let output = command.output().map_err(|error| Failure::At(Step::Install, error.to_string()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<&str> = stderr.trim_end().lines().collect();
+    let tail = lines[lines.len().saturating_sub(5)..].join("\n");
+    Err(Failure::At(Step::Install, if tail.is_empty() { output.status.to_string() } else { tail }))
+}
+
+// Linux only: the fixtures are packed with `tar`, run through `sh` and installed by the real Linux `install.sh`.
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::os::unix::fs::PermissionsExt;
+
+    const NAME: &str = "gantry-9.9.9-x86_64-linux.tar.gz";
+
+    fn v(text: &str) -> Version {
+        Version::parse(text).unwrap()
+    }
+
+    fn sha256(bytes: &[u8]) -> String {
+        Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn script(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A release tarball whose `gantry` reports `reported`.
+    fn tarball(dir: &Path, reported: &str) -> Vec<u8> {
+        let stage = dir.join("stage/gantry-9.9.9");
+        script(&stage.join("gantry"), &format!("echo \"gantry {reported} (test)\""));
+        script(&stage.join("gantryd"), "echo \"gantryd 9.9.9 (test)\"");
+        let packaging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/linux");
+        for name in ["install.sh", "io.github.idogrf.Gantry.desktop", "io.github.idogrf.Gantry.svg"] {
+            std::fs::copy(packaging.join(name), stage.join(name)).unwrap();
+        }
+        let out = dir.join(NAME);
+        let status = Command::new("tar")
+            .arg("-C")
+            .arg(dir.join("stage"))
+            .arg("-czf")
+            .arg(&out)
+            .arg("gantry-9.9.9")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::read(out).unwrap()
+    }
+
+    fn ok(body: &[u8]) -> Vec<u8> {
+        let mut response =
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
+    /// Serves canned raw responses by request path on a local port; returns the base URL.
+    fn serve(routes: Vec<(&'static str, Vec<u8>)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let request = String::from_utf8_lossy(&request);
+                let path = request.split_whitespace().nth(1).unwrap_or("");
+                let response = routes.iter().find(|(route, _)| path == format!("/{route}")).map_or(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+                    |r| r.1.clone(),
+                );
+                let _ = stream.write_all(&response);
+            }
+        });
+        base
+    }
+
+    struct Setup {
+        _dir: tempfile::TempDir,
+        home: PathBuf,
+        tmp: PathBuf,
+        pick: Pick,
+    }
+
+    impl Setup {
+        /// A home with an old `gantry` (0.1.0) and a server answering with `file` and `sums` responses.
+        fn new(file: impl FnOnce(&[u8]) -> Vec<u8>, sums: impl FnOnce(&[u8]) -> String, reported: &str) -> Setup {
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().join("home");
+            script(&home.join(".local/bin/gantry"), "echo \"gantry 0.1.0 (old)\"");
+            let tmp = dir.path().join("tmp");
+            std::fs::create_dir(&tmp).unwrap();
+            let bytes = tarball(dir.path(), reported);
+            let base = serve(vec![(NAME, file(&bytes)), ("SHA256SUMS", ok(sums(&bytes).as_bytes()))]);
+            let pick = Pick {
+                file: Asset { name: NAME.into(), url: format!("{base}/{NAME}"), size: bytes.len() as u64 },
+                sums: Asset { name: "SHA256SUMS".into(), url: format!("{base}/SHA256SUMS"), size: 0 },
+            };
+            Setup { _dir: dir, home, tmp, pick }
+        }
+
+        fn run(&self, cancel: bool, progress: &mut dyn FnMut(u8)) -> Result<Version, Failure> {
+            let data = self.home.join(".local/share");
+            run_in(
+                &self.tmp,
+                &[("XDG_DATA_HOME", &data)],
+                &self.pick,
+                &Target::Linux { home: self.home.clone() },
+                v("9.9.9"),
+                &AtomicBool::new(cancel),
+                progress,
+            )
+        }
+
+        /// What the installed `gantry` reports. Tried a few times: a stub this process just wrote can briefly fail
+        /// to start ("Text file busy") while another test thread forks with its write handle still open.
+        fn installed(&self) -> Option<Version> {
+            for _ in 0..20 {
+                if let Some(version) = probe(&self.home.join(".local/bin/gantry"), PROBE_TIMEOUT) {
+                    return Some(version);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            None
+        }
+
+        fn tmp_is_empty(&self) -> bool {
+            std::fs::read_dir(&self.tmp).unwrap().next().is_none()
+        }
+    }
+
+    fn good_sums(bytes: &[u8]) -> String {
+        format!("{}  {NAME}\n{}  other.dmg\n", sha256(bytes), sha256(b"other"))
+    }
+
+    #[test]
+    fn installs_a_checked_tarball() {
+        let setup = Setup::new(ok, good_sums, "9.9.9");
+        let mut seen = Vec::new();
+        assert_eq!(setup.run(false, &mut |n| seen.push(n)), Ok(v("9.9.9")));
+        assert_eq!(setup.installed(), Some(v("9.9.9")));
+        assert!(setup.home.join(".local/bin/gantryd").is_file());
+        assert_eq!(seen.last(), Some(&100));
+        assert!(seen.windows(2).all(|pair| pair[0] < pair[1]), "{seen:?}");
+        assert!(setup.tmp_is_empty());
+    }
+
+    #[test]
+    fn wrong_checksum_touches_nothing() {
+        let setup = Setup::new(ok, |_| format!("{}  {NAME}\n", sha256(b"something else")), "9.9.9");
+        assert!(matches!(setup.run(false, &mut |_| {}), Err(Failure::At(Step::Hash, _))));
+        assert_eq!(setup.installed(), Some(v("0.1.0")));
+        assert!(setup.tmp_is_empty());
+    }
+
+    #[test]
+    fn missing_sum_line_fails_at_hash() {
+        let setup = Setup::new(ok, |_| format!("{}  other.dmg\n", sha256(b"other")), "9.9.9");
+        assert!(matches!(setup.run(false, &mut |_| {}), Err(Failure::At(Step::Hash, _))));
+        assert_eq!(setup.installed(), Some(v("0.1.0")));
+    }
+
+    #[test]
+    fn cut_download_fails() {
+        let cut =
+            |_: &[u8]| b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\n0123456789".to_vec();
+        let setup = Setup::new(cut, good_sums, "9.9.9");
+        assert!(matches!(setup.run(false, &mut |_| {}), Err(Failure::At(Step::Download, _))));
+        assert_eq!(setup.installed(), Some(v("0.1.0")));
+        assert!(setup.tmp_is_empty());
+    }
+
+    #[test]
+    fn cancel_stops_and_cleans() {
+        let setup = Setup::new(ok, good_sums, "9.9.9");
+        assert_eq!(setup.run(true, &mut |_| {}), Err(Failure::Cancelled));
+        assert_eq!(setup.installed(), Some(v("0.1.0")));
+        assert!(setup.tmp_is_empty());
+    }
+
+    #[test]
+    fn version_must_match() {
+        let setup = Setup::new(ok, good_sums, "9.9.8");
+        assert!(matches!(setup.run(false, &mut |_| {}), Err(Failure::At(Step::Version, _))));
+        assert!(setup.tmp_is_empty());
+    }
+}

@@ -22,6 +22,7 @@ tracing.workspace = true
 notify-rust.workspace = true
 rodio.workspace = true
 ureq = "3.4.2"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile.workspace = true

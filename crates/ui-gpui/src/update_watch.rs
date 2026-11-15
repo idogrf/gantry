@@ -234,7 +234,16 @@ mod tests {
     fn probe_reads_the_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = script(dir.path(), "gantry", "echo 'gantry 9.9.9 (abc1234)'");
-        assert_eq!(probe(&path, PROBE_TIMEOUT), app_core::version::Version::parse("9.9.9"));
+        // A few tries: a script this process just wrote can briefly fail to start ("Text file busy") while another
+        // test thread forks with its write handle still open.
+        let found = (0..20).find_map(|_| {
+            let version = probe(&path, PROBE_TIMEOUT);
+            if version.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            version
+        });
+        assert_eq!(found, app_core::version::Version::parse("9.9.9"));
     }
 
     #[cfg(unix)]

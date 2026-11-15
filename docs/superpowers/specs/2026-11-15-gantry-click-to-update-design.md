@@ -153,8 +153,14 @@ normal app launch.
 - **Failed:** one line with what failed (download, hash, install, version check, permission refused) and the detail in
   the card's small text; **Retry** and **Open release page**.
 
-Settings > Window > Updates (Check now) keeps its Open release page only (builder may add the same button there if it
-falls out of the code for free).
+### Settings > Window > Updates
+
+The Check now row offers the same update. When a newer release is known (from Check now or the scheduled check) and
+this Gantry can install itself, the row shows **Download and install** beside Open release page; otherwise the reason
+line and Open release page, as in the card. It is the same run as the card's, not a second one: the row and the card
+show the same state (percentage and Cancel, Installing…, the failure line with Retry), and when the install is done the
+row offers **Restart and update**, the same action as the title-bar card. The workspace publishes the run's state to
+the Settings page the way it publishes `CheckRow` today.
 
 ## Code layout (suggested)
 
@@ -162,7 +168,8 @@ falls out of the code for free).
 - `app-core::self_update` (new, pure): `install_target`, the asset pick per platform, the card state machine
   (`Available`, `Downloading { percent }`, `Installing`, `Failed { step, detail }`) and its texts. Unit tested.
 - `ui-gpui::self_update` (new): the download, check and install steps on a background thread, cancel flag, progress
-  reports; `workspace_view/title_bar.rs` draws the states.
+  reports; `workspace_view/title_bar.rs` draws the states in the card, `settings_view/window.rs` in the Updates row
+  (from a global the workspace publishes, like `release_check::CheckRow`; its buttons send `SettingsEvent`s).
 - No protocol, daemon or `claude-index` change. `sha2` (already used by `daemon`) can be added to `ui-gpui`.
 
 ## Testing

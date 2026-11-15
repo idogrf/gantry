@@ -137,6 +137,7 @@ impl WorkspaceView {
         if !update_watch::probe(&path, update_watch::PROBE_TIMEOUT).is_some_and(|version| version >= update.target) {
             self.update_error =
                 Some(format!("Could not start {}: it does not report version {}", path.display(), update.target));
+            self.publish_update_row(cx);
             cx.notify();
             return;
         }
@@ -152,6 +153,7 @@ impl WorkspaceView {
             Ok(_) => cx.quit(),
             Err(err) => {
                 self.update_error = Some(format!("Could not start {}: {err}", path.display()));
+                self.publish_update_row(cx);
                 cx.notify();
             }
         }
@@ -221,6 +223,7 @@ impl WorkspaceView {
                             window.focus(&focus, cx);
                             this.update_card = Some(focus);
                             this.update_error = None;
+                            this.publish_update_row(cx);
                             cx.notify();
                         })),
                 )

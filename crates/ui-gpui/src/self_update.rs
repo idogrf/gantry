@@ -13,7 +13,7 @@ use app_core::version::Version;
 use gpui::Global;
 use sha2::{Digest, Sha256};
 
-use crate::update_watch::{PROBE_TIMEOUT, probe};
+use crate::update_watch::probe;
 
 /// How long connecting to the server may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -21,6 +21,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a whole download may take.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// How long the new install may take to report its version: a first launch on macOS waits for its security checks.
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// What the update UI shows, published by the workspace for the release card and Settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -35,6 +37,8 @@ pub(crate) struct UpdateRow {
     pub page: Option<String>,
     /// The update notice, while Restart and update is offered.
     pub restart: Option<app_core::version::Update>,
+    /// Why Restart and update failed.
+    pub restart_error: Option<String>,
 }
 
 impl Global for UpdateRow {}
@@ -85,11 +89,15 @@ pub(crate) fn run_in(
     if expected != digest {
         return Err(Failure::At(Step::Hash, format!("expected {expected}, got {digest}")));
     }
+    // A run cancelled while it was finishing its download never installs.
+    if cancel.load(Ordering::Relaxed) {
+        return Err(Failure::Cancelled);
+    }
     match target {
         Target::Linux { home } => install_linux(&file, &tmp.0, home, env, version)?,
         Target::Mac { app } => install_mac(&file, &tmp.0, app)?,
     }
-    match probe(&target.installed_binary(), PROBE_TIMEOUT) {
+    match probe(&target.installed_binary(), CONFIRM_TIMEOUT) {
         Some(installed) if installed == version => Ok(installed),
         Some(installed) => Err(Failure::At(Step::Version, format!("it reports {installed}"))),
         None => Err(Failure::At(Step::Version, "it did not report a version".into())),
@@ -248,8 +256,10 @@ fn run_step(command: &mut Command) -> Result<(), Failure> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::update_watch::PROBE_TIMEOUT;
     use std::net::TcpListener;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Mutex, MutexGuard};
 
     const NAME: &str = "gantry-9.9.9-x86_64-linux.tar.gz";
 
@@ -348,6 +358,10 @@ mod tests {
         }
 
         fn run(&self, cancel: bool, progress: &mut dyn FnMut(u8)) -> Result<Version, Failure> {
+            self.run_with(&AtomicBool::new(cancel), progress)
+        }
+
+        fn run_with(&self, cancel: &AtomicBool, progress: &mut dyn FnMut(u8)) -> Result<Version, Failure> {
             let data = self.home.join(".local/share");
             run_in(
                 &self.tmp,
@@ -355,7 +369,7 @@ mod tests {
                 &self.pick,
                 &Target::Linux { home: self.home.clone() },
                 v("9.9.9"),
-                &AtomicBool::new(cancel),
+                cancel,
                 progress,
             )
         }
@@ -375,6 +389,13 @@ mod tests {
         fn tmp_is_empty(&self) -> bool {
             std::fs::read_dir(&self.tmp).unwrap().next().is_none()
         }
+    }
+
+    /// A response without a length: the download reports 0% until the connection closes, then 100%.
+    fn close_delimited(bytes: &[u8]) -> Vec<u8> {
+        let mut response = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+        response.extend_from_slice(bytes);
+        response
     }
 
     fn good_sums(bytes: &[u8]) -> String {
@@ -397,11 +418,6 @@ mod tests {
     #[test]
     #[cfg_attr(not(target_os = "linux"), ignore = "needs the Linux install.sh: Linux only")]
     fn ends_at_100_without_a_known_size() {
-        let close_delimited = |bytes: &[u8]| {
-            let mut response = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
-            response.extend_from_slice(bytes);
-            response
-        };
         let mut setup = Setup::new(close_delimited, good_sums, "9.9.9");
         setup.pick.file.size = 0;
         let mut seen = Vec::new();
@@ -443,6 +459,25 @@ mod tests {
         let setup = Setup::new(ok, good_sums, "9.9.9");
         assert_eq!(setup.run(true, &mut |_| {}), Err(Failure::Cancelled));
         assert_eq!(setup.installed(), Some(v("0.1.0")));
+        assert!(setup.tmp_is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs the Linux install.sh: Linux only")]
+    fn cancel_after_the_download_never_installs() {
+        // Without a known size the 100% comes after the download's last cancel check: only the check before the
+        // install can stop this run.
+        let mut setup = Setup::new(close_delimited, good_sums, "9.9.9");
+        setup.pick.file.size = 0;
+        let cancel = AtomicBool::new(false);
+        let result = setup.run_with(&cancel, &mut |n| {
+            if n == 100 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+        assert_eq!(result, Err(Failure::Cancelled));
+        assert_eq!(setup.installed(), Some(v("0.1.0")));
+        assert!(!setup.home.join(".local/bin/gantryd").exists());
         assert!(setup.tmp_is_empty());
     }
 
@@ -559,17 +594,23 @@ mod tests {
         std::fs::read(out).unwrap()
     }
 
+    /// Held by each macOS fixture test: `hdiutil create`/`attach` run side by side intermittently fail with
+    /// "Resource busy".
+    static HDIUTIL: Mutex<()> = Mutex::new(());
+
     struct MacSetup {
         _dir: tempfile::TempDir,
         folder: PathBuf,
         app: PathBuf,
         tmp: PathBuf,
         pick: Pick,
+        _hdiutil: MutexGuard<'static, ()>,
     }
 
     impl MacSetup {
         /// An `Applications` folder with an old `Gantry.app` (0.1.0) and a server offering the new one's dmg.
         fn new() -> MacSetup {
+            let hdiutil = HDIUTIL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let dir = tempfile::tempdir().unwrap();
             let folder = dir.path().join("Applications");
             let app = folder.join("Gantry.app");
@@ -583,7 +624,7 @@ mod tests {
                 file: Asset { name: DMG.into(), url: format!("{base}/{DMG}"), size: bytes.len() as u64 },
                 sums: Asset { name: "SHA256SUMS".into(), url: format!("{base}/SHA256SUMS"), size: 0 },
             };
-            MacSetup { _dir: dir, folder, app, tmp, pick }
+            MacSetup { _dir: dir, folder, app, tmp, pick, _hdiutil: hdiutil }
         }
 
         fn run(&self) -> Result<Version, Failure> {

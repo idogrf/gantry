@@ -422,7 +422,7 @@ pub struct WorkspaceView {
     _update_watch: Option<(RecommendedWatcher, Task<()>)>,
     /// The open update card; its focus handle takes Esc.
     update_card: Option<FocusHandle>,
-    /// Why Restart and update failed, shown in the card.
+    /// Why Restart and update failed, shown in the card and Settings.
     update_error: Option<String>,
     /// Whether `checkForUpdates` is on.
     check_updates: bool,
@@ -440,6 +440,8 @@ pub struct WorkspaceView {
     self_update: Run,
     /// Set to stop that run's download.
     self_update_cancel: Option<Arc<AtomicBool>>,
+    /// Counts the runs started and cancelled: an answer from an older run is ignored.
+    self_update_generation: u64,
     /// The release check's timer.
     release_task: Option<Task<()>>,
     /// What is known about the git repos on screen.
@@ -679,6 +681,7 @@ impl WorkspaceView {
             release_card: None,
             self_update: Run::Idle,
             self_update_cancel: None,
+            self_update_generation: 0,
             release_task: None,
             git: GitRepos::default(),
             git_panel_open: false,

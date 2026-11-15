@@ -171,8 +171,8 @@ xattr -dr com.apple.quarantine /Applications/Gantry.app
 
 #### Updating
 
-Download and install in the title bar's update card (or Settings > Window > Updates) replaces `Gantry.app` in place and
-then restarts it. It needs the app to be in Applications (or another normal folder): an app still running from the disk
+Download and install in the title bar's update card (or Settings > Window > Updates) replaces `Gantry.app` in place;
+Restart and update then opens the new version. It needs the app to be in Applications (or another normal folder): an app still running from the disk
 image, or one macOS moved to a temporary location, shows the release page instead. Drag it to Applications and open it
 from there.
 

@@ -216,7 +216,7 @@ pub enum Run {
     Failed {
         /// Which step.
         step: Step,
-        /// The underlying reason, for the hover card.
+        /// The underlying reason, shown under the status line.
         detail: String,
     },
     /// The new version is installed.

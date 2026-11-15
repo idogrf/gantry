@@ -23,8 +23,8 @@ const RESTORE: [(bool, &str, &str); 2] = [
 /// What the Check now row shows of the update, by priority.
 #[derive(Debug, PartialEq, Eq)]
 enum UpdateState {
-    /// Something is older than the newest version installed: Restart and update.
-    Restart(Update),
+    /// Something is older than the newest version installed: Restart and update, with why the last try failed.
+    Restart(Update, Option<String>),
     /// The update run's line; Cancel while downloading, Retry after a failure that can be tried again.
     Running {
         /// The run's status line.
@@ -47,7 +47,7 @@ enum UpdateState {
 /// The state the row draws for `row` in a window running `running`.
 fn update_state(row: &UpdateRow, running: Version) -> UpdateState {
     if let Some(update) = row.restart {
-        return UpdateState::Restart(update);
+        return UpdateState::Restart(update, row.restart_error.clone());
     }
     if let Some(line) = row.run.line() {
         let failed = matches!(row.run, Run::Failed { .. });
@@ -232,10 +232,11 @@ impl SettingsView {
             })
         };
         let (label, buttons) = match update_state(&update, running) {
-            UpdateState::Restart(update) => (
+            UpdateState::Restart(update, error) => (
                 status(theme.tokens.accent, update.title())
                     .child(muted(theme, update.detail_text()))
-                    .child(muted(theme, update.note_text())),
+                    .child(muted(theme, update.note_text()))
+                    .children(error.map(|error| status(theme.tokens.danger, error))),
                 vec![
                     self.primary_button(
                         "restart-to-update",
@@ -456,17 +457,29 @@ mod tests {
             restart: Some(update),
             ..Default::default()
         };
-        let UpdateState::Restart(shown) = update_state(&row, v("0.14.0")) else { panic!("not the restart state") };
+        let UpdateState::Restart(shown, None) = update_state(&row, v("0.14.0")) else {
+            panic!("not the restart state")
+        };
         assert_eq!(shown.title(), "Restart to finish updating to 0.15.0");
         assert_eq!(shown.detail_text(), "Gantry 0.15.0 is installed. This window runs 0.14.0.");
         assert!(shown.note_text().starts_with("Restarting closes your 2 running sessions and then resumes them."));
     }
 
     #[test]
+    fn a_failed_restart_shows_why() {
+        let update = app_core::version::update(v("0.14.0"), Some(v("0.14.0")), Some(v("0.15.0")), 0).unwrap();
+        let row =
+            UpdateRow { restart: Some(update), restart_error: Some("Could not start x".into()), ..Default::default() };
+        assert_eq!(update_state(&row, v("0.14.0")), UpdateState::Restart(update, Some("Could not start x".into())));
+    }
+
+    #[test]
     fn an_outdated_daemon_alone_offers_restart_with_its_own_wording() {
         let update = app_core::version::update(v("0.14.0"), Some(v("0.13.0")), None, 0).unwrap();
         let row = UpdateRow { restart: Some(update), ..Default::default() };
-        let UpdateState::Restart(shown) = update_state(&row, v("0.14.0")) else { panic!("not the restart state") };
+        let UpdateState::Restart(shown, None) = update_state(&row, v("0.14.0")) else {
+            panic!("not the restart state")
+        };
         assert_eq!(shown.title(), "Restart to finish updating to 0.14.0");
         assert_eq!(shown.detail_text(), "Your running sessions still use 0.13.0.");
         assert_eq!(shown.note_text(), "Your running sessions stay open.");

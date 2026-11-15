@@ -52,6 +52,8 @@ impl WorkspaceView {
             return;
         };
         let version = online.latest;
+        self.self_update_generation += 1;
+        let generation = self.self_update_generation;
         let cancel = Arc::new(AtomicBool::new(false));
         self.self_update_cancel = Some(cancel.clone());
         self.self_update = Run::Downloading { version, percent: 0 };
@@ -66,26 +68,33 @@ impl WorkspaceView {
         cx.spawn(async move |this, cx| {
             // The channel closes when the run returns (its sender is dropped with it).
             while let Ok(percent) = progress.recv().await {
-                if this.update(cx, |view, cx| view.self_update_progress(percent, cx)).is_err() {
+                if this.update(cx, |view, cx| view.self_update_progress(generation, percent, cx)).is_err() {
                     return;
                 }
             }
             let result = work.await;
-            let _ = this.update(cx, |view, cx| view.self_update_finished(result, cx));
+            let _ = this.update(cx, |view, cx| view.self_update_finished(generation, result, cx));
         })
         .detach();
     }
 
-    /// Stops the download; the run ends as Idle when the engine notices.
+    /// Stops the download: the run is Idle at once, even while a stalled connection keeps the engine waiting, and
+    /// whatever that run answers later is ignored (it never installs once cancelled).
     pub(super) fn cancel_self_update(&mut self, cx: &mut Context<Self>) {
-        if let (Run::Downloading { .. }, Some(cancel)) = (&self.self_update, &self.self_update_cancel) {
+        if let (Run::Downloading { .. }, Some(cancel)) = (&self.self_update, self.self_update_cancel.take()) {
             cancel.store(true, Ordering::Relaxed);
+            self.self_update_generation += 1;
+            self.self_update = Run::Idle;
+            self.publish_update_row(cx);
             cx.notify();
         }
     }
 
-    /// A new download percentage; the whole file is in at 100, then it is checked and installed.
-    fn self_update_progress(&mut self, percent: u8, cx: &mut Context<Self>) {
+    /// A new download percentage of run `generation`; the whole file is in at 100, then it is checked and installed.
+    fn self_update_progress(&mut self, generation: u64, percent: u8, cx: &mut Context<Self>) {
+        if generation != self.self_update_generation {
+            return;
+        }
         let Run::Downloading { version, .. } = self.self_update else { return };
         self.self_update =
             if percent >= 100 { Run::Installing { version } } else { Run::Downloading { version, percent } };
@@ -93,13 +102,26 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// The run's answer. A good install is the installed version, so the install notice and its Restart and update
-    /// take over (on Linux the binary watcher reports the same version).
-    fn self_update_finished(&mut self, result: Result<app_core::version::Version, Failure>, cx: &mut Context<Self>) {
+    /// The answer of run `generation`, ignored when that run was cancelled. A good install is the installed version,
+    /// so the install notice and its Restart and update take over (on Linux the binary watcher reports the same
+    /// version), and an open release card becomes the update card.
+    fn self_update_finished(
+        &mut self,
+        generation: u64,
+        result: Result<app_core::version::Version, Failure>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.self_update_generation {
+            return;
+        }
         self.self_update_cancel = None;
         self.self_update = match result {
             Ok(version) => {
                 self.installed = Some(version);
+                if self.release_card.is_some() {
+                    self.update_card = self.release_card.take();
+                    self.update_error = None;
+                }
                 Run::Done(version)
             }
             Err(Failure::Cancelled) => Run::Idle,
@@ -121,6 +143,7 @@ impl WorkspaceView {
                 .and_then(|online| online.newer.first().map(|release| release.url.clone()))
                 .filter(|url| !url.is_empty()),
             restart: self.update_notice(),
+            restart_error: self.update_error.clone(),
         };
         if *cx.global::<UpdateRow>() != row {
             cx.set_global(row);

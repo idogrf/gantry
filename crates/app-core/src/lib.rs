@@ -29,6 +29,7 @@ pub mod release;
 pub mod replay;
 pub mod scroll;
 pub mod search_merge;
+pub mod self_update;
 pub mod session_tree;
 pub mod sessions;
 pub mod settings;

@@ -161,7 +161,18 @@ pub(crate) fn watch(path: &Path, cx: &mut Context<WorkspaceView>) -> Option<(Rec
 
 /// Starts the GUI at `path`, detached; `--resume-sessions` when the sessions were stopped for the update.
 pub(crate) fn restart_command(path: &Path, resume_sessions: bool) -> Command {
-    let mut command = Command::new(path);
+    restart_command_for(path, resume_sessions, cfg!(target_os = "macos"))
+}
+
+/// [`restart_command`] for macOS (`open -n` on the `.app` three levels above `path`) or another system.
+fn restart_command_for(path: &Path, resume_sessions: bool, macos: bool) -> Command {
+    let mut command = if macos {
+        let mut open = Command::new("open");
+        open.arg("-n").arg(path.ancestors().nth(3).unwrap_or(path)).arg("--args");
+        open
+    } else {
+        Command::new(path)
+    };
     if resume_sessions {
         command.arg("--resume-sessions");
     }
@@ -262,9 +273,20 @@ mod tests {
     #[test]
     fn restart_command_passes_the_resume_flag_only_when_asked() {
         let path = std::path::Path::new("/opt/gantry");
-        let args = |resume| restart_command(path, resume).get_args().map(|a| a.to_owned()).collect::<Vec<_>>();
+        let args =
+            |resume| restart_command_for(path, resume, false).get_args().map(|a| a.to_owned()).collect::<Vec<_>>();
         assert_eq!(args(true), vec![std::ffi::OsString::from("--resume-sessions")]);
         assert!(args(false).is_empty());
-        assert_eq!(restart_command(path, false).get_program(), path.as_os_str());
+        assert_eq!(restart_command_for(path, false, false).get_program(), path.as_os_str());
+    }
+
+    #[test]
+    fn restart_command_opens_the_bundle() {
+        let path = std::path::Path::new("/Applications/Gantry.app/Contents/MacOS/gantry");
+        let args =
+            |resume| restart_command_for(path, resume, true).get_args().map(|a| a.to_owned()).collect::<Vec<_>>();
+        assert_eq!(restart_command_for(path, true, true).get_program(), "open");
+        assert_eq!(args(true), ["-n", "/Applications/Gantry.app", "--args", "--resume-sessions"]);
+        assert_eq!(args(false), ["-n", "/Applications/Gantry.app", "--args"]);
     }
 }

@@ -72,7 +72,7 @@ pub(crate) fn run_in(
     }
     match target {
         Target::Linux { home } => install_linux(&file, &tmp.0, home, env, version)?,
-        Target::Mac { .. } => return Err(Failure::At(Step::Install, "not on this platform".into())),
+        Target::Mac { app } => install_mac(&file, &tmp.0, app)?,
     }
     match probe(&target.installed_binary(), PROBE_TIMEOUT) {
         Some(installed) if installed == version => Ok(installed),
@@ -165,6 +165,51 @@ fn install_linux(file: &Path, tmp: &Path, home: &Path, env: &[(&str, &Path)], ve
     run_step(&mut install)
 }
 
+/// Copies `Gantry.app` out of the disk image `dmg` beside `app`, checks its signature and swaps it in.
+fn install_mac(dmg: &Path, tmp: &Path, app: &Path) -> Result<(), Failure> {
+    let (staged, old) = beside(app);
+    let _ = std::fs::remove_dir_all(&staged);
+    let _ = std::fs::remove_dir_all(&old);
+    let mount = tmp.join("mnt");
+    let mut attach = Command::new("hdiutil");
+    attach.args(["attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint"]).arg(&mount).arg(dmg);
+    run_step(&mut attach)?;
+    let copied = run_step(Command::new("ditto").arg(mount.join("Gantry.app")).arg(&staged));
+    if let Err(Failure::At(_, detail)) = run_step(Command::new("hdiutil").arg("detach").arg(&mount)) {
+        tracing::warn!("update disk image not detached: {detail}");
+    }
+    copied?;
+    run_step(Command::new("codesign").args(["--verify", "--deep", "--strict"]).arg(&staged))?;
+    swap(app)
+}
+
+/// The staged new bundle and the old bundle's parking place, both hidden beside `app`.
+fn beside(app: &Path) -> (PathBuf, PathBuf) {
+    let dir = app.parent().unwrap_or(Path::new("."));
+    (dir.join(".Gantry.app.new"), dir.join(".Gantry.app.old"))
+}
+
+/// Moves `app` aside and the staged bundle into its place, putting `app` back when the second move fails.
+fn swap(app: &Path) -> Result<(), Failure> {
+    let (staged, old) = beside(app);
+    std::fs::rename(app, &old).map_err(rename_failed)?;
+    if let Err(error) = std::fs::rename(&staged, app) {
+        let _ = std::fs::rename(&old, app);
+        return Err(rename_failed(error));
+    }
+    if let Err(error) = std::fs::remove_dir_all(&old) {
+        tracing::warn!("old app not removed from {}: {error}", old.display());
+    }
+    Ok(())
+}
+
+/// A refused move is macOS's App Management protection (or a folder without write access); anything else is a failed
+/// install.
+fn rename_failed(error: std::io::Error) -> Failure {
+    let refused = error.kind() == std::io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(1);
+    Failure::At(if refused { Step::Permission } else { Step::Install }, error.to_string())
+}
+
 /// Runs an install command; a failure carries the end of its error output.
 fn run_step(command: &mut Command) -> Result<(), Failure> {
     let output = command.output().map_err(|error| Failure::At(Step::Install, error.to_string()))?;
@@ -177,8 +222,9 @@ fn run_step(command: &mut Command) -> Result<(), Failure> {
     Err(Failure::At(Step::Install, if tail.is_empty() { output.status.to_string() } else { tail }))
 }
 
-// Linux only: the fixtures are packed with `tar`, run through `sh` and installed by the real Linux `install.sh`.
-#[cfg(all(test, target_os = "linux"))]
+// The Linux tests run on Linux only: their fixtures are installed by the real Linux `install.sh`. The macOS tests run
+// on macOS only (CI's macOS job on `release/*` PRs, and by hand): they need `hdiutil`, `ditto` and `codesign`.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::net::TcpListener;
@@ -315,6 +361,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs the Linux install.sh: Linux only")]
     fn installs_a_checked_tarball() {
         let setup = Setup::new(ok, good_sums, "9.9.9");
         let mut seen = Vec::new();
@@ -327,6 +374,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs the Linux install.sh: Linux only")]
     fn wrong_checksum_touches_nothing() {
         let setup = Setup::new(ok, |_| format!("{}  {NAME}\n", sha256(b"something else")), "9.9.9");
         assert!(matches!(setup.run(false, &mut |_| {}), Err(Failure::At(Step::Hash, _))));
@@ -335,6 +383,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs the Linux install.sh: Linux only")]
     fn missing_sum_line_fails_at_hash() {
         let setup = Setup::new(ok, |_| format!("{}  other.dmg\n", sha256(b"other")), "9.9.9");
         assert!(matches!(setup.run(false, &mut |_| {}), Err(Failure::At(Step::Hash, _))));
@@ -342,6 +391,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs the Linux install.sh: Linux only")]
     fn cut_download_fails() {
         let cut =
             |_: &[u8]| b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\n0123456789".to_vec();
@@ -352,6 +402,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs the Linux install.sh: Linux only")]
     fn cancel_stops_and_cleans() {
         let setup = Setup::new(ok, good_sums, "9.9.9");
         assert_eq!(setup.run(true, &mut |_| {}), Err(Failure::Cancelled));
@@ -360,9 +411,179 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs the Linux install.sh: Linux only")]
     fn version_must_match() {
         let setup = Setup::new(ok, good_sums, "9.9.8");
         assert!(matches!(setup.run(false, &mut |_| {}), Err(Failure::At(Step::Version, _))));
         assert!(setup.tmp_is_empty());
+    }
+
+    #[test]
+    fn rename_refusals_are_permission_failures() {
+        let step = |error| match rename_failed(error) {
+            Failure::At(step, _) => step,
+            Failure::Cancelled => unreachable!(),
+        };
+        assert_eq!(step(std::io::Error::from_raw_os_error(1)), Step::Permission);
+        assert_eq!(step(std::io::Error::from(std::io::ErrorKind::PermissionDenied)), Step::Permission);
+        assert_eq!(step(std::io::Error::from(std::io::ErrorKind::NotFound)), Step::Install);
+    }
+
+    /// A folder holding an old `Gantry.app` (0.1.0) and a staged `.Gantry.app.new` (9.9.9).
+    fn bundles(dir: &Path) -> (PathBuf, PathBuf) {
+        let folder = dir.join("Applications");
+        let app = folder.join("Gantry.app");
+        script(&app.join("Contents/MacOS/gantry"), "echo \"gantry 0.1.0 (old)\"");
+        script(&folder.join(".Gantry.app.new/Contents/MacOS/gantry"), "echo \"gantry 9.9.9 (test)\"");
+        (folder, app)
+    }
+
+    /// What `app`'s `gantry` reports, tried a few times (see `Setup::installed`).
+    fn reports(app: &Path) -> Option<Version> {
+        let binary = Target::Mac { app: app.to_owned() }.installed_binary();
+        (0..20).find_map(|_| {
+            let version = probe(&binary, PROBE_TIMEOUT);
+            if version.is_none() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            version
+        })
+    }
+
+    #[test]
+    fn swap_puts_the_new_bundle_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let (folder, app) = bundles(dir.path());
+        assert_eq!(swap(&app), Ok(()));
+        assert_eq!(reports(&app), Some(v("9.9.9")));
+        assert!(!folder.join(".Gantry.app.new").exists());
+        assert!(!folder.join(".Gantry.app.old").exists());
+    }
+
+    #[test]
+    fn swap_in_a_locked_folder_keeps_the_old_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let (folder, app) = bundles(dir.path());
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = swap(&app);
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(result, Err(Failure::At(Step::Permission, _))), "{result:?}");
+        assert_eq!(reports(&app), Some(v("0.1.0")));
+    }
+
+    const DMG: &str = "gantry-9.9.9-aarch64-macos.dmg";
+
+    fn run_command(command: &mut Command) {
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{command:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    /// An ad-hoc signed `Gantry.app` whose `gantry` reports 9.9.9, in a disk image.
+    fn dmg(dir: &Path) -> Vec<u8> {
+        let stage = dir.join("stage");
+        let app = stage.join("Gantry.app");
+        script(&app.join("Contents/MacOS/gantry"), "echo \"gantry 9.9.9 (test)\"");
+        std::fs::write(
+            app.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Gantry</string>
+  <key>CFBundleIdentifier</key><string>io.github.idogrf.GantryTest</string>
+  <key>CFBundleExecutable</key><string>gantry</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>9.9.9</string>
+  <key>CFBundleVersion</key><string>9.9.9</string>
+</dict>
+</plist>
+"#,
+        )
+        .unwrap();
+        run_command(Command::new("codesign").args(["--force", "--deep", "--sign", "-"]).arg(&app));
+        let out = dir.join(DMG);
+        run_command(
+            Command::new("hdiutil")
+                .args(["create", "-volname", "Gantry", "-srcfolder"])
+                .arg(&stage)
+                .args(["-ov", "-format", "UDZO"])
+                .arg(&out),
+        );
+        std::fs::read(out).unwrap()
+    }
+
+    struct MacSetup {
+        _dir: tempfile::TempDir,
+        folder: PathBuf,
+        app: PathBuf,
+        tmp: PathBuf,
+        pick: Pick,
+    }
+
+    impl MacSetup {
+        /// An `Applications` folder with an old `Gantry.app` (0.1.0) and a server offering the new one's dmg.
+        fn new() -> MacSetup {
+            let dir = tempfile::tempdir().unwrap();
+            let folder = dir.path().join("Applications");
+            let app = folder.join("Gantry.app");
+            script(&app.join("Contents/MacOS/gantry"), "echo \"gantry 0.1.0 (old)\"");
+            let tmp = dir.path().join("tmp");
+            std::fs::create_dir(&tmp).unwrap();
+            let bytes = dmg(dir.path());
+            let sums = format!("{}  {DMG}\n", sha256(&bytes));
+            let base = serve(vec![(DMG, ok(&bytes)), ("SHA256SUMS", ok(sums.as_bytes()))]);
+            let pick = Pick {
+                file: Asset { name: DMG.into(), url: format!("{base}/{DMG}"), size: bytes.len() as u64 },
+                sums: Asset { name: "SHA256SUMS".into(), url: format!("{base}/SHA256SUMS"), size: 0 },
+            };
+            MacSetup { _dir: dir, folder, app, tmp, pick }
+        }
+
+        fn run(&self) -> Result<Version, Failure> {
+            let target = Target::Mac { app: self.app.clone() };
+            run_in(&self.tmp, &[], &self.pick, &target, v("9.9.9"), &AtomicBool::new(false), &mut |_| {})
+        }
+
+        /// Whether `hdiutil info` still lists an image mounted under this setup's working folder.
+        fn still_mounted(&self) -> bool {
+            let output = Command::new("hdiutil").arg("info").output().unwrap();
+            String::from_utf8_lossy(&output.stdout).contains(self.tmp.to_str().unwrap())
+        }
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "needs hdiutil/ditto/codesign: macOS only")]
+    fn swaps_the_app() {
+        let setup = MacSetup::new();
+        assert_eq!(setup.run(), Ok(v("9.9.9")));
+        assert_eq!(reports(&setup.app), Some(v("9.9.9")));
+        assert!(!setup.folder.join(".Gantry.app.new").exists());
+        assert!(!setup.folder.join(".Gantry.app.old").exists());
+        assert!(!setup.still_mounted());
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "needs hdiutil/ditto/codesign: macOS only")]
+    fn leftovers_are_cleared() {
+        let setup = MacSetup::new();
+        for leftover in [".Gantry.app.new", ".Gantry.app.old"] {
+            std::fs::create_dir_all(setup.folder.join(leftover).join("junk")).unwrap();
+        }
+        assert_eq!(setup.run(), Ok(v("9.9.9")));
+        assert_eq!(reports(&setup.app), Some(v("9.9.9")));
+        assert!(!setup.folder.join(".Gantry.app.new").exists());
+        assert!(!setup.folder.join(".Gantry.app.old").exists());
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "needs hdiutil/ditto/codesign: macOS only")]
+    fn unwritable_folder_keeps_the_old_app() {
+        let setup = MacSetup::new();
+        std::fs::set_permissions(&setup.folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = setup.run();
+        std::fs::set_permissions(&setup.folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(result, Err(Failure::At(Step::Permission | Step::Install, _))), "{result:?}");
+        assert_eq!(reports(&setup.app), Some(v("0.1.0")));
+        assert!(!setup.still_mounted());
     }
 }

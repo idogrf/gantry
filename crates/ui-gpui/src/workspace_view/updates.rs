@@ -120,7 +120,7 @@ impl WorkspaceView {
                 .online_notice()
                 .and_then(|online| online.newer.first().map(|release| release.url.clone()))
                 .filter(|url| !url.is_empty()),
-            restart_ready: self.update_notice().map(|update| update.target),
+            restart: self.update_notice(),
         };
         if *cx.global::<UpdateRow>() != row {
             cx.set_global(row);

@@ -3,7 +3,7 @@
 use app_core::release::CheckStatus;
 use app_core::self_update::{Offer, Run};
 use app_core::settings::{Settings, SidebarAtStart};
-use app_core::version::Version;
+use app_core::version::{Update, Version};
 use gpui::{Context, Div, Window, div};
 
 use super::*;
@@ -23,8 +23,8 @@ const RESTORE: [(bool, &str, &str); 2] = [
 /// What the Check now row shows of the update, by priority.
 #[derive(Debug, PartialEq, Eq)]
 enum UpdateState {
-    /// A newer Gantry is installed: Restart and update.
-    Restart(Version),
+    /// Something is older than the newest version installed: Restart and update.
+    Restart(Update),
     /// The update run's line; Cancel while downloading, Retry after a failure that can be tried again.
     Running {
         /// The run's status line.
@@ -46,8 +46,8 @@ enum UpdateState {
 
 /// The state the row draws for `row` in a window running `running`.
 fn update_state(row: &UpdateRow, running: Version) -> UpdateState {
-    if let Some(version) = row.restart_ready {
-        return UpdateState::Restart(version);
+    if let Some(update) = row.restart {
+        return UpdateState::Restart(update);
     }
     if let Some(line) = row.run.line() {
         let failed = matches!(row.run, Run::Failed { .. });
@@ -232,8 +232,10 @@ impl SettingsView {
             })
         };
         let (label, buttons) = match update_state(&update, running) {
-            UpdateState::Restart(version) => (
-                status(theme.tokens.accent, format!("Gantry {version} is installed.")),
+            UpdateState::Restart(update) => (
+                status(theme.tokens.accent, update.title())
+                    .child(muted(theme, update.detail_text()))
+                    .child(muted(theme, update.note_text())),
                 vec![
                     self.primary_button(
                         "restart-to-update",
@@ -268,7 +270,9 @@ impl SettingsView {
                             cx,
                         ));
                     }
-                    buttons.extend(open_page(self, cx).filter(|_| !retry));
+                    if !retry {
+                        buttons.extend(open_page(self, cx));
+                    }
                     buttons.push(self.check_now_button(window, cx));
                 }
                 (label, buttons)
@@ -444,13 +448,27 @@ mod tests {
 
     #[test]
     fn an_installed_update_offers_restart_before_anything_else() {
+        let update = app_core::version::update(v("0.14.0"), Some(v("0.14.0")), Some(v("0.15.0")), 2).unwrap();
         let row = UpdateRow {
             latest: Some(v("0.15.0")),
             offer: install(),
             run: Run::Done(v("0.15.0")),
-            restart_ready: Some(v("0.15.0")),
+            restart: Some(update),
             ..Default::default()
         };
-        assert_eq!(update_state(&row, v("0.14.0")), UpdateState::Restart(v("0.15.0")));
+        let UpdateState::Restart(shown) = update_state(&row, v("0.14.0")) else { panic!("not the restart state") };
+        assert_eq!(shown.title(), "Restart to finish updating to 0.15.0");
+        assert_eq!(shown.detail_text(), "Gantry 0.15.0 is installed. This window runs 0.14.0.");
+        assert!(shown.note_text().starts_with("Restarting closes your 2 running sessions and then resumes them."));
+    }
+
+    #[test]
+    fn an_outdated_daemon_alone_offers_restart_with_its_own_wording() {
+        let update = app_core::version::update(v("0.14.0"), Some(v("0.13.0")), None, 0).unwrap();
+        let row = UpdateRow { restart: Some(update), ..Default::default() };
+        let UpdateState::Restart(shown) = update_state(&row, v("0.14.0")) else { panic!("not the restart state") };
+        assert_eq!(shown.title(), "Restart to finish updating to 0.14.0");
+        assert_eq!(shown.detail_text(), "Your running sessions still use 0.13.0.");
+        assert_eq!(shown.note_text(), "Your running sessions stay open.");
     }
 }

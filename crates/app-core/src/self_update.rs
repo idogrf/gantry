@@ -233,7 +233,7 @@ impl Run {
     pub fn line(&self) -> Option<String> {
         match self {
             Run::Downloading { version, percent } => Some(format!("Downloading Gantry {version}… {percent}%")),
-            Run::Installing { .. } => Some("Installing…".to_string()),
+            Run::Installing { version } => Some(format!("Installing Gantry {version}…")),
             Run::Failed { step, .. } => Some(step.line().to_string()),
             Run::Idle | Run::Done(_) => None,
         }
@@ -370,7 +370,7 @@ mod tests {
         assert!(down.busy());
         let inst = Run::Installing { version: v("0.15.0") };
         assert!(inst.busy());
-        assert_eq!(inst.line().as_deref(), Some("Installing…"));
+        assert_eq!(inst.line().as_deref(), Some("Installing Gantry 0.15.0…"));
         assert_eq!(inst.pill(), None);
         let failed = Run::Failed { step: Step::Permission, detail: String::new() };
         assert_eq!(failed.line().as_deref(), Some(Step::Permission.line()));

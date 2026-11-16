@@ -19,7 +19,7 @@ use crate::release_check::{self, CheckRow};
 use crate::self_update::UpdateRow;
 use crate::settings_store::SettingsStore;
 use crate::theme::{
-    RADIUS, RADIUS_SMALL, Theme, container_icon, dir_badge, pane_marker, pin_icon, ssh_icon, sweeping, theme,
+    RADIUS, RADIUS_SMALL, Theme, busy_bar, container_icon, dir_badge, pane_marker, pin_icon, ssh_icon, sweeping, theme,
     working_sweep,
 };
 use crate::update_watch::{self};
@@ -301,6 +301,7 @@ impl WorkspaceView {
         &self,
         focus: &FocusHandle,
         online: &Online,
+        animate: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -349,11 +350,12 @@ impl WorkspaceView {
             )
             .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(format!("This window runs {running}.")))
             .child(div().id("release-notes").max_h(theme.ui(380.)).overflow_y_scroll().child(notes))
-            .child(self.render_update_actions(url, theme, cx))
+            .child(self.render_update_actions(url, animate, theme, cx))
     }
 
-    /// The release card's foot, by what this Gantry can do and how far the update run is.
-    fn render_update_actions(&self, url: Option<String>, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    /// The release card's foot, by what this Gantry can do and how far the update run is; `animate` runs the
+    /// Installing bar.
+    fn render_update_actions(&self, url: Option<String>, animate: bool, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let row = cx.global::<UpdateRow>().clone();
         let foot = div().flex().flex_col().gap(theme.ui(10.));
         let muted = |text: String| div().text_xs().text_color(rgb(theme.tokens.muted)).child(text);
@@ -373,7 +375,9 @@ impl WorkspaceView {
                     card_button("cancel-update", "Cancel", false, theme)
                         .on_click(cx.listener(|this, _, _, cx| this.cancel_self_update(cx))),
                 ),
-            Run::Installing { .. } => foot.children(row.run.line().map(muted)),
+            Run::Installing { .. } => foot
+                .children(row.run.line().map(|line| div().text_xs().text_color(rgb(theme.tokens.text)).child(line)))
+                .child(busy_bar("installing-bar-card", animate, theme)),
             Run::Failed { detail, .. } => {
                 // Retry only while the release can still be installed here.
                 let retry = matches!(row.offer, Offer::Install(..));

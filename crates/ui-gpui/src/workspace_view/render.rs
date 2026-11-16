@@ -438,7 +438,7 @@ impl Render for WorkspaceView {
                 root.child(self.render_host_update_card(card, viewport, &theme, cx))
             })
             .when_some(self.release_card.as_ref().zip(self.online_notice()), |root, (focus, online)| {
-                root.child(self.render_release_card(focus, &online, &theme, cx))
+                root.child(self.render_release_card(focus, &online, fade && window.is_window_active(), &theme, cx))
             })
             .when_some(self.pane_menu.as_ref(), |root, menu| {
                 let pick = cx.listener(|this, action: &MenuAction, window, cx| {

@@ -8,7 +8,8 @@ use gpui::{Context, Div, Window, div};
 
 use super::*;
 use crate::self_update::UpdateRow;
-use crate::theme::Theme;
+use crate::settings_store::SettingsStore;
+use crate::theme::{Theme, busy_bar};
 
 /// The "Tabs at start" choices: whether `restoreLayout` is on, its label and what it does.
 const RESTORE: [(bool, &str, &str); 2] = [
@@ -250,7 +251,17 @@ impl SettingsView {
             ),
             UpdateState::Running { line, detail, cancel, retry } => {
                 let color = if detail.is_some() { theme.tokens.danger } else { theme.tokens.text };
-                let label = status(color, line).children(detail.map(|detail| muted(theme, detail)));
+                let animate = cx.global::<SettingsStore>().settings().animate_ui && window.is_window_active();
+                let label = status(color, line).children(detail.map(|detail| muted(theme, detail))).when(
+                    matches!(update.run, Run::Installing { .. }),
+                    |label| {
+                        label.child(div().mt(theme.ui(6.)).max_w(theme.ui(240.)).child(busy_bar(
+                            "installing-bar-settings",
+                            animate,
+                            theme,
+                        )))
+                    },
+                );
                 let mut buttons = Vec::new();
                 if cancel {
                     buttons.push(self.button(
@@ -419,7 +430,12 @@ mod tests {
         let installing = UpdateRow { run: Run::Installing { version: v("0.15.0") }, ..downloading.clone() };
         assert_eq!(
             update_state(&installing, v("0.14.0")),
-            UpdateState::Running { line: "Installing…".into(), detail: None, cancel: false, retry: false }
+            UpdateState::Running {
+                line: "Installing Gantry 0.15.0…".into(),
+                detail: None,
+                cancel: false,
+                retry: false
+            }
         );
         let failed = UpdateRow {
             run: Run::Failed { step: app_core::self_update::Step::Hash, detail: "expected a, got b".into() },

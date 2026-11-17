@@ -384,6 +384,7 @@ mod tests {
             needs_input: all_on(),
             finished: all_on(),
             finished_after_seconds: 3,
+            read_after_seconds: 2,
             when_visible: false,
             only_when_unfocused: false,
             play_sounds: true,

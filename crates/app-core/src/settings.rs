@@ -175,6 +175,8 @@ pub struct AlertSettings {
     pub finished: EventAlerts,
     /// Seconds a session must be busy before finishing counts.
     pub finished_after_seconds: u32,
+    /// Seconds a pane must be on screen in the active window before its alert counts as seen (0 = at once).
+    pub read_after_seconds: u32,
     /// Alert even when the pane is visible.
     pub when_visible: bool,
     /// Alert only while the window is unfocused.
@@ -483,6 +485,7 @@ impl Default for Settings {
                 needs_input: EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::FallingBlip },
                 finished: EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::ClassicBlip },
                 finished_after_seconds: 1,
+                read_after_seconds: 2,
                 when_visible: false,
                 only_when_unfocused: false,
                 play_sounds: true,
@@ -926,6 +929,7 @@ impl Reader {
             finished: self.event(&map, "finished", default.finished),
             finished_after_seconds: self.number(&map, "alerts.", "finishedAfterSeconds", 1.0, (0.0, 600.0)).round()
                 as u32,
+            read_after_seconds: self.number(&map, "alerts.", "readAfterSeconds", 2.0, (0.0, 60.0)).round() as u32,
             when_visible: self.bool(&map, "alerts.", "whenVisible", default.when_visible),
             only_when_unfocused: self.bool(&map, "alerts.", "onlyWhenUnfocused", default.only_when_unfocused),
             play_sounds: self.bool(&map, "alerts.", "playSounds", default.play_sounds),
@@ -1083,6 +1087,11 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         &["alerts", "finishedAfterSeconds"],
         alerts.finished_after_seconds.into(),
         alerts.finished_after_seconds != base.finished_after_seconds,
+    );
+    add(
+        &["alerts", "readAfterSeconds"],
+        alerts.read_after_seconds.into(),
+        alerts.read_after_seconds != base.read_after_seconds,
     );
     add(&["alerts", "whenVisible"], alerts.when_visible.into(), alerts.when_visible != base.when_visible);
     add(
@@ -1372,6 +1381,7 @@ mod tests {
         );
         assert_eq!(s.ui_font_size, 14.0);
         assert_eq!(s.alerts.finished_after_seconds, 1);
+        assert_eq!(s.alerts.read_after_seconds, 2);
         assert_eq!(s.alerts.volume, 0.4);
         assert_eq!(
             (s.alerts.needs_input.tone, s.alerts.finished.tone),
@@ -1495,6 +1505,7 @@ mod tests {
                 needs_input: EventAlerts { badge: false, notification: false, sound: false, tone: AlertTone::SoftFall },
                 finished: EventAlerts { badge: false, notification: true, sound: false, tone: AlertTone::SoftDrop },
                 finished_after_seconds: 30,
+                read_after_seconds: 5,
                 when_visible: true,
                 only_when_unfocused: true,
                 play_sounds: false,

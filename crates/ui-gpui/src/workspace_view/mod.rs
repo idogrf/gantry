@@ -473,6 +473,10 @@ pub struct WorkspaceView {
     attention: AttentionTracker,
     /// Leaves with an alert the user has not seen yet.
     unseen: HashMap<NodeId, AlertKind>,
+    /// When each unseen leaf came into view in the active window (`alerts.readAfterSeconds`).
+    seen_since: HashMap<NodeId, Instant>,
+    /// Looks at `unseen` again when the next leaf in view has been seen long enough.
+    read_timer: Option<Task<()>>,
     _activation: Subscription,
     /// The theme whose terminal colors the daemon was last told.
     sent_palette: Option<Preset>,
@@ -699,6 +703,8 @@ impl WorkspaceView {
             welcome_items: RefCell::new(None),
             attention: AttentionTracker::default(),
             unseen: HashMap::new(),
+            seen_since: HashMap::new(),
+            read_timer: None,
             _activation: activation,
             sent_palette: None,
             _theme: theme_changed,

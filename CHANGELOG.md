@@ -13,6 +13,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 - **Status color picker** - "Custom color…" in a status color's pop-up opens the same color picker as a tab's or project's color, in place of the hex field. Status colors also take an opacity: the picker has an opacity bar, and a see-through color is blended over the sidebar.
+- **Alerts stay until you look** - A finished or waiting session stays marked until its pane has been on screen for 2 seconds, so skipping past it with `Ctrl+Tab` no longer marks it as read. Change the delay in Settings > Alerts > Visibility > Mark as read after (0 = at once).
 
 ## [0.14.0] - 2026-11-10
 

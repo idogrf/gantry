@@ -3,12 +3,14 @@
 
 use app_core::dialogs::{ChoiceStyle, DialogSpec, Layout, next_focus};
 use app_core::session_tree::Tone;
+use app_core::text_field::TextField;
 use app_core::theme_colors::mix;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
     KeyDownEvent, Render, Stateful, Window, div, prelude::*, px, rgb, rgba,
 };
 
+use crate::field;
 use crate::theme::{FadeKind, RADIUS_LARGE, RADIUS_SMALL, Theme, fade_in, theme};
 
 /// What the dialog tells the window.
@@ -24,6 +26,8 @@ pub(crate) struct DialogView {
     spec: DialogSpec,
     focus: usize,
     answered: bool,
+    /// The text field, when the spec has one.
+    input: Option<TextField>,
 }
 
 impl EventEmitter<DialogEvent> for DialogView {}
@@ -38,7 +42,18 @@ impl DialogView {
     /// The dialog for `spec`, focus on its initial-focus choice.
     pub(crate) fn new(spec: DialogSpec, cx: &mut Context<Self>) -> Self {
         let focus = spec.actions.iter().position(|action| action.initial_focus).unwrap_or(0);
-        DialogView { focus_handle: cx.focus_handle(), spec, focus, answered: false }
+        let input = spec.input.as_ref().map(|input| {
+            let mut field = TextField::default();
+            field.insert(&input.text);
+            field.select_all();
+            field
+        });
+        DialogView { focus_handle: cx.focus_handle(), spec, focus, answered: false, input }
+    }
+
+    /// The text field's text, when the dialog has one.
+    pub(crate) fn input_text(&self) -> Option<String> {
+        self.input.as_ref().map(|field| field.text().to_string())
     }
 
     /// Report `index` (once; later input is ignored).
@@ -59,8 +74,17 @@ impl DialogView {
         match (keystroke.key.as_str(), keystroke.modifiers.shift) {
             ("escape", _) => self.choose(self.spec.escape, cx),
             ("enter", _) => self.choose(self.focus, cx),
-            ("tab", false) | ("down", _) | ("right", _) => self.focus = next_focus(self.focus, len, true),
-            ("tab", true) | ("up", _) | ("left", _) => self.focus = next_focus(self.focus, len, false),
+            ("tab", false) => self.focus = next_focus(self.focus, len, true),
+            ("tab", true) => self.focus = next_focus(self.focus, len, false),
+            // With a text field, the other keys (arrows included) edit it.
+            _ if self.input.is_some() => {
+                let Some(input) = &mut self.input else { return };
+                if !field::edit(input, keystroke, cx) {
+                    return;
+                }
+            }
+            ("down", _) | ("right", _) => self.focus = next_focus(self.focus, len, true),
+            ("up", _) | ("left", _) => self.focus = next_focus(self.focus, len, false),
             _ => return,
         }
         cx.stop_propagation();
@@ -97,8 +121,28 @@ fn fill(style: ChoiceStyle, pills: bool, theme: &Theme) -> u32 {
 }
 
 impl Render for DialogView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx).clone();
+        let focused = self.focus_handle.is_focused(window);
+        let input = self.input.as_ref().map(|input| {
+            let press = field::on_press(cx, |this: &mut Self, offset, clicks, _, cx| {
+                if let Some(input) = &mut this.input {
+                    input.press(offset, clicks);
+                }
+                cx.notify();
+            });
+            let placeholder = self.spec.input.as_ref().map(|spec| spec.placeholder.clone()).unwrap_or_default();
+            div()
+                .h(theme.ui(32.))
+                .px(theme.ui(10.))
+                .flex()
+                .items_center()
+                .rounded(px(RADIUS_SMALL))
+                .border_1()
+                .border_color(rgb(theme.tokens.accent))
+                .bg(rgb(theme.tokens.ground))
+                .child(field::render(input, placeholder, focused, &theme, press).flex_1())
+        });
         let pills = self.spec.layout == Layout::Pills;
         let mut choices = div().flex().gap(theme.ui(8.));
         choices = if pills { choices.flex_row().flex_wrap().justify_end() } else { choices.flex_col() };
@@ -178,6 +222,7 @@ impl Render for DialogView {
             .children(
                 self.spec.detail.clone().map(|text| div().text_xs().text_color(rgb(theme.tokens.muted)).child(text)),
             )
+            .children(input)
             .child(choices)
     }
 }

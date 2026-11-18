@@ -13,7 +13,9 @@ use gpui::{
     prelude::*, px, relative, rgb, svg,
 };
 use protocol::host::HostId;
-use protocol::message::SessionState;
+use protocol::message::{SessionState, SessionStatus};
+
+use app_core::split_tree::NodeId;
 use std::time::Instant;
 
 use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortcut};
@@ -118,6 +120,10 @@ impl WorkspaceView {
                 }
                 self.sync_unseen(cx);
                 cx.notify();
+            }
+            MenuAction::RenamePane(leaf) if self.is_claude_leaf(leaf) => {
+                let current = self.sidebar.read(cx).leaf_title(leaf).unwrap_or_default();
+                self.open_dialog(dialogs::rename_input(&current), DialogAction::RenameInput { leaf }, window, cx);
             }
             MenuAction::RenamePane(leaf) => {
                 let name = self.workspace.leaf_name(leaf).unwrap_or_default().to_string();
@@ -352,6 +358,27 @@ impl WorkspaceView {
             SidebarEvent::AddSshHost => self.open_ssh_wizard(WizardStart::Add, window, cx),
             SidebarEvent::UpdateHost { host, position } => self.click_host_update(&host, position, window, cx),
         }
+    }
+
+    fn is_claude_leaf(&self, leaf: NodeId) -> bool {
+        self.workspace.leaves.get(&leaf).is_some_and(|entry| entry.launch.is_claude())
+    }
+
+    /// Ask before renaming `leaf`'s Claude session to `name`, which restarts it; an empty or unchanged name does nothing.
+    pub(super) fn confirm_rename_session(
+        &mut self,
+        leaf: NodeId,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.sidebar.read(cx).leaf_title(leaf);
+        if name.is_empty() || current.as_deref() == Some(name) {
+            return;
+        }
+        let busy = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()) == Some(&SessionStatus::Busy);
+        let action = DialogAction::RenameSession { leaf, name: name.to_string() };
+        self.open_dialog(dialogs::rename_session(busy), action, window, cx);
     }
 
     /// Start the inline rename on the sidebar, showing the sidebar first if it is hidden.

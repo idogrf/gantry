@@ -192,6 +192,33 @@ pub fn close_pane(is_claude: bool) -> DialogSpec {
     )
 }
 
+/// Rename a running Claude session, which restarts it; `busy` = Claude is working on a turn.
+pub fn rename_session(busy: bool) -> DialogSpec {
+    let mut detail = "Claude restarts in this pane and the conversation continues under the new name.".to_string();
+    if busy {
+        detail.push_str(" Claude is working; renaming stops it.");
+    }
+    spec(
+        "Rename and restart this session?".into(),
+        Some(detail),
+        Layout::Pills,
+        vec![
+            choice("Rename and restart", None, ChoiceStyle::Primary, false),
+            choice("Cancel", None, ChoiceStyle::Cancel, true),
+        ],
+        1,
+    )
+}
+
+/// The renamed session exited at once: Claude on `host` (`None` = this machine) likely lacks `--name`.
+pub fn rename_failed(host: Option<&str>) -> DialogSpec {
+    let claude = host.map_or_else(|| "Claude".to_string(), |host| format!("Claude on {host}"));
+    notice(
+        "Couldn't rename the session",
+        &format!("{claude} may not support --name. Resume conversation continues it under its old name."),
+    )
+}
+
 /// Close a tab with running processes.
 pub fn close_tab(running: usize) -> DialogSpec {
     spec(
@@ -487,6 +514,29 @@ mod tests {
     }
 
     #[test]
+    fn rename_session_copy() {
+        let d = rename_session(false);
+        assert_eq!(d.title, "Rename and restart this session?");
+        assert_eq!(
+            d.detail.as_deref(),
+            Some("Claude restarts in this pane and the conversation continues under the new name.")
+        );
+        assert_eq!(labels(&d), ["Rename and restart", "Cancel"]);
+        assert_eq!(styles(&d), [ChoiceStyle::Primary, ChoiceStyle::Cancel]);
+        assert_eq!((focus(&d), d.escape, d.layout), (1, 1, Layout::Pills));
+        assert!(rename_session(true).detail.unwrap().ends_with(" Claude is working; renaming stops it."));
+        assert_eq!(
+            rename_failed(Some("devbox")).detail.as_deref(),
+            Some("Claude on devbox may not support --name. Resume conversation continues it under its old name.")
+        );
+        assert_eq!(
+            rename_failed(None).detail.as_deref(),
+            Some("Claude may not support --name. Resume conversation continues it under its old name.")
+        );
+        assert_eq!(rename_failed(None).title, "Couldn't rename the session");
+    }
+
+    #[test]
     fn close_tab_copy() {
         let c = close_tab(2);
         assert_eq!(c.title, "Close this tab?");
@@ -609,6 +659,9 @@ mod tests {
             dev_container("p", "c", false),
             daemon_mismatch(),
             notice("t", "d"),
+            rename_session(false),
+            rename_session(true),
+            rename_failed(None),
         ];
         for spec in &all {
             let focused: Vec<_> = spec.actions.iter().filter(|a| a.initial_focus).collect();

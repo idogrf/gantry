@@ -157,6 +157,12 @@ impl PaneLaunch {
         }
     }
 
+    /// This launch with `--name <name>` added: Claude renames the session it starts or resumes.
+    pub fn with_name(mut self, name: &str) -> PaneLaunch {
+        self.args.extend(["--name".into(), name.into()]);
+        self
+    }
+
     /// Claude Code resuming `session` in `cwd`, in the dev container serving `container` (`None` = this machine).
     pub fn resume(session: &str, cwd: PathBuf, container: Option<PathBuf>) -> PaneLaunch {
         PaneLaunch {
@@ -2527,6 +2533,15 @@ mod tests {
             (vec!["--resume".to_string(), "abc".to_string()], Some("abc"))
         );
         assert_eq!(shell("/r").session(), None);
+    }
+
+    #[test]
+    fn a_name_is_added_once_and_dropped_on_rerun() {
+        let named = claude_leaf(Some("abc")).rerun(true).with_name("Review bot");
+        assert_eq!(named.args, ["--resume", "abc", "--name", "Review bot"]);
+        assert_eq!(named.session(), Some("abc"));
+        let later = Leaf::new(named);
+        assert_eq!(later.rerun(true).args, ["--resume", "abc"]);
     }
 
     #[test]

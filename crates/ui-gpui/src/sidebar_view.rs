@@ -1851,9 +1851,8 @@ impl SidebarView {
                             ),
                     )
             }
-            RowKind::Session { session, tone, note, leaf } => {
+            RowKind::Session { session, tone, note, .. } => {
                 let colors = theme.tone(*tone);
-                let field = leaf.and_then(|leaf| self.rename_field(RenameTarget::Pane(leaf), &theme, cx));
                 let badge = dir_badge_for(
                     cx.global::<SettingsStore>().settings(),
                     session.claude_dir.as_deref(),
@@ -1884,11 +1883,12 @@ impl SidebarView {
                         .child(
                             line_content(faded)
                                 .children(lead_mark(*tone, &colors, &theme))
-                                .child(field.unwrap_or_else(|| {
-                                    title(session_title(session).to_string()).when(*tone == Tone::NeedsInput, |title| {
-                                        title.font_weight(FontWeight::SEMIBOLD)
-                                    })
-                                }))
+                                .child(
+                                    title(session_title(session).to_string())
+                                        .when(*tone == Tone::NeedsInput, |title| {
+                                            title.font_weight(FontWeight::SEMIBOLD)
+                                        }),
+                                )
                                 .when(container, |line| line.child(container_icon(colors.ink, &theme)))
                                 .when(remote, |line| line.child(ssh_icon(colors.ink, &theme)))
                                 .children(close)
@@ -1962,10 +1962,7 @@ impl SidebarView {
                         .child(
                             line_content(faded)
                                 .children(lead_mark(*tone, &colors, &theme))
-                                .child(
-                                    self.rename_field(RenameTarget::Pane(entry.leaf), &theme, cx)
-                                        .unwrap_or_else(|| title("New session".into())),
-                                )
+                                .child(title("New session".into()))
                                 .when(!entry.host.is_local(), |line| line.child(ssh_icon(colors.ink, &theme)))
                                 .children(project())
                                 .children(close),
@@ -2127,7 +2124,6 @@ impl UniformListDecoration for SelectionRing {
 fn renames(kind: &RowKind, target: RenameTarget) -> bool {
     match (kind, target) {
         (RowKind::Pane { entry, .. }, RenameTarget::Pane(leaf)) => entry.leaf == leaf,
-        (RowKind::Session { leaf: Some(row_leaf), .. }, RenameTarget::Pane(leaf)) => *row_leaf == leaf,
         (RowKind::Tab { index, .. }, RenameTarget::Tab(tab)) => *index == tab,
         _ => false,
     }

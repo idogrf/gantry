@@ -262,6 +262,7 @@ impl WorkspaceView {
     /// The dialog was answered: close it, give the focus back and run what the choice asks.
     fn on_dialog_chosen(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(open) = self.dialog.take() else { return };
+        let text = open.view.read(cx).input_text();
         match &open.restore {
             Some(handle) => handle.focus(window, cx),
             None => self.focus_current(window, cx),
@@ -281,6 +282,12 @@ impl WorkspaceView {
                     for leaf in leaves {
                         self.close_leaf(leaf, window, cx);
                     }
+                }
+            }
+            DialogAction::RenameInput { leaf } => {
+                if index == 0 {
+                    let name = text.unwrap_or_default();
+                    self.confirm_rename_session(leaf, name.trim(), window, cx);
                 }
             }
             DialogAction::RenameSession { leaf, name } => {

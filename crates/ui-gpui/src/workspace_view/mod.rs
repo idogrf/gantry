@@ -125,6 +125,8 @@ pub(super) enum DialogAction {
     ForceQuit { waiting: (HostId, String) },
     /// A new session in a folder a dev container mounts: 0 opens in the container, 1 on this machine.
     DevContainer(Box<DevContainerOpen>),
+    /// The new name for the Claude session of `leaf` (the dialog's text field): 0 asks to confirm it.
+    RenameInput { leaf: NodeId },
     /// Rename the Claude session of `leaf` to `name`: 0 stops the pane and restarts it with `--name`.
     RenameSession { leaf: NodeId, name: String },
     /// A notice: nothing to do with the answer.

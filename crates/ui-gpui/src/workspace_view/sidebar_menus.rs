@@ -121,11 +121,12 @@ impl WorkspaceView {
                 self.sync_unseen(cx);
                 cx.notify();
             }
+            MenuAction::RenamePane(leaf) if self.is_claude_leaf(leaf) => {
+                let current = self.sidebar.read(cx).leaf_title(leaf).unwrap_or_default();
+                self.open_dialog(dialogs::rename_input(&current), DialogAction::RenameInput { leaf }, window, cx);
+            }
             MenuAction::RenamePane(leaf) => {
-                let name = match self.is_claude_leaf(leaf) {
-                    true => self.sidebar.read(cx).leaf_title(leaf).unwrap_or_default(),
-                    false => self.workspace.leaf_name(leaf).unwrap_or_default().to_string(),
-                };
+                let name = self.workspace.leaf_name(leaf).unwrap_or_default().to_string();
                 self.start_rename(RenameTarget::Pane(leaf), name, window, cx);
             }
             MenuAction::RenameTab(index) => {
@@ -289,9 +290,6 @@ impl WorkspaceView {
                 Activation::ToggleDetails(_) | Activation::ToggleProject(_) | Activation::Nothing => {}
             },
             SidebarEvent::Menu(action) => self.run_menu_action(action, window, cx),
-            SidebarEvent::Rename { target: RenameTarget::Pane(leaf), name } if self.is_claude_leaf(leaf) => {
-                self.confirm_rename_session(leaf, name.trim(), window, cx)
-            }
             SidebarEvent::Rename { target, name } => {
                 let renamed = match target {
                     RenameTarget::Pane(leaf) => self.workspace.rename_leaf(leaf, &name),
@@ -367,7 +365,13 @@ impl WorkspaceView {
     }
 
     /// Ask before renaming `leaf`'s Claude session to `name`, which restarts it; an empty or unchanged name does nothing.
-    fn confirm_rename_session(&mut self, leaf: NodeId, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn confirm_rename_session(
+        &mut self,
+        leaf: NodeId,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let current = self.sidebar.read(cx).leaf_title(leaf);
         if name.is_empty() || current.as_deref() == Some(name) {
             return;

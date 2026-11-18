@@ -500,6 +500,8 @@ impl WorkspaceView {
             conn.connected = false;
         }
         self.take_overs.retain(|(taking, _), _| taking != host);
+        let leaves = &self.workspace.leaves;
+        self.renames.retain(|leaf, _| leaves.get(leaf).is_some_and(|entry| entry.host != *host));
         if self.search_answers.remove(host).is_some() {
             self.push_search_hits(cx);
             self.push_search_state(cx);
@@ -536,6 +538,8 @@ impl WorkspaceView {
             conn.connected = false;
         }
         self.take_overs.retain(|(taking, _), _| taking != host);
+        let leaves = &self.workspace.leaves;
+        self.renames.retain(|leaf, _| leaves.get(leaf).is_some_and(|entry| entry.host != *host));
         for (id, leaf) in &self.workspace.leaves {
             if &leaf.host == host
                 && let Some(slot) = self.slots.get(id)
@@ -639,6 +643,8 @@ impl WorkspaceView {
             std::thread::spawn(move || client.stop_all_and_wait(Duration::from_secs(2)));
         }
         self.take_overs.retain(|(taking, _), _| taking != host);
+        let leaves = &self.workspace.leaves;
+        self.renames.retain(|leaf, _| leaves.get(leaf).is_some_and(|entry| entry.host != *host));
         if self.search_answers.remove(host).is_some() {
             self.push_search_hits(cx);
             self.push_search_state(cx);
@@ -835,6 +841,8 @@ impl WorkspaceView {
     fn finish_restart(&mut self, host: &HostId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(update) = self.host_update.remove(host) else { return };
         self.take_overs.retain(|(taking, _), _| taking != host);
+        let leaves = &self.workspace.leaves;
+        self.renames.retain(|leaf, _| leaves.get(leaf).is_some_and(|entry| entry.host != *host));
         if self.search_answers.remove(host).is_some() {
             self.push_search_hits(cx);
             self.push_search_state(cx);

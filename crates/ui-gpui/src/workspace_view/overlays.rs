@@ -1,4 +1,6 @@
-use super::{DevContainerOpen, DialogAction, OpenDialog, OpenLauncher, OpenRecents, OpenSettings, WorkspaceView};
+use super::{
+    DevContainerOpen, DialogAction, OpenDialog, OpenLauncher, OpenRecents, OpenSettings, RenameStage, WorkspaceView,
+};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -279,6 +281,16 @@ impl WorkspaceView {
                     for leaf in leaves {
                         self.close_leaf(leaf, window, cx);
                     }
+                }
+            }
+            DialogAction::RenameSession { leaf, name } => {
+                let key = self.workspace.leaves.get(&leaf).and_then(|entry| entry.key());
+                if index == 0
+                    && let Some(key) = key
+                    && let Some(client) = self.client(&key.host)
+                {
+                    client.kill(key.pane);
+                    self.renames.insert(leaf, RenameStage::Stopping(name));
                 }
             }
             DialogAction::TakeOver { host, session, target } => {

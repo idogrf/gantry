@@ -1,5 +1,6 @@
-use super::{DialogAction, TakeOverTarget, WorkspaceView};
+use super::{DialogAction, RenameStage, TakeOverTarget, WorkspaceView};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use app_core::dialogs;
 use app_core::split_tree::{Axis, NodeId};
@@ -18,6 +19,24 @@ impl WorkspaceView {
         slot.view.update(cx, |view, cx| view.restarting(launch, cx));
         self.spawn_leaf(leaf, None, window, cx);
         self.save(cx);
+    }
+
+    /// Restart the stopped Claude `leaf` in place under `name`: its session resumed (or started afresh under its id
+    /// when it has no transcript yet) with `--name`. Not `rerun_with`: the session list may still show the pane.
+    pub(super) fn restart_named(&mut self, leaf: NodeId, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.workspace.leaves.get(&leaf) else { return };
+        let sessions = self.sidebar.read(cx).sessions();
+        let known = entry.session.as_deref().and_then(|id| sessions.get(&entry.host, id));
+        let launch = entry
+            .rerun_resolved(
+                known.is_some(),
+                known.and_then(|info| info.claude_dir.as_deref()),
+                &self.dirs,
+                self.daemon_dir.as_deref(),
+            )
+            .with_name(&name);
+        self.start_leaf(leaf, launch, window, cx);
+        self.renames.insert(leaf, RenameStage::Started(Instant::now()));
     }
 
     /// Start what the last run left finished, once the session list is in. A session that runs elsewhere stays a card.

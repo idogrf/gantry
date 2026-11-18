@@ -125,8 +125,18 @@ pub(super) enum DialogAction {
     ForceQuit { waiting: (HostId, String) },
     /// A new session in a folder a dev container mounts: 0 opens in the container, 1 on this machine.
     DevContainer(Box<DevContainerOpen>),
+    /// Rename the Claude session of `leaf` to `name`: 0 stops the pane and restarts it with `--name`.
+    RenameSession { leaf: NodeId, name: String },
     /// A notice: nothing to do with the answer.
     Ack,
+}
+
+/// Where the rename of a Claude pane stands.
+pub(super) enum RenameStage {
+    /// The pane was asked to stop; when it exits it restarts under this name.
+    Stopping(String),
+    /// It restarted with `--name` at this time; an error exit soon after means Claude refused the flag.
+    Started(Instant),
 }
 
 /// What a new session needs once its dev container question is answered.
@@ -465,6 +475,8 @@ pub struct WorkspaceView {
     git_task: Option<Task<()>>,
     /// Take-over requests waiting for the host's daemon, by host and session.
     take_overs: HashMap<(HostId, String), TakeOverTarget>,
+    /// Claude panes being renamed (in memory only).
+    renames: HashMap<NodeId, RenameStage>,
     /// New sessions waiting for `ContainerFound`, by request id.
     pending_opens: HashMap<u64, PendingOpen>,
     /// The welcome screen's folder rows; dropped when the session lists, the settings or a tab change what they say.
@@ -699,6 +711,7 @@ impl WorkspaceView {
             git_bars: git_scrollbar::Bars::new(),
             git_task: None,
             take_overs: HashMap::new(),
+            renames: HashMap::new(),
             pending_opens: HashMap::new(),
             welcome_items: RefCell::new(None),
             attention: AttentionTracker::default(),

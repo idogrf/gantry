@@ -1,8 +1,9 @@
-use super::WorkspaceView;
+use super::{DialogAction, RenameStage, WorkspaceView};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use app_core::attention::{Alert, AlertKind, alert_channels, describe};
+use app_core::dialogs;
 use app_core::split_tree::NodeId;
 use daemon::client::ClientEvent;
 use gpui::{Context, Window};
@@ -42,6 +43,14 @@ impl WorkspaceView {
                     if let Some(leaf) = self.workspace.pane_exited(&PaneKey::new(host.clone(), *pane)) {
                         self.slots[&leaf].view.update(cx, |view, cx| view.exited(Some(*code), cx));
                         self.save(cx);
+                        match self.renames.remove(&leaf) {
+                            Some(RenameStage::Stopping(name)) => self.restart_named(leaf, name, window, cx),
+                            Some(RenameStage::Started(at)) if *code != 0 && at.elapsed() < Duration::from_secs(3) => {
+                                let spec = dialogs::rename_failed(host.remote_name());
+                                self.open_dialog(spec, DialogAction::Ack, window, cx);
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 ClientEvent::Spawned { request, pane, cwd } => match self.pending.remove(request) {

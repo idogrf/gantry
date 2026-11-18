@@ -110,6 +110,7 @@ impl WorkspaceView {
                     let upserted = upserted.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.apply(host, upserted, removed, cx));
                     self.remember_folders(host, cx);
+                    self.restart_drained(host, window, cx);
                     for alert in alerts {
                         self.raise(alert, window, cx);
                     }

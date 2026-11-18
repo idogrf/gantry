@@ -21,22 +21,37 @@ impl WorkspaceView {
         self.save(cx);
     }
 
-    /// Restart the stopped Claude `leaf` in place under `name`: its session resumed (or started afresh under its id
-    /// when it has no transcript yet) with `--name`. Not `rerun_with`: the session list may still show the pane.
+    /// Restart the stopped Claude `leaf` in place under `name` (`Leaf::rename_launch`), or wait (`Draining`) while
+    /// the Claude of its dev container still runs. Not `rerun_with`: the session list may still show the pane.
     pub(super) fn restart_named(&mut self, leaf: NodeId, name: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.workspace.leaves.get(&leaf) else { return };
         let sessions = self.sidebar.read(cx).sessions();
         let known = entry.session.as_deref().and_then(|id| sessions.get(&entry.host, id));
-        let launch = entry
-            .rerun_resolved(
-                known.is_some(),
-                known.and_then(|info| info.claude_dir.as_deref()),
-                &self.dirs,
-                self.daemon_dir.as_deref(),
-            )
-            .with_name(&name);
+        if !entry.rename_can_restart(known) {
+            self.renames.insert(leaf, RenameStage::Draining(name));
+            return;
+        }
+        let launch = entry.rename_launch(known, &name, &self.dirs, self.daemon_dir.as_deref());
         self.start_leaf(leaf, launch, window, cx);
         self.renames.insert(leaf, RenameStage::Started(Instant::now()));
+    }
+
+    /// Restart the renamed dev container panes of `host` whose old Claude is gone, after a session list change.
+    pub(super) fn restart_drained(&mut self, host: &HostId, window: &mut Window, cx: &mut Context<Self>) {
+        let drained: Vec<NodeId> = self
+            .renames
+            .iter()
+            .filter(|(leaf, stage)| {
+                matches!(stage, RenameStage::Draining(_))
+                    && self.workspace.leaves.get(leaf).is_some_and(|entry| entry.host == *host)
+            })
+            .map(|(leaf, _)| *leaf)
+            .collect();
+        for leaf in drained {
+            if let Some(RenameStage::Draining(name)) = self.renames.remove(&leaf) {
+                self.restart_named(leaf, name, window, cx);
+            }
+        }
     }
 
     /// Start what the last run left finished, once the session list is in. A session that runs elsewhere stays a card.

@@ -135,6 +135,8 @@ pub(super) enum DialogAction {
 pub(super) enum RenameStage {
     /// The pane was asked to stop; when it exits it restarts under this name.
     Stopping(String),
+    /// The dev container pane exited; it restarts under this name once the Claude inside is gone.
+    Draining(String),
     /// It restarted with `--name` at this time; an error exit soon after means Claude refused the flag.
     Started(Instant),
 }

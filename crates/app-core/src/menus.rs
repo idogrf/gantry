@@ -483,7 +483,8 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
             items.extend(folder_items(&session.cwd, vscode, &session.host));
             if let Some(leaf) = leaf {
                 items.extend(remove_from_project_item(row, *leaf));
-                if matches!(session.state, SessionState::Managed { .. }) {
+                // A Closed tone with a Managed state: its host is away or its pane ended, the list not caught up.
+                if matches!(session.state, SessionState::Managed { .. }) && *tone != Tone::Closed {
                     items.push(entry("Rename…", MenuAction::RenamePane(*leaf)));
                 }
                 items.push(MenuItem::Separator);
@@ -734,6 +735,11 @@ mod tests {
             Some(MenuAction::RenamePane(4))
         );
         assert_eq!(rename(&menus_row_menu(&session_row(SessionState::Closed, Tone::Closed, Some(4)))), None);
+        assert_eq!(
+            rename(&menus_row_menu(&session_row(running, Tone::Closed, Some(4)))),
+            None,
+            "still listed as running, but its host is away or its pane ended"
+        );
         assert_eq!(
             row_menu(
                 &session_row(SessionState::External { pid: Some(9) }, Tone::Elsewhere, None),

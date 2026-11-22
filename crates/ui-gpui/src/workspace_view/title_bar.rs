@@ -113,6 +113,7 @@ impl WorkspaceView {
             self.set_check_row(status, cx);
         }
         self.publish_update_row(cx);
+        self.auto_update(cx);
         cx.notify();
     }
 

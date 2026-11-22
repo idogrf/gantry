@@ -169,6 +169,25 @@ impl SettingsView {
             cx,
         );
 
+        let auto = settings.auto_install_updates;
+        let auto_switch = self.switch(
+            "auto-install-updates",
+            0,
+            auto,
+            window,
+            cx,
+            change(move |settings| settings.auto_install_updates = !auto),
+        );
+        let auto_reset = self.reset_slot(
+            "reset-auto-install-updates",
+            0,
+            settings,
+            |s| s.auto_install_updates,
+            |s, v| s.auto_install_updates = v,
+            window,
+            cx,
+        );
+
         let check_now = self.check_now_row(theme, window, cx);
 
         div()
@@ -202,6 +221,13 @@ impl SettingsView {
                         "Asks GitHub when Gantry opens and every few hours whether a newer Gantry exists. Nothing else is sent.",
                         check_switch,
                         check_reset,
+                    ),
+                    row(
+                        theme,
+                        "Install updates automatically",
+                        "Downloads and installs a newer Gantry as soon as a check finds one. Restarting stays your click: Restart and update in the title bar.",
+                        auto_switch,
+                        auto_reset,
                     ),
                     check_now,
                 ],

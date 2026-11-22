@@ -80,6 +80,8 @@ impl WorkspaceView {
                 cx.notify();
             }
         }
+        // Turning on autoInstallUpdates with a newer release already known starts it now.
+        self.auto_update(cx);
         // A host that left the settings is forgotten: no connection, no timer, no attempt, and its panes say so.
         let listed: HashSet<String> = self.ssh_hosts.iter().map(|host| host.name.clone()).collect();
         let removed: Vec<HostId> = self

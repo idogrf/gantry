@@ -442,6 +442,9 @@ pub struct Settings {
     pub animate_ui: bool,
     /// Whether Gantry asks GitHub for a newer release (when it opens, then every few hours).
     pub check_for_updates: bool,
+    /// Whether a newer release this Gantry can install is downloaded and installed as soon as a check finds it
+    /// (restarting stays the user's click).
+    pub auto_install_updates: bool,
     /// The first-run wizard has been answered (imported or skipped), so it does not open by itself.
     pub setup_done: bool,
 }
@@ -511,6 +514,7 @@ impl Default for Settings {
             animate_working: true,
             animate_ui: true,
             check_for_updates: true,
+            auto_install_updates: false,
             setup_done: false,
         }
     }
@@ -920,6 +924,7 @@ impl Reader {
         let animate_working = self.bool(raw, "", "animateWorking", true);
         let animate_ui = self.bool(raw, "", "animateUi", true);
         let check_for_updates = self.bool(raw, "", "checkForUpdates", true);
+        let auto_install_updates = self.bool(raw, "", "autoInstallUpdates", false);
         let setup_done = self.bool(raw, "", "setupDone", false);
 
         let map = self.object(raw, "", "alerts");
@@ -1033,6 +1038,7 @@ impl Reader {
             animate_working,
             animate_ui,
             check_for_updates,
+            auto_install_updates,
             setup_done,
         }
     }
@@ -1189,6 +1195,11 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         settings.check_for_updates.into(),
         settings.check_for_updates != default.check_for_updates,
     );
+    add(
+        &["autoInstallUpdates"],
+        settings.auto_install_updates.into(),
+        settings.auto_install_updates != default.auto_install_updates,
+    );
     add(&["setupDone"], settings.setup_done.into(), settings.setup_done != default.setup_done);
     out
 }
@@ -1315,6 +1326,25 @@ mod tests {
         let path = dir.path().join("settings.json");
         save(&path, &settings, &Map::new()).unwrap();
         assert!(read_json(&path).get("animateWorking").is_none(), "the default writes nothing");
+    }
+
+    #[test]
+    fn auto_install_updates_defaults_off_and_round_trips() {
+        assert!(!Settings::default().auto_install_updates);
+        let loaded = parse(r#"{"autoInstallUpdates": true}"#);
+        assert!(loaded.problems.is_empty());
+        let mut settings = loaded.settings.unwrap();
+        assert!(settings.auto_install_updates);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &Map::new()).unwrap();
+        assert_eq!(read_json(&path).get("autoInstallUpdates"), Some(&Value::Bool(true)));
+        let bad = parse(r#"{"autoInstallUpdates": "yes"}"#);
+        assert_eq!(bad.problems.len(), 1);
+        assert!(!bad.settings.unwrap().auto_install_updates);
+        settings.auto_install_updates = false;
+        save(&path, &settings, &Map::new()).unwrap();
+        assert!(read_json(&path).get("autoInstallUpdates").is_none(), "the default writes nothing");
     }
 
     #[test]

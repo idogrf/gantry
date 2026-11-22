@@ -277,6 +277,19 @@ pub fn offer(target: Result<Target, NotHere>, pick: Option<Pick>) -> Offer {
     }
 }
 
+/// Whether an automatic update starts now: the setting is `enabled`, no run is going or failed, a newest release
+/// `latest` exists that no automatic run tried yet in this window (`tried`; a failed or cancelled one waits for a
+/// click), and this Gantry can install it. `offer` is asked last, since it probes the install folder.
+pub fn auto_start(
+    enabled: bool,
+    run: &Run,
+    latest: Option<Version>,
+    tried: Option<Version>,
+    offer: impl FnOnce() -> Offer,
+) -> bool {
+    enabled && *run == Run::Idle && latest.is_some() && latest != tried && matches!(offer(), Offer::Install(..))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +413,33 @@ mod tests {
         assert_eq!(offer(Err(NotHere::Unsupported), None), Offer::NotHere(None));
         assert_eq!(offer(Ok(target.clone()), None), Offer::NotHere(None));
         assert_eq!(offer(Ok(target.clone()), Some(p.clone())), Offer::Install(target, p));
+    }
+
+    #[test]
+    fn auto_start_needs_the_setting_an_idle_run_an_untried_release_and_an_install_offer() {
+        let install = || {
+            Offer::Install(
+                Target::Linux { home: PathBuf::from("/home/u") },
+                Pick { file: gh("a"), sums: gh("SHA256SUMS") },
+            )
+        };
+        let latest = Some(v("0.15.0"));
+        assert!(auto_start(true, &Run::Idle, latest, None, install));
+        assert!(auto_start(true, &Run::Idle, latest, Some(v("0.14.1")), install), "an older try does not count");
+        assert!(!auto_start(false, &Run::Idle, latest, None, install), "setting off");
+        assert!(!auto_start(true, &Run::Idle, None, None, install), "no release");
+        assert!(!auto_start(true, &Run::Idle, latest, latest, install), "already tried");
+        let busy = Run::Downloading { version: v("0.15.0"), percent: 3 };
+        let failed = Run::Failed { step: Step::Download, detail: String::new() };
+        for run in [busy, failed, Run::Done(v("0.15.0"))] {
+            assert!(!auto_start(true, &run, latest, None, install), "{run:?}");
+        }
+        assert!(!auto_start(true, &Run::Idle, latest, None, || Offer::NotHere(None)), "can't install here");
+        let mut asked = false;
+        auto_start(false, &Run::Idle, latest, None, || {
+            asked = true;
+            Offer::None
+        });
+        assert!(!asked, "the offer is not probed while the setting is off");
     }
 }

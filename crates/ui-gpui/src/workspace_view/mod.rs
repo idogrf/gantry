@@ -456,6 +456,8 @@ pub struct WorkspaceView {
     self_update_cancel: Option<Arc<AtomicBool>>,
     /// Counts the runs started and cancelled: an answer from an older run is ignored.
     self_update_generation: u64,
+    /// The release an automatic update last started for, in this window.
+    auto_update_tried: Option<app_core::version::Version>,
     /// The release check's timer.
     release_task: Option<Task<()>>,
     /// What is known about the git repos on screen.
@@ -702,6 +704,7 @@ impl WorkspaceView {
             self_update: Run::Idle,
             self_update_cancel: None,
             self_update_generation: 0,
+            auto_update_tried: None,
             release_task: None,
             git: GitRepos::default(),
             git_panel_open: false,

@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use app_core::self_update::{self, Offer, Platform, Run, install_target, origin_of, pick};
+use app_core::self_update::{self, Offer, Platform, Run, auto_start, install_target, origin_of, pick};
 use gpui::Context;
 
 use super::WorkspaceView;
 use crate::release_check;
 use crate::self_update::{Failure, UpdateRow};
+use crate::settings_store::SettingsStore;
 
 impl WorkspaceView {
     /// What the release card offers for the newest release: nothing without one, else whether and how this Gantry can
@@ -76,6 +77,17 @@ impl WorkspaceView {
             let _ = this.update(cx, |view, cx| view.self_update_finished(generation, result, cx));
         })
         .detach();
+    }
+
+    /// Starts the update by itself when `autoInstallUpdates` is on and the newest release can be installed here; at
+    /// most once per version in this window, so a failed or cancelled run waits for a click.
+    pub(super) fn auto_update(&mut self, cx: &mut Context<Self>) {
+        let enabled = cx.global::<SettingsStore>().settings().auto_install_updates;
+        let latest = self.online_notice().map(|online| online.latest);
+        if auto_start(enabled, &self.self_update, latest, self.auto_update_tried, || self.update_offer()) {
+            self.auto_update_tried = latest;
+            self.start_self_update(cx);
+        }
     }
 
     /// Stops the download: the run is Idle at once, even while a stalled connection keeps the engine waiting, and

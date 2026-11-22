@@ -1,8 +1,9 @@
-use super::WorkspaceView;
+use super::{DialogAction, RenameStage, WorkspaceView};
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use app_core::attention::{Alert, AlertKind, alert_channels, describe};
+use app_core::dialogs;
 use app_core::split_tree::NodeId;
 use daemon::client::ClientEvent;
 use gpui::{Context, Window};
@@ -42,6 +43,14 @@ impl WorkspaceView {
                     if let Some(leaf) = self.workspace.pane_exited(&PaneKey::new(host.clone(), *pane)) {
                         self.slots[&leaf].view.update(cx, |view, cx| view.exited(Some(*code), cx));
                         self.save(cx);
+                        match self.renames.remove(&leaf) {
+                            Some(RenameStage::Stopping(name)) => self.restart_named(leaf, name, window, cx),
+                            Some(RenameStage::Started(at)) if *code != 0 && at.elapsed() < Duration::from_secs(3) => {
+                                let spec = dialogs::rename_failed(host.remote_name());
+                                self.open_dialog(spec, DialogAction::Ack, window, cx);
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 ClientEvent::Spawned { request, pane, cwd } => match self.pending.remove(request) {
@@ -101,6 +110,7 @@ impl WorkspaceView {
                     let upserted = upserted.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.apply(host, upserted, removed, cx));
                     self.remember_folders(host, cx);
+                    self.restart_drained(host, window, cx);
                     for alert in alerts {
                         self.raise(alert, window, cx);
                     }
@@ -287,18 +297,33 @@ impl WorkspaceView {
         alerts::deliver(Notice { leaf, summary, body }, channels, settings.alerts.volume, self.clicked.clone());
     }
 
-    /// Forget alerts of the panes the user can see now.
+    /// Forget alerts of the panes the user has seen: on screen in the active window for `alerts.readAfterSeconds`.
+    /// While one is still waiting, a timer looks again when it is due.
     pub(super) fn clear_seen(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if !window.is_window_active() {
-            return;
-        }
+        let active = window.is_window_active();
+        let delay = Duration::from_secs(cx.global::<SettingsStore>().settings().alerts.read_after_seconds.into());
         let before = self.unseen.len();
         let workspace = &self.workspace;
-        forget_seen(&mut self.unseen, |leaf| workspace.is_unread(leaf), |leaf| workspace.is_visible(leaf));
+        let wait = forget_seen(
+            &mut self.unseen,
+            &mut self.seen_since,
+            |leaf| workspace.is_unread(leaf),
+            |leaf| active && workspace.is_visible(leaf),
+            Instant::now(),
+            delay,
+        );
+        self.read_timer = wait.map(|wait| {
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update_in(cx, |view, window, cx| view.clear_seen(window, cx));
+            })
+        });
         if self.unseen.len() != before {
             self.sync_unseen(cx);
         }
-        cx.notify();
+        if active {
+            cx.notify();
+        }
     }
 
     /// Tell the sidebar which sessions carry the unseen badge.
@@ -321,13 +346,32 @@ impl WorkspaceView {
     }
 }
 
-/// Drop the alerts of the leaves the user can see, except those marked unread by hand.
+/// Drop the alerts of the leaves that have been visible since `delay` ago (`since` keeps when each came into view),
+/// except those marked unread by hand. Returns how long until the next waiting one is due, if any waits.
 fn forget_seen(
     unseen: &mut HashMap<NodeId, AlertKind>,
+    since: &mut HashMap<NodeId, Instant>,
     marked: impl Fn(NodeId) -> bool,
     visible: impl Fn(NodeId) -> bool,
-) {
-    unseen.retain(|leaf, _| !visible(*leaf) || marked(*leaf));
+    now: Instant,
+    delay: Duration,
+) -> Option<Duration> {
+    let watched = |leaf: NodeId| visible(leaf) && !marked(leaf);
+    since.retain(|leaf, _| unseen.contains_key(leaf) && watched(*leaf));
+    let mut wait: Option<Duration> = None;
+    unseen.retain(|leaf, _| {
+        if !watched(*leaf) {
+            return true;
+        }
+        let left = delay.saturating_sub(now.duration_since(*since.entry(*leaf).or_insert(now)));
+        if left.is_zero() {
+            since.remove(leaf);
+            return false;
+        }
+        wait = Some(wait.map_or(left, |wait| wait.min(left)));
+        true
+    });
+    wait
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -338,7 +382,35 @@ mod tests {
     fn a_leaf_marked_unread_keeps_its_alert_in_view_while_others_are_forgotten() {
         let (marked, seen): (NodeId, NodeId) = (1, 2);
         let mut unseen = HashMap::from([(marked, AlertKind::Finished), (seen, AlertKind::Finished)]);
-        forget_seen(&mut unseen, |leaf| leaf == marked, |_| true);
+        let wait = forget_seen(
+            &mut unseen,
+            &mut HashMap::new(),
+            |leaf| leaf == marked,
+            |_| true,
+            Instant::now(),
+            Duration::ZERO,
+        );
         assert_eq!(unseen.keys().copied().collect::<Vec<_>>(), vec![marked]);
+        assert_eq!(wait, None);
+    }
+
+    #[test]
+    fn an_alert_is_forgotten_only_after_its_pane_stayed_in_view_for_the_delay() {
+        let delay = Duration::from_secs(2);
+        let start = Instant::now();
+        let mut unseen = HashMap::from([(1, AlertKind::Finished)]);
+        let mut since = HashMap::new();
+        let check =
+            |unseen: &mut HashMap<NodeId, AlertKind>, since: &mut HashMap<NodeId, Instant>, visible: bool, at| {
+                forget_seen(unseen, since, |_| false, |_| visible, start + Duration::from_millis(at), delay)
+            };
+        assert_eq!(check(&mut unseen, &mut since, true, 0), Some(delay));
+        assert_eq!(check(&mut unseen, &mut since, true, 500), Some(Duration::from_millis(1500)));
+        // Passing on to another tab starts the count again.
+        assert_eq!(check(&mut unseen, &mut since, false, 1000), None);
+        assert_eq!(check(&mut unseen, &mut since, true, 1200), Some(delay));
+        assert!(unseen.contains_key(&1));
+        assert_eq!(check(&mut unseen, &mut since, true, 3200), None);
+        assert!(unseen.is_empty() && since.is_empty());
     }
 }

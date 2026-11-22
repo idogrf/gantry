@@ -83,6 +83,16 @@ const FINISHED_AFTER: Stepped = Stepped {
     unit: "s",
 };
 
+const READ_AFTER: Stepped = Stepped {
+    name: "read-after",
+    get: |s| s.alerts.read_after_seconds as f32,
+    set: |s, value| s.alerts.read_after_seconds = value as u32,
+    delta: 1.0,
+    min: 0.0,
+    max: 60.0,
+    unit: "s",
+};
+
 /// The volume (0 to 1, whole percents) under pointer position `x` on a slider spanning `left..left + width`.
 fn volume_at(x: f32, left: f32, width: f32) -> f32 {
     if width <= 0.0 {
@@ -279,6 +289,16 @@ impl SettingsView {
             window,
             cx,
         );
+        let read_after = self.stepper(&READ_AFTER, settings, window, cx);
+        let read_after_reset = self.reset_slot(
+            "reset-read-after",
+            0,
+            settings,
+            |s| s.alerts.read_after_seconds,
+            |s, v| s.alerts.read_after_seconds = v,
+            window,
+            cx,
+        );
         group(
             theme,
             "Visibility",
@@ -297,6 +317,13 @@ impl SettingsView {
                     "Notifications wait until Gantry is not focused. Badges and sounds still follow Events.",
                     background,
                     background_reset,
+                ),
+                row(
+                    theme,
+                    "Mark as read after",
+                    "How long a pane with an alert must be on screen before its badge clears. 0 clears it at once.",
+                    read_after,
+                    read_after_reset,
                 ),
             ],
         )

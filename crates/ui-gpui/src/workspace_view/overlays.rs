@@ -1,4 +1,6 @@
-use super::{DevContainerOpen, DialogAction, OpenDialog, OpenLauncher, OpenRecents, OpenSettings, WorkspaceView};
+use super::{
+    DevContainerOpen, DialogAction, OpenDialog, OpenLauncher, OpenRecents, OpenSettings, RenameStage, WorkspaceView,
+};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -20,7 +22,7 @@ use gpui::{Context, Focusable, PathPromptOptions, Window, prelude::*};
 use protocol::host::HostId;
 use protocol::message::{PaletteColors, SessionInfo, SessionStatus};
 
-use app_core::session_tree::status_tone;
+use app_core::session_tree::{Tone, status_tone};
 
 use crate::askpass_view::{AskpassEvent, AskpassView};
 use crate::color_picker_view::{ColorPickerEvent, ColorPickerView};
@@ -74,9 +76,12 @@ impl WorkspaceView {
                 self.release_etag = None;
                 self.release_card = None;
                 self.set_check_row(CheckStatus::Idle, cx);
+                self.publish_update_row(cx);
                 cx.notify();
             }
         }
+        // Turning on autoInstallUpdates with a newer release already known starts it now.
+        self.auto_update(cx);
         // A host that left the settings is forgotten: no connection, no timer, no attempt, and its panes say so.
         let listed: HashSet<String> = self.ssh_hosts.iter().map(|host| host.name.clone()).collect();
         let removed: Vec<HostId> = self
@@ -259,6 +264,7 @@ impl WorkspaceView {
     /// The dialog was answered: close it, give the focus back and run what the choice asks.
     fn on_dialog_chosen(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(open) = self.dialog.take() else { return };
+        let text = open.view.read(cx).input_text();
         match &open.restore {
             Some(handle) => handle.focus(window, cx),
             None => self.focus_current(window, cx),
@@ -278,6 +284,22 @@ impl WorkspaceView {
                     for leaf in leaves {
                         self.close_leaf(leaf, window, cx);
                     }
+                }
+            }
+            DialogAction::RenameInput { leaf } => {
+                if index == 0 {
+                    let name = text.unwrap_or_default();
+                    self.confirm_rename_session(leaf, name.trim(), window, cx);
+                }
+            }
+            DialogAction::RenameSession { leaf, name } => {
+                let key = self.workspace.leaves.get(&leaf).and_then(|entry| entry.key());
+                if index == 0
+                    && let Some(key) = key
+                    && let Some(client) = self.client(&key.host)
+                {
+                    client.kill(key.pane);
+                    self.renames.insert(leaf, RenameStage::Stopping(name));
                 }
             }
             DialogAction::TakeOver { host, session, target } => {
@@ -393,6 +415,17 @@ impl WorkspaceView {
                 .map(|tint| tint.value(theme.preset))
                 .or_else(|| self.leaf_project_color(*leaf, cx)),
             ColorTarget::Project(root) => theme.project(root),
+            ColorTarget::Status(tone) => {
+                let fills = &cx.global::<SettingsStore>().settings().status_fills;
+                let stored = match tone {
+                    Tone::NeedsInput => fills.needs_input,
+                    Tone::Working => fills.working,
+                    Tone::Done => fills.done,
+                    Tone::Idle => fills.idle,
+                    _ => fills.unread,
+                };
+                stored.or(theme.tone(*tone).fill)
+            }
         };
         let initial = current.unwrap_or(theme.tokens.accent);
         let view = cx.new(|cx| ColorPickerView::new(target, initial, cx));
@@ -408,6 +441,19 @@ impl WorkspaceView {
                     ColorTarget::Project(root) => SettingsStore::update(cx, |settings| {
                         settings.project_colors.folders.insert(root.clone(), *tint);
                     }),
+                    ColorTarget::Status(tone) => {
+                        let fill = Some(tint.value(crate::theme::theme(cx).preset));
+                        SettingsStore::update(cx, |settings| {
+                            let fills = &mut settings.status_fills;
+                            match tone {
+                                Tone::NeedsInput => fills.needs_input = fill,
+                                Tone::Working => fills.working = fill,
+                                Tone::Done => fills.done = fill,
+                                Tone::Idle => fills.idle = fill,
+                                _ => fills.unread = fill,
+                            }
+                        });
+                    }
                 }
             }
             this.color_picker = None;
@@ -601,6 +647,10 @@ impl WorkspaceView {
                     SettingsEvent::DetectClaudeDirs => this.show_setup(SetupMode::Rerun, window, cx),
                     SettingsEvent::AddSshHost => this.open_ssh_wizard(WizardStart::Add, window, cx),
                     SettingsEvent::CheckNow => this.check_releases(true, cx),
+                    SettingsEvent::DownloadUpdate => this.start_self_update(cx),
+                    SettingsEvent::CancelUpdate => this.cancel_self_update(cx),
+                    SettingsEvent::RestartToUpdate => this.restart_and_update(cx),
+                    SettingsEvent::CustomColor(tone) => this.show_color_picker(ColorTarget::Status(*tone), window, cx),
                     SettingsEvent::HostRenamed { from, to, reconnect } => {
                         this.host_renamed(&HostId::named(from), &HostId::named(to), *reconnect, window, cx)
                     }

@@ -53,6 +53,17 @@ pub struct DialogSpec {
     pub actions: Vec<Choice>,
     /// The index Esc picks.
     pub escape: usize,
+    /// A text field above the choices; Enter answers the focused choice with its text.
+    pub input: Option<DialogInput>,
+}
+
+/// A dialog's text field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DialogInput {
+    /// The text it starts with (all selected).
+    pub text: String,
+    /// Shown while it is empty.
+    pub placeholder: String,
 }
 
 /// What is running, for the chips and the consequence lines.
@@ -109,7 +120,7 @@ fn choice(label: &str, description: Option<String>, style: ChoiceStyle, initial_
 }
 
 fn spec(title: String, detail: Option<String>, layout: Layout, actions: Vec<Choice>, escape: usize) -> DialogSpec {
-    DialogSpec { title, detail, chips: Vec::new(), warning: None, layout, actions, escape }
+    DialogSpec { title, detail, chips: Vec::new(), warning: None, layout, actions, escape, input: None }
 }
 
 /// Stacked rows: the first choice is the safe one, the second ends sessions, then Cancel.
@@ -189,6 +200,41 @@ pub fn close_pane(is_claude: bool) -> DialogSpec {
             choice("Keep open", None, ChoiceStyle::Primary, true),
         ],
         1,
+    )
+}
+
+/// Rename a running Claude session, which restarts it; `busy` = Claude is working on a turn.
+pub fn rename_session(busy: bool) -> DialogSpec {
+    let mut detail = "Claude restarts in this pane and the conversation continues under the new name.".to_string();
+    if busy {
+        detail.push_str(" Claude is working; renaming stops it.");
+    }
+    spec(
+        "Rename and restart this session?".into(),
+        Some(detail),
+        Layout::Pills,
+        vec![
+            choice("Rename and restart", None, ChoiceStyle::Primary, true),
+            choice("Cancel", None, ChoiceStyle::Cancel, false),
+        ],
+        1,
+    )
+}
+
+/// Ask for a running Claude session's new name, starting from `current`.
+pub fn rename_input(current: &str) -> DialogSpec {
+    let actions =
+        vec![choice("Rename", None, ChoiceStyle::Primary, true), choice("Cancel", None, ChoiceStyle::Cancel, false)];
+    let input = DialogInput { text: current.to_string(), placeholder: "Session name".into() };
+    DialogSpec { input: Some(input), ..spec("Rename session".into(), None, Layout::Pills, actions, 1) }
+}
+
+/// The renamed session exited at once: Claude on `host` (`None` = this machine) likely lacks `--name`.
+pub fn rename_failed(host: Option<&str>) -> DialogSpec {
+    let claude = host.map_or_else(|| "Claude".to_string(), |host| format!("Claude on {host}"));
+    notice(
+        "Couldn't rename the session",
+        &format!("{claude} may not support --name. Resume conversation continues it under its old name."),
     )
 }
 
@@ -487,6 +533,40 @@ mod tests {
     }
 
     #[test]
+    fn rename_session_copy() {
+        let d = rename_session(false);
+        assert_eq!(d.title, "Rename and restart this session?");
+        assert_eq!(
+            d.detail.as_deref(),
+            Some("Claude restarts in this pane and the conversation continues under the new name.")
+        );
+        assert_eq!(labels(&d), ["Rename and restart", "Cancel"]);
+        assert_eq!(styles(&d), [ChoiceStyle::Primary, ChoiceStyle::Cancel]);
+        assert_eq!((focus(&d), d.escape, d.layout), (0, 1, Layout::Pills), "Enter confirms, Esc cancels");
+        assert_eq!(d.input, None);
+        assert!(rename_session(true).detail.unwrap().ends_with(" Claude is working; renaming stops it."));
+        assert_eq!(
+            rename_failed(Some("devbox")).detail.as_deref(),
+            Some("Claude on devbox may not support --name. Resume conversation continues it under its old name.")
+        );
+        assert_eq!(
+            rename_failed(None).detail.as_deref(),
+            Some("Claude may not support --name. Resume conversation continues it under its old name.")
+        );
+        assert_eq!(rename_failed(None).title, "Couldn't rename the session");
+    }
+
+    #[test]
+    fn rename_input_copy() {
+        let d = rename_input("Fix the build");
+        assert_eq!(d.title, "Rename session");
+        assert_eq!(d.input, Some(DialogInput { text: "Fix the build".into(), placeholder: "Session name".into() }));
+        assert_eq!(labels(&d), ["Rename", "Cancel"]);
+        assert_eq!(styles(&d), [ChoiceStyle::Primary, ChoiceStyle::Cancel]);
+        assert_eq!((focus(&d), d.escape), (0, 1));
+    }
+
+    #[test]
     fn close_tab_copy() {
         let c = close_tab(2);
         assert_eq!(c.title, "Close this tab?");
@@ -609,6 +689,10 @@ mod tests {
             dev_container("p", "c", false),
             daemon_mismatch(),
             notice("t", "d"),
+            rename_session(false),
+            rename_session(true),
+            rename_failed(None),
+            rename_input("t"),
         ];
         for spec in &all {
             let focused: Vec<_> = spec.actions.iter().filter(|a| a.initial_focus).collect();

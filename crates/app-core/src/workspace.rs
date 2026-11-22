@@ -157,6 +157,12 @@ impl PaneLaunch {
         }
     }
 
+    /// This launch with `--name <name>` added: Claude renames the session it starts or resumes.
+    pub fn with_name(mut self, name: &str) -> PaneLaunch {
+        self.args.extend(["--name".into(), name.into()]);
+        self
+    }
+
     /// Claude Code resuming `session` in `cwd`, in the dev container serving `container` (`None` = this machine).
     pub fn resume(session: &str, cwd: PathBuf, container: Option<PathBuf>) -> PaneLaunch {
         PaneLaunch {
@@ -471,6 +477,29 @@ impl Leaf {
         } else {
             PaneLaunch::restart_with(id, cwd, container, session_dir, dirs, daemon_dir)
         }
+    }
+
+    /// What restarting this stopped Claude leaf under `name` runs: its session resumed when it has a transcript
+    /// (`known` has a title; a live session is listed from its pid file before that), else started afresh under the
+    /// same id, with `--name`.
+    pub fn rename_launch(
+        &self,
+        known: Option<&SessionInfo>,
+        name: &str,
+        dirs: &ClaudeDirs,
+        daemon_dir: Option<&Path>,
+    ) -> PaneLaunch {
+        let resumable = known.is_some_and(|info| !info.title.is_empty());
+        let session_dir = known.and_then(|info| info.claude_dir.as_deref());
+        self.rerun_resolved(resumable, session_dir, dirs, daemon_dir).with_name(name)
+    }
+
+    /// Whether a rename can restart this leaf now. In a dev container, killing the pane ends `docker exec` before
+    /// the Claude inside it, so it waits until the session (`known`) no longer runs.
+    pub fn rename_can_restart(&self, known: Option<&SessionInfo>) -> bool {
+        self.launch.container.is_none()
+            || !known
+                .is_some_and(|info| matches!(info.state, SessionState::Managed { .. } | SessionState::External { .. }))
     }
 
     /// What re-running this finished leaf starts. Claude: `--resume` its session when the daemon knows
@@ -2530,6 +2559,15 @@ mod tests {
     }
 
     #[test]
+    fn a_name_is_added_once_and_dropped_on_rerun() {
+        let named = claude_leaf(Some("abc")).rerun(true).with_name("Review bot");
+        assert_eq!(named.args, ["--resume", "abc", "--name", "Review bot"]);
+        assert_eq!(named.session(), Some("abc"));
+        let later = Leaf::new(named);
+        assert_eq!(later.rerun(true).args, ["--resume", "abc"]);
+    }
+
+    #[test]
     fn rerun_resumes_the_leafs_session() {
         assert_eq!(claude_leaf(Some("abc")).rerun(true).args, vec!["--resume".to_string(), "abc".to_string()]);
         // No transcript (nothing was said): start the same session id afresh.
@@ -2556,6 +2594,33 @@ mod tests {
             last_prompt: None,
             host: protocol::host::HostId::local(),
         }
+    }
+
+    #[test]
+    fn a_rename_resumes_only_a_session_with_a_transcript() {
+        let leaf = claude_leaf(Some("x"));
+        let dirs = ClaudeDirs::from_settings(&Settings::default(), Some(Path::new("/d/.claude")), None);
+        let daemon = Some(Path::new("/d/.claude"));
+        let tail = |known: Option<&SessionInfo>| {
+            let args = leaf.rename_launch(known, "N", &dirs, daemon).args;
+            args[args.len() - 4..].to_vec()
+        };
+        let untitled = session_info("x", SessionState::Managed { pane: 1 });
+        assert_eq!(tail(Some(&untitled)), ["--session-id", "x", "--name", "N"], "listed from its pid file only");
+        let titled = SessionInfo { title: "Fix the build".into(), ..untitled };
+        assert_eq!(tail(Some(&titled)), ["--resume", "x", "--name", "N"]);
+        assert_eq!(tail(None), ["--session-id", "x", "--name", "N"]);
+    }
+
+    #[test]
+    fn a_container_rename_waits_until_the_old_claude_is_gone() {
+        assert!(claude_leaf(Some("x")).rename_can_restart(Some(&session_info("x", SessionState::Managed { pane: 1 }))));
+        let mut boxed = claude_leaf(Some("x"));
+        boxed.launch.container = Some("/r".into());
+        assert!(!boxed.rename_can_restart(Some(&session_info("x", SessionState::Managed { pane: 1 }))));
+        assert!(!boxed.rename_can_restart(Some(&session_info("x", SessionState::External { pid: Some(9) }))));
+        assert!(boxed.rename_can_restart(Some(&session_info("x", SessionState::Closed))));
+        assert!(boxed.rename_can_restart(None));
     }
 
     #[test]

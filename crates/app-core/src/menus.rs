@@ -133,6 +133,8 @@ pub enum ColorTarget {
     Pane(NodeId),
     /// A project, by its root.
     Project(PathBuf),
+    /// A status fill in Settings, by its tone.
+    Status(Tone),
 }
 
 /// One pickable menu entry.
@@ -481,6 +483,10 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
             items.extend(folder_items(&session.cwd, vscode, &session.host));
             if let Some(leaf) = leaf {
                 items.extend(remove_from_project_item(row, *leaf));
+                // A Closed tone with a Managed state: its host is away or its pane ended, the list not caught up.
+                if matches!(session.state, SessionState::Managed { .. }) && *tone != Tone::Closed {
+                    items.push(entry("Rename…", MenuAction::RenamePane(*leaf)));
+                }
                 items.push(MenuItem::Separator);
                 items.push(close_item(*leaf, alone));
             }
@@ -489,8 +495,8 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
             let vscode = vscode_args(&pane.cwd, None, pane.container.as_deref());
             match (pane.claude, pane.ended) {
                 (true, true) => items.push(accented("Resume conversation", MenuAction::Continue(pane.leaf))),
-                (false, _) => items.push(entry("Rename…", MenuAction::RenamePane(pane.leaf))),
-                (true, false) => {}
+                (true, false) if pane.offline => {}
+                _ => items.push(entry("Rename…", MenuAction::RenamePane(pane.leaf))),
             }
             items.extend(pane_color_menu(context));
             items.push(MenuItem::Separator);
@@ -707,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn only_shell_panes_and_tabs_offer_rename() {
+    fn running_panes_and_tabs_offer_rename() {
         let rename = |items: &[MenuItem]| {
             items.iter().find_map(|item| match item {
                 MenuItem::Entry(entry) if entry.label == "Rename…" => Some(entry.action.clone()),
@@ -715,12 +721,34 @@ mod tests {
             })
         };
         let menus_row_menu = |row: &Row| row_menu(row, ALONE, &MenuContext::default()).unwrap();
-        let shell = menus_row_menu(&pane_row(false, false));
-        assert_eq!(rename(&shell), Some(MenuAction::RenamePane(7)));
-        assert_eq!(rename(&menus_row_menu(&pane_row(true, false))), None);
-        assert_eq!(rename(&menus_row_menu(&pane_row(true, true))), None);
+        assert_eq!(rename(&menus_row_menu(&pane_row(false, false))), Some(MenuAction::RenamePane(7)));
+        assert_eq!(rename(&menus_row_menu(&pane_row(true, false))), Some(MenuAction::RenamePane(7)));
+        assert_eq!(rename(&menus_row_menu(&pane_row(true, true))), None, "ended: Resume conversation instead");
+        let mut offline = pane_row(true, false);
+        if let RowKind::Pane { entry, .. } = &mut offline.kind {
+            entry.offline = true;
+        }
+        assert_eq!(rename(&menus_row_menu(&offline)), None, "host away");
         let running = SessionState::Managed { pane: 1 };
-        assert_eq!(rename(&menus_row_menu(&session_row(running, Tone::Idle, Some(4)))), None);
+        assert_eq!(
+            rename(&menus_row_menu(&session_row(running, Tone::Idle, Some(4)))),
+            Some(MenuAction::RenamePane(4))
+        );
+        assert_eq!(rename(&menus_row_menu(&session_row(SessionState::Closed, Tone::Closed, Some(4)))), None);
+        assert_eq!(
+            rename(&menus_row_menu(&session_row(running, Tone::Closed, Some(4)))),
+            None,
+            "still listed as running, but its host is away or its pane ended"
+        );
+        assert_eq!(
+            row_menu(
+                &session_row(SessionState::External { pid: Some(9) }, Tone::Elsewhere, None),
+                ALONE,
+                &MenuContext::default()
+            )
+            .and_then(|items| rename(&items)),
+            None
+        );
         let items = tab_menu(3, &HostId::local(), Path::new("/r/app"), vec![], &MenuContext::default(), None, 2);
         assert_eq!(rename(&items), Some(MenuAction::RenameTab(3)));
         let single = tab_menu(3, &HostId::local(), Path::new("/r/app"), vec![], &MenuContext::default(), None, 1);
@@ -787,6 +815,7 @@ mod tests {
                 "Copy folder path",
                 "Open folder",
                 "Open in VS Code",
+                "Rename…",
                 "│",
                 "Close tab"
             ]
@@ -863,7 +892,7 @@ mod tests {
     fn a_new_claude_pane_and_a_shell_have_their_menus() {
         assert_eq!(
             labels(&row_menu(&pane_row(true, false), ALONE, &MenuContext::default()).unwrap()),
-            ["Copy session id", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab",]
+            ["Rename…", "│", "Copy session id", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]
         );
         let shell = row_menu(&pane_row(false, false), ALONE, &MenuContext::default()).unwrap();
         assert_eq!(

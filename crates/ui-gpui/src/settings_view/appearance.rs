@@ -1,14 +1,12 @@
 //! The Appearance section: theme, status colors and fonts.
 
 use app_core::session_tree::Tone;
-use app_core::settings::{Settings, StatusFills, ThemeChoice, parse_hex};
-use app_core::theme_colors::{
-    Preset, ProjectColor, Tokens, contrast, derive, mix, readable_fill, tokens as preset_tokens, tone_colors,
-};
-use gpui::{Context, Div, FontWeight, IntoElement, KeyDownEvent, Window, deferred, div, px, rgb, rgba};
+use app_core::settings::{Settings, StatusFills, TRANSPARENT, ThemeChoice, fill_text};
+use app_core::theme_colors::{Preset, ProjectColor, effective_fill, mix, tokens as preset_tokens, tone_colors};
+use gpui::{Context, Div, FontWeight, IntoElement, Styled, Window, deferred, div, px, rgb, rgba};
 
 use super::*;
-use crate::theme::{RADIUS, RADIUS_SMALL, Theme};
+use crate::theme::{RADIUS, RADIUS_SMALL, Theme, pin_icon};
 
 /// A session status whose sidebar fill can be chosen.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -17,10 +15,11 @@ pub(super) enum Status {
     Working,
     Done,
     Idle,
+    Unread,
 }
 
 impl Status {
-    const ALL: [Status; 4] = [Status::NeedsInput, Status::Working, Status::Done, Status::Idle];
+    const ALL: [Status; 5] = [Status::NeedsInput, Status::Working, Status::Done, Status::Idle, Status::Unread];
 
     fn tone(self) -> Tone {
         match self {
@@ -28,6 +27,7 @@ impl Status {
             Status::Working => Tone::Working,
             Status::Done => Tone::Done,
             Status::Idle => Tone::Idle,
+            Status::Unread => Tone::Unread,
         }
     }
 
@@ -37,6 +37,7 @@ impl Status {
             Status::Working => "Working",
             Status::Done => "Done",
             Status::Idle => "Idle",
+            Status::Unread => "Unread",
         }
     }
 
@@ -46,6 +47,7 @@ impl Status {
             Status::Working => "Claude is busy.",
             Status::Done => "Finished, and you have not looked yet.",
             Status::Idle => "Waiting quietly. A muted fill.",
+            Status::Unread => "Marked unread by hand. Transparent leaves only the pin.",
         }
     }
 
@@ -55,6 +57,7 @@ impl Status {
             Status::Working => "Tab drag to reorder",
             Status::Done => "Right-click menus",
             Status::Idle => "Plan mode bridge hook",
+            Status::Unread => "Sidebar width memory",
         }
     }
 
@@ -64,6 +67,7 @@ impl Status {
             Status::Working => fills.working,
             Status::Done => fills.done,
             Status::Idle => fills.idle,
+            Status::Unread => fills.unread,
         }
     }
 
@@ -73,12 +77,22 @@ impl Status {
             Status::Working => fills.working = fill,
             Status::Done => fills.done = fill,
             Status::Idle => fills.idle = fill,
+            Status::Unread => fills.unread = fill,
         }
     }
 
-    /// The fill the preset draws when nothing is chosen.
-    fn default_fill(self, preset: Preset) -> u32 {
-        tone_colors(preset, &StatusFills::default(), self.tone()).fill.unwrap_or(preset_tokens(preset).surface)
+    /// The fill the preset draws when nothing is chosen (Unread's follows the Done fill in `fills`).
+    fn default_fill(self, preset: Preset, fills: &StatusFills) -> u32 {
+        let base = match self {
+            Status::Unread => StatusFills { done: fills.done, ..StatusFills::default() },
+            _ => StatusFills::default(),
+        };
+        tone_colors(preset, &base, self.tone()).fill.unwrap_or(preset_tokens(preset).surface)
+    }
+
+    /// The fills offered as swatches: Unread also has [`TRANSPARENT`].
+    fn swatches(self) -> impl Iterator<Item = u32> {
+        SUGGESTED_FILLS.into_iter().chain((self == Status::Unread).then_some(TRANSPARENT))
     }
 }
 
@@ -130,58 +144,29 @@ fn picked_text(count: usize) -> String {
     }
 }
 
-/// The contrast line for a picked `fill`, and whether the fill may be used.
-fn contrast_label(fill: u32, tokens: &Tokens) -> (String, bool) {
-    if !readable_fill(fill, tokens) {
-        return ("Too low contrast; choose a lighter or darker fill".into(), false);
-    }
-    let ratio = contrast(derive(fill, tokens).ink, fill);
-    let text = if ratio < 10.0 { format!("{ratio:.1}") } else { format!("{ratio:.0}") };
-    (format!("Text contrast {text} : 1"), true)
-}
-
 /// What to store for a picked `fill`: nothing when it is the theme's own.
 fn fill_to_store(fill: u32, default: u32) -> Option<u32> {
     (fill != default).then_some(fill)
 }
 
-/// `#rrggbb`, with or without the `#`.
-fn parse_fill(text: &str) -> Option<u32> {
-    let text = text.trim();
-    parse_hex(&if text.starts_with('#') { text.to_string() } else { format!("#{text}") })
+/// Paint `element` as a swatch of `fill`: the color it shows, or no fill and a dashed `outline` for [`TRANSPARENT`].
+fn swatch<E: Styled>(element: E, fill: u32, outline: u32, theme: &Theme) -> E {
+    if fill == TRANSPARENT {
+        element.border_dashed().border_color(rgb(outline))
+    } else {
+        element.bg(rgb(effective_fill(fill, &theme.tokens)))
+    }
 }
 
 impl SettingsView {
-    fn open_fill_picker(&mut self, status: Status, window: &mut Window, cx: &mut Context<Self>) {
-        let theme = theme(cx);
-        let chosen = status.fill(&cx.global::<SettingsStore>().settings().status_fills);
-        let current = chosen.unwrap_or(status.default_fill(theme.preset));
-        self.hex.clear();
-        self.hex.insert(&hex(current));
-        self.hex.select_all();
+    fn open_fill_picker(&mut self, status: Status, cx: &mut Context<Self>) {
         self.popover = Some(Popover::Fill(status));
-        self.hex_focus.focus(window, cx);
         cx.notify();
     }
 
     fn apply_fill(&mut self, status: Status, fill: u32, cx: &mut Context<Self>) {
-        let default = status.default_fill(theme(cx).preset);
+        let default = status.default_fill(theme(cx).preset, &cx.global::<SettingsStore>().settings().status_fills);
         SettingsStore::update(cx, |settings| status.set(&mut settings.status_fills, fill_to_store(fill, default)));
-    }
-
-    fn hex_key_down(&mut self, status: Status, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let keystroke = &event.keystroke;
-        if keystroke.key == "enter" {
-            let tokens = theme(cx).tokens;
-            if let Some(fill) = parse_fill(self.hex.text()).filter(|fill| readable_fill(*fill, &tokens)) {
-                self.apply_fill(status, fill, cx);
-                self.close_popover(window, cx);
-            }
-        } else if !field::edit(&mut self.hex, keystroke, cx) {
-            return;
-        }
-        cx.stop_propagation();
-        cx.notify();
     }
 
     pub(super) fn appearance(
@@ -209,7 +194,9 @@ impl SettingsView {
             let preview =
                 preset_tokens(if choice == ThemeChoice::MistLight { Preset::MistLight } else { Preset::Mist });
             let preset = if choice == ThemeChoice::MistLight { Preset::MistLight } else { Preset::Mist };
-            let bar = |status: Status| div().h(theme.ui(8.)).rounded(px(4.)).bg(rgb(status.default_fill(preset)));
+            let bar = |status: Status| {
+                div().h(theme.ui(8.)).rounded(px(4.)).bg(rgb(status.default_fill(preset, &StatusFills::default())))
+            };
             let light = preset_tokens(Preset::MistLight);
             let miniature = div()
                 .h(theme.ui(74.))
@@ -292,7 +279,7 @@ impl SettingsView {
                 let index = status as usize;
                 let chosen = status.fill(&settings.status_fills);
                 let colors = theme.tone(status.tone());
-                let shown = chosen.unwrap_or_else(|| status.default_fill(theme.preset));
+                let shown = chosen.unwrap_or_else(|| status.default_fill(theme.preset, &settings.status_fills));
                 let open = self.popover == Some(Popover::Fill(status));
                 let sample = div()
                     .w(theme.ui(250.))
@@ -305,7 +292,10 @@ impl SettingsView {
                     .rounded(px(RADIUS))
                     .bg(rgb(colors.fill.unwrap_or(theme.tokens.surface)))
                     .text_color(rgb(colors.ink))
-                    .child(div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(colors.dot)))
+                    .map(|sample| match status {
+                        Status::Unread => sample.child(pin_icon(colors.dot, theme)),
+                        _ => sample.child(div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(colors.dot))),
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -317,7 +307,7 @@ impl SettingsView {
                     .child(
                         div().flex_none().text_xs().text_color(rgba((colors.ink << 8) | 0xcc)).child(status.label()),
                     );
-                let open_picker = handler(move |this, window, cx| this.open_fill_picker(status, window, cx));
+                let open_picker = handler(move |this, _, cx| this.open_fill_picker(status, cx));
                 let picker_button = self
                     .pressable(
                         "status-color",
@@ -336,14 +326,11 @@ impl SettingsView {
                     .rounded(px(RADIUS_SMALL))
                     .bg(rgb(theme.tokens.raised))
                     .child(
-                        div()
+                        swatch(div().border_1().border_color(rgb(theme.tokens.line)), shown, theme.tokens.muted, theme)
                             .size(theme.ui(22.))
-                            .rounded(px(6.))
-                            .bg(rgb(shown))
-                            .border_1()
-                            .border_color(rgb(theme.tokens.line)),
+                            .rounded(px(6.)),
                     )
-                    .child(hex(shown));
+                    .child(fill_text(shown));
                 let picker = open.then(|| self.fill_picker(status, theme, window, cx));
                 let reset = self.reset_button(
                     "status-reset",
@@ -638,58 +625,29 @@ impl SettingsView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let chosen = status.fill(&cx.global::<SettingsStore>().settings().status_fills);
-        let current = chosen.unwrap_or_else(|| status.default_fill(theme.preset));
-        let typed = parse_fill(self.hex.text());
-        let verdict = typed.map(|fill| contrast_label(fill, &theme.tokens));
-        let swatches = SUGGESTED_FILLS
-            .iter()
+        let fills = cx.global::<SettingsStore>().settings().status_fills;
+        let current = status.fill(&fills).unwrap_or_else(|| status.default_fill(theme.preset, &fills));
+        let swatches = status
+            .swatches()
             .enumerate()
             .map(|(index, fill)| {
-                let fill = *fill;
                 let pick = handler(move |this, _, cx| {
                     this.apply_fill(status, fill, cx);
-                    this.hex.clear();
-                    this.hex.insert(&hex(fill));
-                    this.hex.select_all();
                     cx.notify();
                 });
-                self.pressable("swatch", index, None, window, cx, pick)
+                let outline = if fill == current { theme.tokens.text } else { theme.tokens.muted };
+                swatch(self.pressable("swatch", index, None, window, cx, pick), fill, outline, theme)
                     .h(theme.ui(30.))
                     .rounded(px(RADIUS_SMALL))
-                    .bg(rgb(fill))
                     .border_2()
                     .when(fill == current, |swatch| swatch.border_color(rgb(theme.tokens.text)))
             })
             .collect::<Vec<_>>();
-        let tone = theme.tone(if verdict.as_ref().is_some_and(|(_, ok)| *ok) { Tone::Done } else { Tone::NeedsInput });
-        let hex_focused = self.hex_focus.is_focused(window);
-        let field_box = div()
-            .id("hex-field")
-            .track_focus(&self.hex_focus)
-            .flex_1()
-            .h(theme.ui(32.))
-            .px(theme.ui(10.))
-            .flex()
-            .items_center()
-            .rounded(px(RADIUS_SMALL))
-            .bg(rgb(theme.tokens.surface))
-            .border_1()
-            .border_color(rgb(if hex_focused { theme.tokens.accent } else { theme.tokens.line }))
-            .on_key_down(
-                cx.listener(move |this, event: &KeyDownEvent, window, cx| this.hex_key_down(status, event, window, cx)),
-            )
-            .on_click(cx.listener(|this, _, window, cx| this.hex_focus.focus(window, cx)))
-            .child(field::render(
-                &self.hex,
-                "#rrggbb",
-                hex_focused,
-                theme,
-                field::on_press(cx, |this, offset, clicks, _, cx| {
-                    this.hex.press(offset, clicks);
-                    cx.notify();
-                }),
-            ));
+        let custom = handler(move |this, window, cx| {
+            this.close_popover(window, cx);
+            cx.emit(SettingsEvent::CustomColor(status.tone()));
+        });
+        let custom = self.button("custom-fill", 0, "Custom color…", window, cx, custom);
         deferred(
             div()
                 .occlude()
@@ -707,26 +665,7 @@ impl SettingsView {
                 .border_color(rgb(theme.tokens.line))
                 .shadow_lg()
                 .child(div().grid().grid_cols(6).gap(theme.ui(8.)).children(swatches))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(theme.ui(10.))
-                        .text_color(rgb(theme.tokens.muted))
-                        .child("Hex")
-                        .child(field_box),
-                )
-                .child(match verdict {
-                    Some((text, _)) => div()
-                        .flex()
-                        .items_start()
-                        .gap(theme.ui(8.))
-                        .text_xs()
-                        .text_color(rgb(theme.tokens.muted))
-                        .child(div().flex_none().mt(theme.ui(4.)).size(theme.ui(8.)).rounded_full().bg(rgb(tone.dot)))
-                        .child(div().flex_1().min_w_0().child(text)),
-                    None => muted(theme, "Type a color as #rrggbb"),
-                }),
+                .child(custom),
         )
         .with_priority(1)
     }
@@ -735,7 +674,6 @@ impl SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use app_core::theme_colors::tokens;
 
     #[test]
     fn picked_colors_text_is_singular_for_one_folder() {
@@ -744,46 +682,27 @@ mod tests {
     }
 
     #[test]
-    fn contrast_line_has_one_decimal_below_ten() {
-        let t = tokens(Preset::Mist);
-        let (text, ok) = contrast_label(0xf7c9a3, &t);
-        assert!(ok);
-        let ratio = text.strip_prefix("Text contrast ").and_then(|rest| rest.strip_suffix(" : 1")).unwrap();
-        let value: f32 = ratio.parse().unwrap();
-        assert!(value >= 4.5);
-        if value < 10.0 {
-            assert_eq!(ratio.split('.').nth(1).map(str::len), Some(1), "{text}");
-        } else {
-            assert!(!ratio.contains('.'), "{text}");
-        }
-    }
-
-    #[test]
-    fn unreadable_fill_is_refused() {
-        let t = tokens(Preset::Mist);
-        // Mid grey: neither light nor dark enough for derived text.
-        let grey = (0x00..=0xff_u32)
-            .map(|v| v * 0x010101)
-            .find(|fill| !readable_fill(*fill, &t))
-            .expect("some grey is unreadable");
-        assert_eq!(contrast_label(grey, &t), ("Too low contrast; choose a lighter or darker fill".to_string(), false));
-    }
-
-    #[test]
     fn the_themes_own_fill_is_stored_as_nothing() {
         assert_eq!(fill_to_store(0xc1e5cd, 0xc1e5cd), None);
         assert_eq!(fill_to_store(0xb7e4dd, 0xc1e5cd), Some(0xb7e4dd));
         assert_eq!(
-            Status::Done.default_fill(Preset::Mist),
+            Status::Done.default_fill(Preset::Mist, &StatusFills::default()),
             tone_colors(Preset::Mist, &StatusFills::default(), Tone::Done).fill.unwrap()
         );
     }
 
     #[test]
-    fn fills_are_typed_with_or_without_the_hash() {
-        assert_eq!(parse_fill("#c1e5cd"), Some(0xc1e5cd));
-        assert_eq!(parse_fill(" c1e5cd "), Some(0xc1e5cd));
-        assert_eq!(parse_fill("#c1e5"), None);
-        assert_eq!(parse_fill(""), None);
+    fn only_unread_offers_transparent() {
+        assert!(Status::Unread.swatches().any(|fill| fill == TRANSPARENT));
+        assert!(!Status::Done.swatches().any(|fill| fill == TRANSPARENT));
+    }
+
+    #[test]
+    fn unread_default_follows_a_custom_done_fill() {
+        let fills = StatusFills { done: Some(0xffe08a), ..StatusFills::default() };
+        assert_eq!(
+            Status::Unread.default_fill(Preset::Mist, &fills),
+            tone_colors(Preset::Mist, &fills, Tone::Unread).fill.unwrap()
+        );
     }
 }

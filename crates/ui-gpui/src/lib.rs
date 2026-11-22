@@ -17,6 +17,7 @@ pub mod launcher_view;
 mod pane_drag;
 pub mod recents_view;
 mod release_check;
+mod self_update;
 mod settings_store;
 mod settings_view;
 mod setup_view;

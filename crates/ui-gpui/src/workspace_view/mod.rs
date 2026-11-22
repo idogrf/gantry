@@ -3,12 +3,15 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant, SystemTime};
 
 use app_core::attention::{AlertKind, AttentionTracker};
 use app_core::host_state::HostState;
 use app_core::release::Release;
 use app_core::search_merge::HostSearch;
+use app_core::self_update::Run;
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Divider, NodeId, Rect};
 use app_core::theme_colors::Preset;
@@ -38,6 +41,7 @@ use crate::launcher_view::LauncherView;
 use crate::pane_drag::PaneDrop;
 use crate::recents_view::RecentsView;
 use crate::release_check::CheckRow;
+use crate::self_update::UpdateRow;
 use crate::settings_store::SettingsStore;
 use crate::settings_view::SettingsView;
 use crate::setup_view::{Mode as SetupMode, SetupView, opens_by_itself};
@@ -96,6 +100,7 @@ mod resume;
 mod sidebar_menus;
 mod tab_content;
 mod title_bar;
+mod updates;
 
 pub(crate) use actions::all_bindings;
 
@@ -120,8 +125,22 @@ pub(super) enum DialogAction {
     ForceQuit { waiting: (HostId, String) },
     /// A new session in a folder a dev container mounts: 0 opens in the container, 1 on this machine.
     DevContainer(Box<DevContainerOpen>),
+    /// The new name for the Claude session of `leaf` (the dialog's text field): 0 asks to confirm it.
+    RenameInput { leaf: NodeId },
+    /// Rename the Claude session of `leaf` to `name`: 0 stops the pane and restarts it with `--name`.
+    RenameSession { leaf: NodeId, name: String },
     /// A notice: nothing to do with the answer.
     Ack,
+}
+
+/// Where the rename of a Claude pane stands.
+pub(super) enum RenameStage {
+    /// The pane was asked to stop; when it exits it restarts under this name.
+    Stopping(String),
+    /// The dev container pane exited; it restarts under this name once the Claude inside is gone.
+    Draining(String),
+    /// It restarted with `--name` at this time; an error exit soon after means Claude refused the flag.
+    Started(Instant),
 }
 
 /// What a new session needs once its dev container question is answered.
@@ -417,7 +436,7 @@ pub struct WorkspaceView {
     _update_watch: Option<(RecommendedWatcher, Task<()>)>,
     /// The open update card; its focus handle takes Esc.
     update_card: Option<FocusHandle>,
-    /// Why Restart and update failed, shown in the card.
+    /// Why Restart and update failed, shown in the card and Settings.
     update_error: Option<String>,
     /// Whether `checkForUpdates` is on.
     check_updates: bool,
@@ -431,6 +450,14 @@ pub struct WorkspaceView {
     last_release_check: Option<SystemTime>,
     /// The open release notes card; its focus handle takes Esc.
     release_card: Option<FocusHandle>,
+    /// The click-to-update run (download and install of the newest release).
+    self_update: Run,
+    /// Set to stop that run's download.
+    self_update_cancel: Option<Arc<AtomicBool>>,
+    /// Counts the runs started and cancelled: an answer from an older run is ignored.
+    self_update_generation: u64,
+    /// The release an automatic update last started for, in this window.
+    auto_update_tried: Option<app_core::version::Version>,
     /// The release check's timer.
     release_task: Option<Task<()>>,
     /// What is known about the git repos on screen.
@@ -454,6 +481,8 @@ pub struct WorkspaceView {
     git_task: Option<Task<()>>,
     /// Take-over requests waiting for the host's daemon, by host and session.
     take_overs: HashMap<(HostId, String), TakeOverTarget>,
+    /// Claude panes being renamed (in memory only).
+    renames: HashMap<NodeId, RenameStage>,
     /// New sessions waiting for `ContainerFound`, by request id.
     pending_opens: HashMap<u64, PendingOpen>,
     /// The welcome screen's folder rows; dropped when the session lists, the settings or a tab change what they say.
@@ -462,6 +491,10 @@ pub struct WorkspaceView {
     attention: AttentionTracker,
     /// Leaves with an alert the user has not seen yet.
     unseen: HashMap<NodeId, AlertKind>,
+    /// When each unseen leaf came into view in the active window (`alerts.readAfterSeconds`).
+    seen_since: HashMap<NodeId, Instant>,
+    /// Looks at `unseen` again when the next leaf in view has been seen long enough.
+    read_timer: Option<Task<()>>,
     _activation: Subscription,
     /// The theme whose terminal colors the daemon was last told.
     sent_palette: Option<Preset>,
@@ -668,6 +701,10 @@ impl WorkspaceView {
             release_etag: None,
             last_release_check: None,
             release_card: None,
+            self_update: Run::Idle,
+            self_update_cancel: None,
+            self_update_generation: 0,
+            auto_update_tried: None,
             release_task: None,
             git: GitRepos::default(),
             git_panel_open: false,
@@ -681,10 +718,13 @@ impl WorkspaceView {
             git_bars: git_scrollbar::Bars::new(),
             git_task: None,
             take_overs: HashMap::new(),
+            renames: HashMap::new(),
             pending_opens: HashMap::new(),
             welcome_items: RefCell::new(None),
             attention: AttentionTracker::default(),
             unseen: HashMap::new(),
+            seen_since: HashMap::new(),
+            read_timer: None,
             _activation: activation,
             sent_palette: None,
             _theme: theme_changed,
@@ -699,6 +739,8 @@ impl WorkspaceView {
             this._update_watch = crate::update_watch::watch(&path, cx);
         }
         cx.set_global(CheckRow::default());
+        cx.set_global(UpdateRow::default());
+        this.publish_update_row(cx);
         this.release_task = Some(this.start_release_timer(cx));
         this.git_task = Some(Self::start_git_timer(window, cx));
         let leaves: Vec<NodeId> = this.workspace.leaves.keys().copied().collect();

@@ -5,6 +5,22 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-22
+
+**TL;DR** Gantry can now install new versions by itself (turn it on in Settings > Window > Updates), and you finish with one click on Restart and update. You can also rename a Claude session from the side panel and change how unread sessions look.
+
+### Added
+- **Rename Claude sessions** - Rename… in a running Claude session's right-click menu in the sidebar renames it: Gantry restarts it in its pane with Claude's own `--name`, so the conversation goes on under the new name. Works on SSH hosts too (they need a Claude that knows `--name`).
+- **Update from the title bar** - When a new release is out, Download and install fetches it, checks it and installs it; Restart and update then finishes the job. Also in Settings > Window > Updates.
+  - Linux: works for installs in `~/.local/bin` (the tarball's `install.sh`); elsewhere (an RPM or any system install) the card says why and keeps Open release page.
+  - Mac: replaces `Gantry.app` in place. The first install still needs Open Anyway; a Mac app still on its disk image has to be dragged to Applications first.
+  - Settings > Window > Updates > Install updates automatically (off by default) downloads and installs a new release as soon as a check finds one; Restart and update stays your click.
+- **Unread color** - Settings > Appearance > Status colors has an Unread row for sessions you marked as unread. Pick any fill, or Transparent to show only the pin.
+
+### Changed
+- **Status color picker** - "Custom color…" in a status color's pop-up opens the same color picker as a tab's or project's color, in place of the hex field. Status colors also take an opacity: the picker has an opacity bar, and a see-through color is blended over the sidebar.
+- **Alerts stay until you look** - A finished or waiting session stays marked until its pane has been on screen for 2 seconds, so skipping past it with `Ctrl+Tab` no longer marks it as read. Change the delay in Settings > Alerts > Visibility > Mark as read after (0 = at once).
+
 ## [0.14.0] - 2026-11-10
 
 ### Added

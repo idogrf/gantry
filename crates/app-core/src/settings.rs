@@ -124,6 +124,35 @@ pub struct StatusFills {
     pub done: Option<u32>,
     /// Fill for an idle session.
     pub idle: Option<u32>,
+    /// Fill for a session marked unread by hand (`None` = a faded Done).
+    pub unread: Option<u32>,
+}
+
+/// A status fill with no color at all: opacity 0, written `"transparent"`.
+pub const TRANSPARENT: u32 = 0xff00_0000;
+
+/// A status fill: `0xRRGGBB` with the transparency (255 - opacity) in the top byte, so a plain `0xRRGGBB` is opaque.
+/// Opacity 0 is always [`TRANSPARENT`].
+pub fn with_alpha(rgb: u32, alpha: u8) -> u32 {
+    if alpha == 0 { TRANSPARENT } else { (u32::from(255 - alpha) << 24) | (rgb & 0xff_ffff) }
+}
+
+/// A status fill's opacity, 0..=255.
+pub fn fill_alpha(fill: u32) -> u8 {
+    255 - (fill >> 24) as u8
+}
+
+/// `#rrggbb`, `#rrggbbaa` or `transparent` as a status fill.
+pub fn parse_fill(text: &str) -> Option<u32> {
+    if text == "transparent" {
+        return Some(TRANSPARENT);
+    }
+    let digits = text.strip_prefix('#')?;
+    if digits.len() == 8 && digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        let value = u32::from_str_radix(digits, 16).ok()?;
+        return Some(with_alpha(value >> 8, (value & 0xff) as u8));
+    }
+    parse_hex(text)
 }
 
 /// Terminal font (`family: None` = the platform default).
@@ -146,6 +175,8 @@ pub struct AlertSettings {
     pub finished: EventAlerts,
     /// Seconds a session must be busy before finishing counts.
     pub finished_after_seconds: u32,
+    /// Seconds a pane must be on screen in the active window before its alert counts as seen (0 = at once).
+    pub read_after_seconds: u32,
     /// Alert even when the pane is visible.
     pub when_visible: bool,
     /// Alert only while the window is unfocused.
@@ -411,6 +442,9 @@ pub struct Settings {
     pub animate_ui: bool,
     /// Whether Gantry asks GitHub for a newer release (when it opens, then every few hours).
     pub check_for_updates: bool,
+    /// Whether a newer release this Gantry can install is downloaded and installed as soon as a check finds it
+    /// (restarting stays the user's click).
+    pub auto_install_updates: bool,
     /// The first-run wizard has been answered (imported or skipped), so it does not open by itself.
     pub setup_done: bool,
 }
@@ -454,6 +488,7 @@ impl Default for Settings {
                 needs_input: EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::FallingBlip },
                 finished: EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::ClassicBlip },
                 finished_after_seconds: 1,
+                read_after_seconds: 2,
                 when_visible: false,
                 only_when_unfocused: false,
                 play_sounds: true,
@@ -479,6 +514,7 @@ impl Default for Settings {
             animate_working: true,
             animate_ui: true,
             check_for_updates: true,
+            auto_install_updates: false,
             setup_done: false,
         }
     }
@@ -516,6 +552,15 @@ pub fn parse_hex(text: &str) -> Option<u32> {
 /// 0xRRGGBB → `#rrggbb`.
 pub fn hex(color: u32) -> String {
     format!("#{:06x}", color & 0xff_ffff)
+}
+
+/// A status fill as written: `#rrggbb` when opaque, `transparent`, else `#rrggbbaa`.
+pub fn fill_text(fill: u32) -> String {
+    match fill_alpha(fill) {
+        255 => hex(fill),
+        0 => "transparent".into(),
+        alpha => format!("{}{alpha:02x}", hex(fill)),
+    }
 }
 
 /// Read `path`. A missing file gives defaults, no problems, and an empty `raw`.
@@ -630,6 +675,19 @@ impl Reader {
             }),
             _ => {
                 self.problem(&format!("{prefix}{key}"), "expected a #rrggbb color".into());
+                None
+            }
+        }
+    }
+
+    fn fill(&mut self, map: &Map<String, Value>, prefix: &str, key: &str) -> Option<u32> {
+        match map.get(key)? {
+            Value::String(text) => parse_fill(text).or_else(|| {
+                self.problem(&format!("{prefix}{key}"), format!("\"{text}\" is not a #rrggbb or #rrggbbaa color"));
+                None
+            }),
+            _ => {
+                self.problem(&format!("{prefix}{key}"), "expected a #rrggbb or #rrggbbaa color".into());
                 None
             }
         }
@@ -837,10 +895,11 @@ impl Reader {
 
         let colors = self.object(raw, "", "statusColors");
         let status_fills = StatusFills {
-            needs_input: self.color(&colors, "statusColors.", "needsInput"),
-            working: self.color(&colors, "statusColors.", "working"),
-            done: self.color(&colors, "statusColors.", "done"),
-            idle: self.color(&colors, "statusColors.", "idle"),
+            needs_input: self.fill(&colors, "statusColors.", "needsInput"),
+            working: self.fill(&colors, "statusColors.", "working"),
+            done: self.fill(&colors, "statusColors.", "done"),
+            idle: self.fill(&colors, "statusColors.", "idle"),
+            unread: self.fill(&colors, "statusColors.", "unread"),
         };
 
         let selection = self.color(raw, "", "selection");
@@ -865,6 +924,7 @@ impl Reader {
         let animate_working = self.bool(raw, "", "animateWorking", true);
         let animate_ui = self.bool(raw, "", "animateUi", true);
         let check_for_updates = self.bool(raw, "", "checkForUpdates", true);
+        let auto_install_updates = self.bool(raw, "", "autoInstallUpdates", false);
         let setup_done = self.bool(raw, "", "setupDone", false);
 
         let map = self.object(raw, "", "alerts");
@@ -874,6 +934,7 @@ impl Reader {
             finished: self.event(&map, "finished", default.finished),
             finished_after_seconds: self.number(&map, "alerts.", "finishedAfterSeconds", 1.0, (0.0, 600.0)).round()
                 as u32,
+            read_after_seconds: self.number(&map, "alerts.", "readAfterSeconds", 2.0, (0.0, 60.0)).round() as u32,
             when_visible: self.bool(&map, "alerts.", "whenVisible", default.when_visible),
             only_when_unfocused: self.bool(&map, "alerts.", "onlyWhenUnfocused", default.only_when_unfocused),
             play_sounds: self.bool(&map, "alerts.", "playSounds", default.play_sounds),
@@ -977,6 +1038,7 @@ impl Reader {
             animate_working,
             animate_ui,
             check_for_updates,
+            auto_install_updates,
             setup_done,
         }
     }
@@ -999,9 +1061,10 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         ("working", settings.status_fills.working),
         ("done", settings.status_fills.done),
         ("idle", settings.status_fills.idle),
+        ("unread", settings.status_fills.unread),
     ];
     for (key, fill) in fills {
-        add(&["statusColors", key], fill.map_or(Value::Null, |color| hex(color).into()), fill.is_some());
+        add(&["statusColors", key], fill.map_or(Value::Null, |color| fill_text(color).into()), fill.is_some());
     }
     add(
         &["selection"],
@@ -1030,6 +1093,11 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         &["alerts", "finishedAfterSeconds"],
         alerts.finished_after_seconds.into(),
         alerts.finished_after_seconds != base.finished_after_seconds,
+    );
+    add(
+        &["alerts", "readAfterSeconds"],
+        alerts.read_after_seconds.into(),
+        alerts.read_after_seconds != base.read_after_seconds,
     );
     add(&["alerts", "whenVisible"], alerts.when_visible.into(), alerts.when_visible != base.when_visible);
     add(
@@ -1126,6 +1194,11 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         &["checkForUpdates"],
         settings.check_for_updates.into(),
         settings.check_for_updates != default.check_for_updates,
+    );
+    add(
+        &["autoInstallUpdates"],
+        settings.auto_install_updates.into(),
+        settings.auto_install_updates != default.auto_install_updates,
     );
     add(&["setupDone"], settings.setup_done.into(), settings.setup_done != default.setup_done);
     out
@@ -1256,6 +1329,25 @@ mod tests {
     }
 
     #[test]
+    fn auto_install_updates_defaults_off_and_round_trips() {
+        assert!(!Settings::default().auto_install_updates);
+        let loaded = parse(r#"{"autoInstallUpdates": true}"#);
+        assert!(loaded.problems.is_empty());
+        let mut settings = loaded.settings.unwrap();
+        assert!(settings.auto_install_updates);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &Map::new()).unwrap();
+        assert_eq!(read_json(&path).get("autoInstallUpdates"), Some(&Value::Bool(true)));
+        let bad = parse(r#"{"autoInstallUpdates": "yes"}"#);
+        assert_eq!(bad.problems.len(), 1);
+        assert!(!bad.settings.unwrap().auto_install_updates);
+        settings.auto_install_updates = false;
+        save(&path, &settings, &Map::new()).unwrap();
+        assert!(read_json(&path).get("autoInstallUpdates").is_none(), "the default writes nothing");
+    }
+
+    #[test]
     fn check_for_updates_defaults_on_and_round_trips() {
         assert!(Settings::default().check_for_updates);
         let loaded = parse(r#"{"checkForUpdates": false}"#);
@@ -1319,6 +1411,7 @@ mod tests {
         );
         assert_eq!(s.ui_font_size, 14.0);
         assert_eq!(s.alerts.finished_after_seconds, 1);
+        assert_eq!(s.alerts.read_after_seconds, 2);
         assert_eq!(s.alerts.volume, 0.4);
         assert_eq!(
             (s.alerts.needs_input.tone, s.alerts.finished.tone),
@@ -1397,6 +1490,34 @@ mod tests {
     }
 
     #[test]
+    fn unread_fill_is_a_color_or_transparent() {
+        let loaded = parse(r#"{"statusColors": {"unread": "transparent"}}"#);
+        assert!(loaded.problems.is_empty());
+        assert_eq!(loaded.settings.unwrap().status_fills.unread, Some(TRANSPARENT));
+        let loaded = parse(r##"{"statusColors": {"unread": "#aabbcc"}}"##);
+        assert_eq!(loaded.settings.unwrap().status_fills.unread, Some(0xaabbcc));
+        let loaded = parse(r#"{"statusColors": {"unread": "clear"}}"#);
+        assert_eq!(loaded.settings.unwrap().status_fills.unread, None);
+        assert_eq!(loaded.problems[0].key, "statusColors.unread");
+        assert_eq!(fill_text(TRANSPARENT), "transparent");
+        assert_eq!(fill_text(0xaabbcc), "#aabbcc");
+    }
+
+    #[test]
+    fn a_fill_can_carry_its_opacity() {
+        let half = parse_fill("#aabbcc80").unwrap();
+        assert_eq!((half & 0xff_ffff, fill_alpha(half)), (0xaabbcc, 0x80));
+        assert_eq!(fill_text(half), "#aabbcc80");
+        assert_eq!(parse_fill("#aabbccff"), Some(0xaabbcc));
+        assert_eq!(parse_fill("#aabbcc00"), Some(TRANSPARENT));
+        assert_eq!(fill_alpha(0xaabbcc), 255);
+        assert_eq!(with_alpha(0x123456, 0), TRANSPARENT);
+        let loaded = parse(r##"{"statusColors": {"done": "#aabbcc80"}}"##);
+        assert!(loaded.problems.is_empty());
+        assert_eq!(loaded.settings.unwrap().status_fills.done, Some(half));
+    }
+
+    #[test]
     fn round_trip() {
         let settings = Settings {
             theme: ThemeChoice::MistLight,
@@ -1405,6 +1526,7 @@ mod tests {
                 working: Some(0x445566),
                 done: Some(0x778899),
                 idle: Some(0xaabbcc),
+                unread: Some(with_alpha(0xddeeff, 0x40)),
             },
             selection: Some(0xff7eb6),
             terminal_font: TerminalFont { family: Some("Fira Code".into()), size: 17.5, line_height: 1.45 },
@@ -1413,6 +1535,7 @@ mod tests {
                 needs_input: EventAlerts { badge: false, notification: false, sound: false, tone: AlertTone::SoftFall },
                 finished: EventAlerts { badge: false, notification: true, sound: false, tone: AlertTone::SoftDrop },
                 finished_after_seconds: 30,
+                read_after_seconds: 5,
                 when_visible: true,
                 only_when_unfocused: true,
                 play_sounds: false,

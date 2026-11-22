@@ -161,7 +161,21 @@ pub(crate) fn watch(path: &Path, cx: &mut Context<WorkspaceView>) -> Option<(Rec
 
 /// Starts the GUI at `path`, detached; `--resume-sessions` when the sessions were stopped for the update.
 pub(crate) fn restart_command(path: &Path, resume_sessions: bool) -> Command {
-    let mut command = Command::new(path);
+    restart_command_for(path, resume_sessions, cfg!(target_os = "macos"))
+}
+
+/// [`restart_command`] for macOS (`open -n` on the `.app` three levels above `path`, when there is one) or another
+/// system (the binary itself).
+fn restart_command_for(path: &Path, resume_sessions: bool, macos: bool) -> Command {
+    let bundle = path.ancestors().nth(3).filter(|app| app.extension().is_some_and(|ext| ext == "app"));
+    let mut command = match bundle {
+        Some(app) if macos => {
+            let mut open = Command::new("open");
+            open.arg("-n").arg(app).arg("--args");
+            open
+        }
+        _ => Command::new(path),
+    };
     if resume_sessions {
         command.arg("--resume-sessions");
     }
@@ -234,7 +248,16 @@ mod tests {
     fn probe_reads_the_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = script(dir.path(), "gantry", "echo 'gantry 9.9.9 (abc1234)'");
-        assert_eq!(probe(&path, PROBE_TIMEOUT), app_core::version::Version::parse("9.9.9"));
+        // A few tries: a script this process just wrote can briefly fail to start ("Text file busy") while another
+        // test thread forks with its write handle still open.
+        let found = (0..20).find_map(|_| {
+            let version = probe(&path, PROBE_TIMEOUT);
+            if version.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            version
+        });
+        assert_eq!(found, app_core::version::Version::parse("9.9.9"));
     }
 
     #[cfg(unix)]
@@ -253,9 +276,28 @@ mod tests {
     #[test]
     fn restart_command_passes_the_resume_flag_only_when_asked() {
         let path = std::path::Path::new("/opt/gantry");
-        let args = |resume| restart_command(path, resume).get_args().map(|a| a.to_owned()).collect::<Vec<_>>();
+        let args =
+            |resume| restart_command_for(path, resume, false).get_args().map(|a| a.to_owned()).collect::<Vec<_>>();
         assert_eq!(args(true), vec![std::ffi::OsString::from("--resume-sessions")]);
         assert!(args(false).is_empty());
-        assert_eq!(restart_command(path, false).get_program(), path.as_os_str());
+        assert_eq!(restart_command_for(path, false, false).get_program(), path.as_os_str());
+    }
+
+    #[test]
+    fn restart_command_opens_the_bundle() {
+        let path = std::path::Path::new("/Applications/Gantry.app/Contents/MacOS/gantry");
+        let args =
+            |resume| restart_command_for(path, resume, true).get_args().map(|a| a.to_owned()).collect::<Vec<_>>();
+        assert_eq!(restart_command_for(path, true, true).get_program(), "open");
+        assert_eq!(args(true), ["-n", "/Applications/Gantry.app", "--args", "--resume-sessions"]);
+        assert_eq!(args(false), ["-n", "/Applications/Gantry.app", "--args"]);
+    }
+
+    #[test]
+    fn restart_command_outside_a_bundle_runs_the_binary_on_macos_too() {
+        let path = std::path::Path::new("/Users/me/gantry/target/debug/gantry");
+        let command = restart_command_for(path, true, true);
+        assert_eq!(command.get_program(), path.as_os_str());
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["--resume-sessions"]);
     }
 }

@@ -1,10 +1,12 @@
-//! The custom color picker (an overlay): a saturation/value square, a hue bar and a hex field, for a pane's color or a
-//! project's color. It only reports the pick; the window applies it.
+//! The custom color picker (an overlay): a saturation/value square, a hue bar and a hex field, for a pane's color, a
+//! project's color or a status fill. It only reports the pick; the window applies it.
 
 use app_core::color_math::{hsv_to_rgb, rgb_to_hsv};
 use app_core::menus::ColorTarget;
+use app_core::session_tree::Tone;
+use app_core::settings::{TRANSPARENT, fill_alpha, fill_text, parse_fill, with_alpha};
 use app_core::text_field::TextField;
-use app_core::theme_colors::{Tint, parse_hex};
+use app_core::theme_colors::{Tint, effective_fill, parse_hex, usable_fill};
 use gpui::{
     App, ClickEvent, Context, DispatchPhase, Div, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Stateful, Window,
@@ -29,6 +31,7 @@ pub(crate) enum ColorPickerEvent {
 enum Pad {
     Square,
     Hue,
+    Alpha,
 }
 
 /// The picker for one target.
@@ -38,6 +41,8 @@ pub(crate) struct ColorPickerView {
     hue: f32,
     saturation: f32,
     value: f32,
+    /// The opacity, 0..=1: only a status fill has one.
+    alpha: Option<f32>,
     hex: TextField,
     dragging: Option<Pad>,
 }
@@ -51,28 +56,51 @@ impl Focusable for ColorPickerView {
 }
 
 impl ColorPickerView {
-    /// A picker for `target`, starting at `initial` (`0xRRGGBB`).
+    /// A picker for `target`, starting at `initial` (`0xRRGGBB`; a status fill may carry its opacity, see
+    /// [`with_alpha`]).
     pub(crate) fn new(target: ColorTarget, initial: u32, cx: &mut Context<Self>) -> Self {
-        let (hue, saturation, value) = rgb_to_hsv(initial);
-        let mut hex = TextField::default();
-        hex.insert(&format!("#{initial:06x}"));
-        ColorPickerView { focus_handle: cx.focus_handle(), target, hue, saturation, value, hex, dragging: None }
+        let status = matches!(target, ColorTarget::Status(_));
+        let (hue, saturation, value) = rgb_to_hsv(if initial == TRANSPARENT { 0xffffff } else { initial & 0xff_ffff });
+        let alpha = status.then(|| f32::from(fill_alpha(initial)) / 255.0);
+        let mut picker = ColorPickerView {
+            focus_handle: cx.focus_handle(),
+            target,
+            hue,
+            saturation,
+            value,
+            alpha,
+            hex: TextField::default(),
+            dragging: None,
+        };
+        picker.show_hex();
+        picker
     }
 
-    /// The color being picked.
-    fn rgb(&self) -> u32 {
-        hsv_to_rgb(self.hue, self.saturation, self.value)
+    /// The color being picked, with its opacity for a status fill.
+    fn color(&self) -> u32 {
+        let rgb = hsv_to_rgb(self.hue, self.saturation, self.value);
+        match self.alpha {
+            Some(alpha) => with_alpha(rgb, (alpha * 255.0).round() as u8),
+            None => rgb,
+        }
     }
 
-    /// Whether the hex field holds a color.
+    /// Whether the hex field holds a color (`#rrggbbaa` and `transparent` too for a status fill).
     fn hex_value(&self) -> Option<u32> {
-        parse_hex(self.hex.text())
+        let text = self.hex.text().trim();
+        if self.alpha.is_some() { parse_fill(text).or_else(|| parse_hex(text)) } else { parse_hex(text) }
+    }
+
+    /// The hex field's color, when it may be applied: a status fill must keep its text readable.
+    fn usable(&self, cx: &App) -> Option<u32> {
+        let tokens = theme(cx).tokens;
+        self.hex_value().filter(|fill| self.alpha.is_none() || usable_fill(*fill, &tokens))
     }
 
     /// Write the picked color into the hex field.
     fn show_hex(&mut self) {
         self.hex.clear();
-        self.hex.insert(&format!("#{:06x}", self.rgb()));
+        self.hex.insert(&if self.alpha.is_some() { fill_text(self.color()) } else { format!("#{:06x}", self.color()) });
     }
 
     /// The pointer is at (`x`, `y`), as fractions of the pad it is on.
@@ -84,13 +112,14 @@ impl ColorPickerView {
                 self.value = 1.0 - y;
             }
             Pad::Hue => self.hue = x * 360.0,
+            Pad::Alpha => self.alpha = Some(x),
         }
         self.show_hex();
     }
 
     fn apply(&mut self, cx: &mut Context<Self>) {
-        if let Some(rgb) = self.hex_value() {
-            cx.emit(ColorPickerEvent::Picked(self.target.clone(), Tint::Custom(rgb)));
+        if let Some(color) = self.usable(cx) {
+            cx.emit(ColorPickerEvent::Picked(self.target.clone(), Tint::Custom(color)));
         }
     }
 
@@ -103,8 +132,13 @@ impl ColorPickerView {
                 if !field::edit(&mut self.hex, keystroke, cx) {
                     return;
                 }
-                if let Some(rgb) = self.hex_value() {
-                    (self.hue, self.saturation, self.value) = rgb_to_hsv(rgb);
+                if let Some(color) = self.hex_value() {
+                    if color != TRANSPARENT {
+                        (self.hue, self.saturation, self.value) = rgb_to_hsv(color & 0xff_ffff);
+                    }
+                    if self.alpha.is_some() {
+                        self.alpha = Some(f32::from(fill_alpha(color)) / 255.0);
+                    }
                 }
             }
         }
@@ -189,11 +223,19 @@ impl Render for ColorPickerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx).clone();
         let focused = self.focus_handle.is_focused(window);
-        let valid = self.hex_value().is_some();
+        let valid = self.usable(cx).is_some();
+        let low_contrast = !valid && self.hex_value().is_some();
         let hue_color = hsv_to_rgb(self.hue, 1.0, 1.0);
         let title = match self.target {
             ColorTarget::Pane(_) => "Tab color",
             ColorTarget::Project(_) => "Project color",
+            ColorTarget::Status(tone) => match tone {
+                Tone::NeedsInput => "Needs input color",
+                Tone::Working => "Working color",
+                Tone::Done => "Done color",
+                Tone::Idle => "Idle color",
+                _ => "Unread color",
+            },
         };
         let marker = |fx: f32, fy: f32| {
             div()
@@ -236,6 +278,24 @@ impl Render for ColorPickerView {
             }))
             .child(marker(self.hue / 360.0, 0.5))
             .child(self.pad(Pad::Hue, cx));
+        let opaque = hsv_to_rgb(self.hue, self.saturation, self.value);
+        let opacity = self.alpha.map(|alpha| {
+            div()
+                .relative()
+                .h(theme.ui(12.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(rgb(theme.tokens.line))
+                .bg(linear_gradient(
+                    90.,
+                    linear_color_stop(rgb(theme.tokens.surface), 0.),
+                    linear_color_stop(rgb(opaque), 1.),
+                ))
+                .child(marker(alpha, 0.5))
+                .child(self.pad(Pad::Alpha, cx))
+        });
+        let preview = if self.alpha.is_some() { effective_fill(self.color(), &theme.tokens) } else { self.color() };
+        let placeholder = if self.alpha.is_some() { "#rrggbbaa" } else { "#rrggbb" };
         let hex = div()
             .flex_1()
             .h(theme.ui(32.))
@@ -247,7 +307,8 @@ impl Render for ColorPickerView {
             .border_color(rgb(if valid { theme.tokens.accent } else { theme.tokens.danger }))
             .bg(rgb(theme.tokens.ground))
             .child(
-                field::render(&self.hex, "#rrggbb", focused, &theme, field::on_press(cx, |_, _, _, _, _| {})).flex_1(),
+                field::render(&self.hex, placeholder, focused, &theme, field::on_press(cx, |_, _, _, _, _| {}))
+                    .flex_1(),
             );
         let card = div()
             .key_context("ColorPicker")
@@ -269,14 +330,23 @@ impl Render for ColorPickerView {
             .child(div().text_size(theme.ui(16.)).font_weight(FontWeight::SEMIBOLD).child(title))
             .child(square)
             .child(bar)
+            .children(opacity)
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(theme.ui(8.))
-                    .child(div().flex_none().size(theme.ui(32.)).rounded(px(RADIUS_SMALL)).bg(rgb(self.rgb())))
+                    .child(div().flex_none().size(theme.ui(32.)).rounded(px(RADIUS_SMALL)).bg(rgb(preview)))
                     .child(hex),
             )
+            .when(low_contrast, |card| {
+                card.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.tokens.danger))
+                        .child("Too low contrast; choose a lighter or darker fill"),
+                )
+            })
             .child(
                 div()
                     .flex()

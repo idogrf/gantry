@@ -233,6 +233,40 @@ pub(crate) fn working_sweep(id: impl Into<ElementId>, inset: Pixels, theme: &The
     )
 }
 
+/// Width of the Installing bar's segment, as a fraction of the track.
+const BUSY_SEGMENT: f32 = 0.30;
+/// One pass of the Installing bar's segment.
+const BUSY_PERIOD: Duration = Duration::from_millis(2200);
+/// Redraws per second while the Installing bar runs (only while an install runs, a few seconds).
+const BUSY_FPS: f32 = 30.;
+
+/// Slow at both ends, fast in the middle.
+fn ease_in_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0., 1.);
+    if t < 0.5 { 4. * t * t * t } else { 1. - (-2. * t + 2.).powi(3) / 2. }
+}
+
+/// The left edge of the Installing bar's segment at `progress` (0..1 of a pass), as a fraction of the track: it
+/// enters from the left and leaves at the right, eased.
+pub(crate) fn busy_segment_left(progress: f32) -> f32 {
+    ease_in_out_cubic(progress) * (1. + BUSY_SEGMENT) - BUSY_SEGMENT
+}
+
+/// A 4 px bar for work with no percentage: an accent segment slides across the track, one pass every
+/// [`BUSY_PERIOD`]. With `animate` off (`animateUi` off or the window inactive) it is a still, full bar.
+pub(crate) fn busy_bar(id: impl Into<ElementId>, animate: bool, theme: &Theme) -> Div {
+    let track = div().relative().h(theme.ui(4.)).w_full().rounded_full().overflow_hidden().bg(rgb(theme.tokens.line));
+    let segment = div().absolute().top_0().h_full().rounded_full().bg(rgb(theme.tokens.accent));
+    if !animate {
+        return track.child(segment.left_0().w_full());
+    }
+    track.child(segment.w(relative(BUSY_SEGMENT)).with_animation(
+        id,
+        Animation::new(BUSY_PERIOD).repeat().with_max_fps(BUSY_FPS),
+        |segment, progress| segment.left(relative(busy_segment_left(progress))),
+    ))
+}
+
 /// How long a scrim fades in.
 pub(crate) const FADE_SCRIM: Duration = Duration::from_millis(250);
 /// How long a card (an overlay's panel, a menu, a hover card) fades in.
@@ -339,6 +373,16 @@ mod tests {
         let (end, faint) = sweep_band(1.);
         assert!((end - 1.).abs() < 1e-6);
         assert!(faint.abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_busy_segment_enters_left_leaves_right_and_eases() {
+        assert!((busy_segment_left(0.) + BUSY_SEGMENT).abs() < 1e-6, "starts just left of the track");
+        assert!((busy_segment_left(1.) - 1.).abs() < 1e-6, "ends just right of it");
+        assert!((busy_segment_left(0.5) - (1. - BUSY_SEGMENT) / 2.).abs() < 1e-6, "centred halfway through");
+        let early = busy_segment_left(0.1) - busy_segment_left(0.);
+        let middle = busy_segment_left(0.55) - busy_segment_left(0.45);
+        assert!(middle > early, "faster in the middle than at the start");
     }
 
     fn theme(preset: Preset) -> Theme {

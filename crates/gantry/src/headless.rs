@@ -1,4 +1,4 @@
-//! The subcommands that run on a host without a window: `--version`, `daemon`, `bridge` and `internal-print-env`.
+//! The subcommands that run on a host without a window: `--version`, `daemon`, `bridge`, `preview-mcp` and `internal-print-env`.
 //! Shared by `gantry` and the window-less `gantryd` that the SSH wizard installs on remote hosts.
 
 use std::process::ExitCode;
@@ -16,6 +16,7 @@ pub fn dispatch(command: Option<&str>) -> Option<ExitCode> {
         }
         Some("daemon") => Some(daemon_main()),
         Some("bridge") => Some(bridge_main()),
+        Some("preview-mcp") => Some(preview_mcp_main()),
         Some("internal-print-env") => {
             println!("{}", daemon::shell_env::print_env_json());
             Some(ExitCode::SUCCESS)
@@ -48,6 +49,27 @@ fn bridge_main() -> ExitCode {
         Err(err) => {
             eprintln!("gantry bridge: {err}");
             std::process::exit(1)
+        }
+    }
+}
+
+/// `gantry preview-mcp`: the MCP tool server Claude Code runs for `show_in_preview`. Stdout carries protocol messages
+/// only, so nothing here prints to it.
+fn preview_mcp_main() -> ExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(err) => {
+            eprintln!("gantry preview-mcp: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    match daemon::preview_mcp::run(stdin.lock(), stdout.lock(), &cwd, std::env::home_dir().as_deref()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("gantry preview-mcp: {err}");
+            ExitCode::FAILURE
         }
     }
 }

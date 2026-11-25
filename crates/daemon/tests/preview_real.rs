@@ -54,7 +54,7 @@ async fn real_claude_sends_a_file() {
             "--permission-mode".into(),
             "acceptEdits".into(),
             "-p".into(),
-            "Write a two-line note to note.md".into(),
+            "Write a two-line note to note.md, then show it to me in the preview pane.".into(),
         ],
         cwd: work.path().to_path_buf(),
         cols: 100,

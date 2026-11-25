@@ -58,6 +58,9 @@ pub(crate) const FILE_ICON: &str = "icons/file.svg";
 /// The Open in system viewer button's icon (an arrow leaving a box), drawn by `preview_view`.
 pub(crate) const OPEN_EXTERNAL_ICON: &str = "icons/open-external.svg";
 
+/// The Copy button's icon on a markdown code block (two overlapping sheets), drawn by `preview_markdown`.
+pub(crate) const COPY_ICON: &str = "icons/copy.svg";
+
 /// The app icon in color, drawn next to the name in the title bar (a picture, not a tinted icon like the others).
 pub(crate) const LOGO: &str = "icons/gantry.png";
 
@@ -89,6 +92,7 @@ impl AssetSource for Assets {
             EYE_ICON => Some(include_bytes!("../assets/icons/eye.svg")),
             FILE_ICON => Some(include_bytes!("../assets/icons/file.svg")),
             OPEN_EXTERNAL_ICON => Some(include_bytes!("../assets/icons/open-external.svg")),
+            COPY_ICON => Some(include_bytes!("../assets/icons/copy.svg")),
             LOGO => Some(include_bytes!("../assets/icons/gantry.png")),
             _ => None,
         };
@@ -136,6 +140,7 @@ mod tests {
             PIN_ICON,
             INFO_ICON,
             RESET_ICON,
+            COPY_ICON,
         ] {
             let bytes = Assets.load(icon).unwrap().expect("embedded");
             assert!(std::str::from_utf8(&bytes).unwrap().starts_with("<svg"), "{icon}");

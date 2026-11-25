@@ -824,6 +824,8 @@ impl WorkspaceView {
                 self.open_preview_menu(hidden_tabs_menu(leaf, &files), *position, window, cx);
             }
             PreviewEvent::OpenExternal => self.open_in_system_viewer(leaf, cx),
+            // Opening links is wired in a later task.
+            PreviewEvent::Link(_) => {}
         }
     }
 }

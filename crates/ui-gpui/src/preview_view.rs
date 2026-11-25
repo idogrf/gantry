@@ -2,25 +2,31 @@
 //! saying why there is nothing to draw). It draws a `PreviewModel` and reports what the user did as `PreviewEvent`s;
 //! `workspace_view` owns the model and acts on the events.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use app_core::host_state::HostCard;
 use app_core::preview::{TabFit, TextDoc, file_name, fit_tabs};
 use app_core::preview_zoom::{STEP, WHEEL_STEP_PX, Zoom, wheel_factor};
 use app_core::split_tree::NodeId;
 use gpui::{
-    App, Bounds, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent,
-    ListHorizontalSizingBehavior, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, UniformListScrollHandle, Window,
-    canvas, div, img, point, prelude::*, px, rgb, svg, uniform_list,
+    App, Bounds, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, ListAlignment,
+    ListHorizontalSizingBehavior, ListOffset, ListState, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Task,
+    UniformListScrollHandle, Window, canvas, div, img, list, point, prelude::*, px, rgb, svg, uniform_list,
 };
+use preview_doc::markdown::{LinkTarget, MdDoc};
 
 use crate::assets::{CLOSE_ICON, EYE_ICON, FILE_ICON, OPEN_EXTERNAL_ICON};
 use crate::git_diff_view::{display_chars, size_text};
 use crate::hover_card::{self, HoverCard};
 use crate::pane_drag::DraggedPane;
+use crate::preview_markdown::{self, RowState, VisualCache, code_line, display_spans};
 use crate::settings_store::SettingsStore;
 use crate::terminal_view::{host_card_element, installed_families, installed_family, pane_font};
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, theme};
@@ -125,6 +131,9 @@ pub(crate) enum PreviewEvent {
     OpenExternal,
     /// The button on the host's card.
     HostAction,
+    /// A click on a link of the markdown document that opens something (a web address or a file).
+    #[allow(dead_code)] // The workspace reads the target when links are wired in a later task.
+    Link(LinkTarget),
 }
 
 /// The lines between the two ends of a selection, whichever end is first.
@@ -199,6 +208,14 @@ pub(crate) struct PreviewView {
     viewport: Bounds<Pixels>,
     /// The last pointer position of a drag that pans the image.
     panning: Option<Point<Pixels>>,
+    /// The markdown document's rows.
+    md_list: ListState,
+    /// The document `md_list` was reset for.
+    md_doc: Option<Arc<MdDoc>>,
+    /// The code block whose Copy button shows `Copied`, with the timer that puts the label back.
+    copied: Option<(usize, Task<()>)>,
+    /// The words of the document's right-to-left paragraphs, filled as they are first drawn.
+    md_words: VisualCache,
 }
 
 impl EventEmitter<PreviewEvent> for PreviewView {}
@@ -230,19 +247,40 @@ impl PreviewView {
             zoom: None,
             viewport: Bounds::default(),
             panning: None,
+            md_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            md_doc: None,
+            copied: None,
+            md_words: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
     /// Show `model`. Scroll and selection stay while the active file is the same (the selection cut to the new line
     /// count) and start over when it changes.
     pub(crate) fn set_model(&mut self, model: PreviewModel, cx: &mut Context<Self>) {
-        if model.active != self.model.active {
+        let same_file = model.active == self.model.active;
+        if !same_file {
             self.scroll = UniformListScrollHandle::new();
             self.selection = None;
             self.zoom = None;
             self.panning = None;
+            self.md_doc = None;
+            self.copied = None;
         }
         self.model = model;
+        if let Content::Markdown(doc) = &self.model.content
+            && !self.md_doc.as_ref().is_some_and(|shown| Arc::ptr_eq(shown, doc))
+        {
+            // A new parse of the same file (a live reload) keeps the place; another file starts at the top.
+            let top = self.md_doc.is_some().then(|| self.md_list.logical_scroll_top());
+            self.md_list.reset(doc.rows.len());
+            if let Some(top) = top.filter(|_| !doc.rows.is_empty()) {
+                let item_ix = top.item_ix.min(doc.rows.len() - 1);
+                self.md_list.scroll_to(ListOffset { item_ix, ..top });
+            }
+            self.md_words.borrow_mut().clear();
+            self.copied = None;
+            self.md_doc = Some(doc.clone());
+        }
         // Other content (loading, an error) keeps the selection, so Text -> Loading -> Text on one file still has it.
         if let Content::Text { doc, .. } = &self.model.content {
             self.selection = self.selection.and_then(|(anchor, head)| {
@@ -251,6 +289,51 @@ impl PreviewView {
             });
         }
         cx.notify();
+    }
+
+    /// Open a link of the markdown document: an anchor scrolls to its row, anything else goes to the workspace.
+    pub(crate) fn open_link(&mut self, target: LinkTarget, cx: &mut Context<Self>) {
+        match target {
+            LinkTarget::Anchor(anchor) => {
+                if let Some(row) = self.md_doc.as_ref().and_then(|doc| doc.anchor_row(&anchor)) {
+                    self.md_list.scroll_to_reveal_item(row);
+                    cx.notify();
+                }
+            }
+            LinkTarget::Inert(_) => {}
+            target => cx.emit(PreviewEvent::Link(target)),
+        }
+    }
+
+    /// Copy a markdown code block's text and show `Copied` on its button for 1.5 s.
+    pub(crate) fn copy_block(&mut self, block: usize, cx: &mut Context<Self>) {
+        let Content::Markdown(doc) = &self.model.content else { return };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(doc.copy(block, 0..usize::MAX)));
+        // A second click replaces the timer: dropping the old task cancels it.
+        let timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(1500)).await;
+            this.update(cx, |this, cx| {
+                this.copied = None;
+                cx.notify();
+            })
+            .ok();
+        });
+        self.copied = Some((block, timer));
+        cx.notify();
+    }
+
+    /// One row of the markdown document's list.
+    fn md_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Content::Markdown(doc) = &self.model.content else { return div().into_any_element() };
+        let doc = doc.clone();
+        let theme = theme(cx).clone();
+        let state = RowState {
+            code_font: Self::metrics(window, cx).family,
+            rtl: cx.global::<SettingsStore>().settings().window.right_to_left,
+            copied: self.copied.as_ref().map(|(block, _)| *block),
+            visual: self.md_words.clone(),
+        };
+        preview_markdown::row(&doc, ix, &state, &theme, cx)
     }
 
     /// What the pane shows now.
@@ -740,9 +823,10 @@ impl PreviewView {
 
     /// The visible lines of a text file.
     fn text_rows(&self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        let Content::Text { doc, .. } = &self.model.content else { return Vec::new() };
+        let Content::Text { doc, highlights } = &self.model.content else { return Vec::new() };
         let theme = theme(cx).clone();
         let metrics = Self::metrics(window, cx);
+        let font = pane_font(Some(&metrics.family));
         let width = px(metrics.cell_width * (doc.widest() as f32 + 2.0) + 24.0);
         let right_to_left = cx.global::<SettingsStore>().settings().window.right_to_left;
         let selected = self.selection.map(|(anchor, head)| selection_lines(anchor, head));
@@ -767,7 +851,18 @@ impl PreviewView {
                     .text_size(px(metrics.size))
                     .bg(rgb(background))
                     .text_color(rgb(theme.tokens.text))
-                    .child(line_text(&doc.display(index), right_to_left))
+                    .child(match highlights {
+                        Some(highlights) => {
+                            let shown = doc.display(index);
+                            let spans = if doc.line_len(index) == shown.len() {
+                                highlights.line(index).iter().map(|s| (s.range.clone(), s.token)).collect()
+                            } else {
+                                display_spans(&doc.copy(index..index + 1), highlights.line(index))
+                            };
+                            div().child(code_line(&shown, &spans, &font, right_to_left, &theme))
+                        }
+                        None => line_text(&doc.display(index), right_to_left),
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -821,7 +916,15 @@ impl PreviewView {
             Content::NoFiles => {
                 div().size_full().flex().items_center().justify_center().child(muted("No files yet")).into_any_element()
             }
-            Content::Loading | Content::Markdown(_) => div().size_full().into_any_element(),
+            Content::Loading => div().size_full().into_any_element(),
+            Content::Markdown(_) => {
+                let view = cx.entity();
+                list(self.md_list.clone(), move |ix, window, cx| {
+                    view.update(cx, |this, cx| this.md_row(ix, window, cx))
+                })
+                .size_full()
+                .into_any_element()
+            }
             Content::Text { doc, .. } => {
                 // Every row has its own `min_w`, so the width needs no scan of the document.
                 let longest = (doc.line_count() > 0).then_some(0);

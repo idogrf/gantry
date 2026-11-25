@@ -62,12 +62,8 @@ impl Theme {
 
 /// The color of a syntax token: plain text and comments from the app colors, the rest from the terminal's ANSI colors
 /// of the preset (keyword 5, string 2, number 3, function 4, type 6, tag 1), as `0xRRGGBB`.
-#[allow(dead_code)] // drawn by the preview view in a later task
 pub(crate) fn token_color(token: Token, theme: &Theme) -> u32 {
-    let ansi = |i: usize| {
-        let c = terminal_palette(theme.preset).ansi[i];
-        (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)
-    };
+    let ansi = |i: usize| ansi_color(i, theme);
     match token {
         Token::Plain => theme.tokens.text,
         Token::Comment => theme.tokens.muted,
@@ -78,6 +74,12 @@ pub(crate) fn token_color(token: Token, theme: &Theme) -> u32 {
         Token::Type => ansi(6),
         Token::Tag => ansi(1),
     }
+}
+
+/// ANSI color `i` of the preset's terminal palette, as `0xRRGGBB`.
+pub(crate) fn ansi_color(i: usize, theme: &Theme) -> u32 {
+    let c = terminal_palette(theme.preset).ansi[i];
+    (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)
 }
 
 /// A project's side line: 4 px wide, rounded, inset 4 px from the left edge and 6 px from the top and bottom of

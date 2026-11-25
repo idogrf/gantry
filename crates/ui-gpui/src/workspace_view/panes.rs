@@ -63,12 +63,16 @@ impl WorkspaceView {
             return;
         };
         let (cols, rows) = view.read(cx).grid_size();
-        let scrollback = cx.global::<SettingsStore>().settings().window.scrollback;
+        let settings = cx.global::<SettingsStore>().settings();
+        let (scrollback, preview) = (settings.window.scrollback, settings.preview.enabled);
         // Pane ids belong to one daemon: only a pane of the same host can lend its directory.
         let cwd_from = cwd_from.filter(|key| key.host == host).map(|key| key.pane);
         self.next_request += 1;
         self.pending.insert(self.next_request, leaf);
-        client.spawn(self.next_request, self.workspace.leaves[&leaf].launch.request(cwd_from, cols, rows, scrollback));
+        client.spawn(
+            self.next_request,
+            self.workspace.leaves[&leaf].launch.request(cwd_from, cols, rows, scrollback, preview),
+        );
     }
 
     /// The badge of the Claude config dir `leaf` runs in, when two or more are configured (never on an SSH host).

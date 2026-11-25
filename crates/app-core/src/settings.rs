@@ -278,6 +278,13 @@ pub struct LastPromptSettings {
     pub color: Option<u32>,
 }
 
+/// The `preview` setting: the preview tool given to Claude panes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewSettings {
+    /// Give new Claude panes the preview tool; off also stops the extra arguments being sent to Claude.
+    pub enabled: bool,
+}
+
 /// The `scrollbar` setting: which panes get a scrollbar. Shell panes always have one.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScrollbarSettings {
@@ -432,6 +439,8 @@ pub struct Settings {
     pub window: WindowSettings,
     /// The last prompt card above Claude panes.
     pub last_prompt: LastPromptSettings,
+    /// The preview tool given to Claude panes.
+    pub preview: PreviewSettings,
     /// The scrollbar at the right edge of panes.
     pub scrollbar: ScrollbarSettings,
     /// Project colors.
@@ -509,6 +518,7 @@ impl Default for Settings {
                 right_to_left: true,
             },
             last_prompt: LastPromptSettings { enabled: true, size: 18.0, color: None },
+            preview: PreviewSettings { enabled: true },
             scrollbar: ScrollbarSettings { claude: true },
             project_colors: ProjectColors::default(),
             animate_working: true,
@@ -995,6 +1005,9 @@ impl Reader {
             color: self.color(&map, "lastPrompt.", "color"),
         };
 
+        let map = self.object(raw, "", "preview");
+        let preview = PreviewSettings { enabled: self.bool(&map, "preview.", "enabled", defaults.preview.enabled) };
+
         let map = self.object(raw, "", "scrollbar");
         let scrollbar =
             ScrollbarSettings { claude: self.bool(&map, "scrollbar.", "claude", defaults.scrollbar.claude) };
@@ -1033,6 +1046,7 @@ impl Reader {
             favorites,
             window,
             last_prompt,
+            preview,
             scrollbar,
             project_colors,
             animate_working,
@@ -1171,6 +1185,7 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         last_prompt.color.map_or(Value::Null, |color| hex(color).into()),
         last_prompt.color != base.color,
     );
+    add(&["preview", "enabled"], settings.preview.enabled.into(), settings.preview.enabled != default.preview.enabled);
     add(
         &["scrollbar", "claude"],
         settings.scrollbar.claude.into(),
@@ -1646,6 +1661,32 @@ mod tests {
         let bad = parse(r#"{"lastPrompt": {"enabled": "yes"}}"#);
         assert_eq!(bad.problems.len(), 1);
         assert!(bad.settings.unwrap().last_prompt.enabled);
+    }
+
+    #[test]
+    fn preview_defaults_on_and_a_bad_value_falls_back_with_a_problem() {
+        assert!(parse("{}").settings.unwrap().preview.enabled);
+        let off = parse(r#"{"preview": {"enabled": false}}"#);
+        assert!(!off.settings.unwrap().preview.enabled);
+        let bad = parse(r#"{"preview": {"enabled": "yes"}}"#);
+        assert_eq!(bad.problems.len(), 1);
+        assert_eq!(bad.problems[0].key, "preview.enabled");
+        assert!(bad.settings.unwrap().preview.enabled);
+    }
+
+    #[test]
+    fn preview_off_is_written_and_default_is_not() {
+        let loaded = parse("{}");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut settings = loaded.settings.unwrap();
+        save(&path, &settings, &loaded.raw).unwrap();
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(written.get("preview").is_none());
+        settings.preview.enabled = false;
+        save(&path, &settings, &loaded.raw).unwrap();
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["preview"]["enabled"], false);
     }
 
     #[test]

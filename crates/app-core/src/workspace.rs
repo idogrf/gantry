@@ -353,7 +353,16 @@ impl PaneLaunch {
     }
 
     /// The daemon request that starts this, optionally in `cwd_from`'s current directory.
-    pub fn request(&self, cwd_from: Option<PaneId>, cols: u16, rows: u16, scrollback: u32) -> SpawnRequest {
+    ///
+    /// `preview` is the `preview.enabled` setting: only a Claude pane on the host (not in a dev container) gets it.
+    pub fn request(
+        &self,
+        cwd_from: Option<PaneId>,
+        cols: u16,
+        rows: u16,
+        scrollback: u32,
+        preview: bool,
+    ) -> SpawnRequest {
         SpawnRequest {
             program: self.program.clone(),
             args: self.args.clone(),
@@ -365,7 +374,7 @@ impl PaneLaunch {
             claude: self.is_claude(),
             env: self.env.clone(),
             scrollback: Some(scrollback),
-            preview: false,
+            preview: preview && self.is_claude() && self.container.is_none(),
         }
     }
 }
@@ -1696,7 +1705,7 @@ mod tests {
         let launch = PaneLaunch::claude("/home/u/app".into()).in_container(Some("/home/u/app".into()));
         let leaf = Leaf::new(launch);
         assert_eq!(leaf.rerun(true).container, Some(PathBuf::from("/home/u/app")));
-        assert_eq!(leaf.launch.request(None, 80, 24, 10_000).container, Some(PathBuf::from("/home/u/app")));
+        assert_eq!(leaf.launch.request(None, 80, 24, 10_000, false).container, Some(PathBuf::from("/home/u/app")));
     }
 
     fn shell(cwd: &str) -> PaneLaunch {
@@ -2824,7 +2833,7 @@ mod tests {
 
     #[test]
     fn spawn_requests_carry_the_focused_pane() {
-        let request = shell("/a").request(Some(3), 100, 30, 10_000);
+        let request = shell("/a").request(Some(3), 100, 30, 10_000, false);
         assert_eq!(
             (request.cwd_from, request.cols, request.rows, request.program.as_str()),
             (Some(3), 100, 30, "/bin/bash")
@@ -3390,8 +3399,18 @@ mod tests {
     fn requests_carry_flag_env_and_scrollback() {
         let dirs = two_dirs();
         let launch = PaneLaunch::claude_with("/r".into(), &dirs.dirs[1], None, None);
-        let request = launch.request(None, 80, 24, 2_000);
+        let request = launch.request(None, 80, 24, 2_000, false);
         assert_eq!((request.claude, request.scrollback, request.env.len()), (true, Some(2_000), 1));
+    }
+
+    #[test]
+    fn request_asks_for_preview_only_for_host_claude_panes() {
+        let claude = PaneLaunch::claude("/r".into());
+        assert!(claude.request(None, 80, 24, 1_000, true).preview);
+        assert!(!claude.request(None, 80, 24, 1_000, false).preview);
+        assert!(!shell("/r").request(None, 80, 24, 1_000, true).preview);
+        let container = claude.in_container(Some("/r".into()));
+        assert!(!container.request(None, 80, 24, 1_000, true).preview);
     }
 
     #[test]

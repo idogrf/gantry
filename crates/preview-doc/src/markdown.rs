@@ -2,7 +2,7 @@
 //! unit of a virtualized list), with links and images classified. No drawing code.
 
 use crate::highlight::{Highlights, MAX_HIGHLIGHT_BYTES, highlight_code};
-use crate::words::column_fractions;
+use crate::words::{VisualText, logical_words, longest_word, visual_words};
 use app_core::bidi::is_rtl_letter;
 use comrak::nodes::{AlertType, ListType, Node, NodeList, NodeTable, NodeValue, TableAlignment};
 use comrak::{Anchorizer, Arena, Options, parse_document};
@@ -71,6 +71,39 @@ pub struct Block {
     pub inlines: Vec<Inline>,
     /// What the block is.
     pub kind: BlockKind,
+    /// The words and run lookup of a text block with a right-to-left letter (never a code block), made once here so
+    /// drawing never splits words.
+    pub rtl: Option<RtlText>,
+    /// The byte offset where each line of a code block starts (empty for any other block).
+    pub line_starts: Vec<usize>,
+}
+
+/// What a text block with a right-to-left letter needs to be drawn a word at a time.
+#[derive(Debug)]
+pub struct RtlText {
+    /// The words in display order, for the right-to-left display.
+    pub visual: VisualText,
+    /// The words as typed, for the display switched off.
+    pub logical: VisualText,
+    /// The index into the block's `inlines` of each byte of its text.
+    inline_at: Vec<u32>,
+}
+
+impl RtlText {
+    fn new(text: &str, inlines: &[Inline]) -> Self {
+        let mut inline_at = vec![u32::MAX; text.len()];
+        for (ix, inline) in inlines.iter().enumerate() {
+            for slot in inline_at.get_mut(inline.range.clone()).unwrap_or_default() {
+                *slot = ix as u32;
+            }
+        }
+        Self { visual: visual_words(text), logical: logical_words(text), inline_at }
+    }
+
+    /// The index of the inline run that holds byte `offset` of the block's text.
+    pub fn inline_of(&self, offset: usize) -> Option<usize> {
+        self.inline_at.get(offset).filter(|ix| **ix != u32::MAX).map(|ix| *ix as usize)
+    }
 }
 
 /// A list item's marker.
@@ -220,8 +253,10 @@ pub struct DocImage {
 pub struct Table {
     /// Alignment per column.
     pub align: Vec<Align>,
-    /// Width share per column; sums to 1.0.
-    pub fractions: Vec<f32>,
+    /// Each column's widest cell, in characters.
+    pub widest: Vec<usize>,
+    /// Each column's longest word, in characters.
+    pub longest: Vec<usize>,
 }
 
 /// A parsed markdown document.
@@ -438,7 +473,14 @@ impl<'n> Builder<'_, 'n> {
     }
 
     fn push_block(&mut self, text: String, inlines: Vec<Inline>, kind: BlockKind) -> usize {
-        self.doc.blocks.push(Block { text, inlines, kind });
+        let rtl = (!matches!(kind, BlockKind::Code { .. }) && text.chars().any(is_rtl_letter))
+            .then(|| RtlText::new(&text, &inlines));
+        let line_starts = if matches!(kind, BlockKind::Code { .. }) {
+            std::iter::once(0).chain(text.match_indices('\n').map(|(at, _)| at + 1)).collect()
+        } else {
+            Vec::new()
+        };
+        self.doc.blocks.push(Block { text, inlines, kind, rtl, line_starts });
         self.doc.blocks.len() - 1
     }
 
@@ -630,8 +672,9 @@ impl<'n> Builder<'_, 'n> {
                 _ => Align::Left,
             })
             .collect();
-        self.doc.tables.push(Table { align, fractions: Vec::new() });
+        self.doc.tables.push(Table { align, widest: Vec::new(), longest: Vec::new() });
         let mut widths: Vec<usize> = Vec::new();
+        let mut longest: Vec<usize> = Vec::new();
         let mut gap = self.gap();
         for row in node.children() {
             let header = matches!(row.data().value, NodeValue::TableRow(true));
@@ -644,13 +687,17 @@ impl<'n> Builder<'_, 'n> {
                     widths.resize(col + 1, 0);
                 }
                 widths[col] = widths[col].max(width);
+                longest.resize(widths.len(), 0);
+                longest[col] = longest[col].max(longest_word(&c.text));
                 cells.push(self.push_block(c.text, c.inlines, BlockKind::Cell { header }));
             }
             self.push_row(RowKind::TableRow { table: index, cells, header }, ctx, gap);
             gap = 0.0;
         }
         widths.resize(widths.len().max(table.alignments.len()), 0);
-        self.doc.tables[index].fractions = column_fractions(&widths);
+        longest.resize(widths.len(), 0);
+        self.doc.tables[index].widest = widths;
+        self.doc.tables[index].longest = longest;
     }
 
     fn footnote(&mut self, node: Node<'n>) {
@@ -966,7 +1013,7 @@ mod tests {
     }
 
     #[test]
-    fn tables_split_into_rows_with_fractions() {
+    fn tables_split_into_rows_with_column_measures() {
         let d = doc("| a | bb | c |\n|:--|:--:|--:|\n| 1 | 22 | 333 |\n| 4 | 55 | 666 |");
         assert_eq!(d.rows.len(), 3);
         let headers: Vec<bool> = d
@@ -983,11 +1030,45 @@ mod tests {
         assert_eq!(headers, [true, false, false]);
         assert_eq!(d.tables.len(), 1);
         assert_eq!(d.tables[0].align, [Align::Left, Align::Center, Align::Right]);
-        assert_eq!(d.tables[0].fractions.len(), 3);
-        assert!((d.tables[0].fractions.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        assert_eq!(d.tables[0].widest, [1, 2, 3]);
+        assert_eq!(d.tables[0].longest, [1, 2, 3]);
         assert!(matches!(d.blocks[0].kind, BlockKind::Cell { header: true }));
         assert!(matches!(d.blocks[3].kind, BlockKind::Cell { header: false }));
         assert_eq!(d.rows[1].space_above, 0.0);
+    }
+
+    #[test]
+    fn table_columns_record_the_widest_cell_and_the_longest_word() {
+        let d = doc("| name | note |\n|--|--|\n| ab | one two three |\n| abcdefgh | x |");
+        assert_eq!(d.tables[0].widest, [8, 13]);
+        assert_eq!(d.tables[0].longest, [8, 5]);
+    }
+
+    #[test]
+    fn right_to_left_blocks_carry_their_words_and_runs_from_the_parse() {
+        let d = doc("# שלום\n\nשלום **עולם** abc\n\nplain text\n\n| ת |\n|--|\n| שלום |");
+        let rtl: Vec<bool> = d.blocks.iter().map(|b| b.rtl.is_some()).collect();
+        // heading, paragraph, plain paragraph, header cell, body cell
+        assert_eq!(rtl, [true, true, false, true, true]);
+        let block = &d.blocks[1];
+        let words = block.rtl.as_ref().unwrap();
+        assert!(words.visual.rtl);
+        assert!(!words.logical.rtl);
+        // "שלום " is 9 bytes, then the bold run "עולם" (8 bytes), then " abc".
+        assert_eq!(block.inlines.len(), 3);
+        assert_eq!(words.inline_of(0), Some(0));
+        assert_eq!(words.inline_of(9), Some(1));
+        assert_eq!(words.inline_of(17), Some(2));
+        assert_eq!(words.inline_of(999), None);
+    }
+
+    #[test]
+    fn code_blocks_know_where_their_lines_start() {
+        let d = doc("```\na\nbb\n\nשלום\n```");
+        let block = &d.blocks[0];
+        assert!(matches!(block.kind, BlockKind::Code { .. }));
+        assert_eq!(block.line_starts, [0, 2, 5, 6]);
+        assert!(d.blocks.iter().all(|b| b.rtl.is_none()), "code lines are drawn per line, not as words");
     }
 
     #[test]

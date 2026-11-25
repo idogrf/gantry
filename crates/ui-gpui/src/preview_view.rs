@@ -2,7 +2,6 @@
 //! saying why there is nothing to draw). It draws a `PreviewModel` and reports what the user did as `PreviewEvent`s;
 //! `workspace_view` owns the model and acts on the events.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -27,8 +26,7 @@ use crate::git_diff_view::size_text;
 use crate::hover_card::{self, HoverCard};
 use crate::pane_drag::DraggedPane;
 use crate::preview_markdown::{
-    self, Gesture, Interact, LineCache, RowState, Unit, VisualCache, code_line, display_spans, doc_rtl, drag_selection,
-    pad,
+    self, Gesture, Interact, RowState, Unit, code_line, display_spans, doc_rtl, drag_selection, pad,
 };
 use crate::settings_store::SettingsStore;
 use crate::terminal_view::{host_card_element, installed_families, installed_family, pane_font};
@@ -367,10 +365,6 @@ pub(crate) struct PreviewView {
     md_doc: Option<Arc<MdDoc>>,
     /// The code block whose Copy button shows `Copied`, with the timer that puts the label back.
     copied: Option<(usize, Task<()>)>,
-    /// The words of the document's right-to-left paragraphs, filled as they are first drawn.
-    md_words: VisualCache,
-    /// The line starts of the document's code blocks, filled as they are first drawn.
-    md_lines: LineCache,
     /// The ⇄ toggle: the document's direction is flipped. Reset when the active file changes, kept on a reload.
     flipped: bool,
     /// What the rows were last measured with; a change remeasures the list.
@@ -393,6 +387,8 @@ struct MdLook {
     rtl: bool,
     /// The document is laid out right to left (`doc_rtl`).
     mirror: bool,
+    /// The measured average width of a body text character, for table columns.
+    char_px: f32,
 }
 
 impl EventEmitter<PreviewEvent> for PreviewView {}
@@ -433,8 +429,6 @@ impl PreviewView {
             md_list: ListState::new(0, ListAlignment::Top, px(400.)),
             md_doc: None,
             copied: None,
-            md_words: Rc::new(RefCell::new(HashMap::new())),
-            md_lines: Rc::new(RefCell::new(HashMap::new())),
             md_look: None,
             flipped: false,
             frame_images: Vec::new(),
@@ -491,8 +485,6 @@ impl PreviewView {
                 self.md_list.scroll_to(ListOffset { item_ix, ..top });
             }
             self.md_selection = None;
-            self.md_words.borrow_mut().clear();
-            self.md_lines.borrow_mut().clear();
             self.copied = None;
             self.md_doc = Some(doc.clone());
         }
@@ -554,6 +546,7 @@ impl PreviewView {
             ui_scale: theme(cx).ui_scale,
             rtl: settings.window.right_to_left,
             mirror: doc_rtl(settings.window.right_to_left, doc.rtl, self.flipped),
+            char_px: preview_markdown::char_px(window, theme(cx)),
         };
         if self.md_look.as_ref() != Some(&look) {
             if self.md_look.is_some() {
@@ -583,8 +576,7 @@ impl PreviewView {
             mirror: look.mirror,
             copied: self.copied.as_ref().map(|(block, _)| *block),
             selection: self.md_selection,
-            visual: self.md_words.clone(),
-            lines: self.md_lines.clone(),
+            char_px: look.char_px,
         };
         preview_markdown::row(&doc, ix, &state, theme, cx)
     }

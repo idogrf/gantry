@@ -3,50 +3,42 @@
 //! the plain code files share. Everything here works on what is visible; the document was parsed once, off the UI
 //! thread.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use app_core::bidi::{display_line, is_rtl_letter};
 use app_core::preview::{FileKind, kind_of};
 use app_core::theme_colors::mix;
 use gpui::{
-    AnyElement, App, Context, Div, Entity, Font, FontStyle, FontWeight, Hsla, InteractiveText, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString, StrikethroughStyle, StyledText,
-    TextAlign, TextLayout, TextRun, TextStyle, UnderlineStyle, div, prelude::*, px, relative, rgb, svg,
+    AnyElement, App, Context, CursorStyle, Div, Entity, Font, FontStyle, FontWeight, HitboxBehavior, Hsla,
+    InteractiveText, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString,
+    StrikethroughStyle, StyledText, TextAlign, TextLayout, TextRun, TextStyle, UnderlineStyle, canvas, div, prelude::*,
+    px, relative, rgb, svg,
 };
 use preview_doc::highlight::{Span, Token};
-use preview_doc::markdown::{AlertKind, Align, Block, BlockKind, ImageSrc, Inline, LinkTarget, Marker, MdDoc, RowKind};
-use preview_doc::words::{VisualText, Word, visual_words};
+use preview_doc::markdown::{
+    AlertKind, Align, Block, BlockKind, ImageSrc, Inline, LinkTarget, Marker, MdDoc, RowKind, RtlText,
+};
+use preview_doc::words::{VisualText, Word, column_fractions};
 
 use crate::assets::COPY_ICON;
 use crate::preview_view::{BlockSelection, Content, PreviewView};
 use crate::terminal_view::pane_font;
-use crate::theme::{RADIUS_SMALL, Theme, UI_FONT, ansi_color, token_color};
-
-/// The per-block words of right-to-left paragraphs, filled while a block is first drawn and dropped with the document.
-pub(crate) type VisualCache = Rc<RefCell<HashMap<usize, Arc<VisualText>>>>;
-
-/// The byte offset where each line of a code block starts, filled when the block is first drawn and dropped with the
-/// document, so a row of a long block costs its own lines only.
-pub(crate) type LineCache = Rc<RefCell<HashMap<usize, Arc<Vec<usize>>>>>;
+use crate::theme::{RADIUS_SMALL, RADIUS_TINY, Theme, UI_FONT, ansi_color, token_color};
 
 /// What a row needs besides the document and the theme.
 pub(crate) struct RowState {
     /// The terminal font family code is drawn in.
     pub code_font: SharedString,
-    /// `window.rightToLeft`: text with right-to-left letters is drawn in display order, a character at a time.
+    /// `window.rightToLeft`: text with right-to-left letters is drawn in display order, a character at a time (off:
+    /// in logical order, a character at a time; never handed to the shaper either way).
     pub rtl: bool,
     /// The document is laid out right to left (`doc_rtl`): gutters, bars and table columns mirror, text aligns right.
     pub mirror: bool,
     /// The code block whose Copy button shows `Copied`.
     pub copied: Option<usize>,
-    /// The words of right-to-left paragraphs.
-    pub visual: VisualCache,
-    /// The line starts of code blocks.
-    pub lines: LineCache,
+    /// The measured average width of a body text character in px, for table columns.
+    pub char_px: f32,
     /// For an image row, what its file's read made (`None` until it arrives).
     pub image: Option<Content>,
     /// The list's width in px (0 before it is laid out once).
@@ -313,6 +305,41 @@ fn word_offset(chars: &[(char, usize)], index: usize) -> usize {
     chars.last().map_or(0, |(_, offset)| *offset)
 }
 
+/// How text reaches the screen: the shaper never gets right-to-left letters, whatever the setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Route {
+    /// No right-to-left letter: ordinary wrapped styled text.
+    Shaped,
+    /// `window.rightToLeft` on: words and characters in display order, one element per non-ASCII character.
+    Display,
+    /// `window.rightToLeft` off: words and characters in logical order, one element per non-ASCII character, as the
+    /// terminal draws them.
+    Logical,
+}
+
+/// The route of a block or line of text: `setting` is `window.rightToLeft`, `has_rtl` whether it holds a
+/// right-to-left letter. It is the same for paragraphs, headings, table cells and code lines.
+pub(crate) fn text_route(setting: bool, has_rtl: bool) -> Route {
+    match (has_rtl, setting) {
+        (false, _) => Route::Shaped,
+        (true, true) => Route::Display,
+        (true, false) => Route::Logical,
+    }
+}
+
+/// The characters of `text` with their logical byte offsets in the order `route` draws them; `None` for `Shaped`.
+fn char_order(text: &str, route: Route) -> Option<Vec<(usize, char)>> {
+    let logical = || text.char_indices().collect();
+    match route {
+        Route::Shaped => None,
+        Route::Display => Some(display_line(text).map_or_else(logical, |order| {
+            let offsets: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+            order.into_iter().map(|(ix, ch)| (offsets[ix], ch)).collect()
+        })),
+        Route::Logical => Some(logical()),
+    }
+}
+
 /// Whether the document is laid out right to left: `window.rightToLeft` is on and the document's own direction
 /// (`doc_rtl`, from its first letter) differs from the flip toggle's state.
 pub(crate) fn doc_rtl(setting: bool, doc_rtl: bool, flipped: bool) -> bool {
@@ -345,6 +372,21 @@ const INDENT: f32 = 32.0;
 
 fn hsla(color: u32) -> Hsla {
     rgb(color).into()
+}
+
+/// The measured average width in px of a character of body text, with a 10% margin for bold and wide letters: what a
+/// table column needs per character of its longest word.
+pub(crate) fn char_px(window: &gpui::Window, theme: &Theme) -> f32 {
+    let system = window.text_system();
+    let id = system.resolve_font(&gpui::font(UI_FONT));
+    let size = theme.ui(BODY);
+    let (sum, count) = ('a'..='z').chain('A'..='Z').chain('0'..='9').fold((0.0, 0u32), |(sum, count), ch| match system
+        .advance(id, size, ch)
+    {
+        Ok(advance) => (sum + f32::from(advance.width), count + 1),
+        Err(_) => (sum, count),
+    });
+    if count == 0 { f32::from(size) * 0.55 * 1.1 } else { sum / count as f32 * 1.1 }
 }
 
 /// The text size of a heading in base px.
@@ -483,11 +525,6 @@ pub(crate) fn token_at(spans: &[(Range<usize>, Token)], at: usize) -> Token {
     spans.iter().find(|(range, _)| range.contains(&at)).map_or(Token::Plain, |(_, token)| *token)
 }
 
-/// The byte offset of each line's start in a code text.
-fn line_starts(text: &str) -> Vec<usize> {
-    std::iter::once(0).chain(text.match_indices('\n').map(|(at, _)| at + 1)).collect()
-}
-
 /// The byte range of lines `lines` of a code text of `len` bytes whose lines start at `starts`.
 fn code_range(len: usize, starts: &[usize], lines: &Range<usize>) -> Range<usize> {
     let start = starts.get(lines.start).copied().unwrap_or(len);
@@ -559,8 +596,8 @@ fn link_opener(view: Entity<PreviewView>, target: LinkTarget) -> impl Fn(&mut gp
     }
 }
 
-/// A block of text as an element: wrapped styled text, or, for right-to-left text with the display on, words in
-/// display order.
+/// A block of text as an element: wrapped styled text, or, for text with a right-to-left letter, words in display order
+/// (the display on) or logical order (off), a character at a time; the shaper never gets such text.
 fn text_block(
     doc: &MdDoc,
     block_ix: usize,
@@ -587,11 +624,13 @@ fn text_block(
     let code = pane_font(Some(&state.code_font));
     let selected = state.selection.filter(|s| s.block == block_ix).map(|s| s.range());
     let hit = block_hit(cx.entity(), block_ix);
-    if state.rtl && block.text.chars().any(is_rtl_letter) {
-        let words =
-            state.visual.borrow_mut().entry(block_ix).or_insert_with(|| Arc::new(visual_words(&block.text))).clone();
+    if let Some(rtl) = &block.rtl {
+        let words = match text_route(state.rtl, true) {
+            Route::Display => &rtl.visual,
+            _ => &rtl.logical,
+        };
         let interact = Interact { hit, selected };
-        return frame.child(rtl_text(doc, block_ix, &words, &base, &code, theme, &interact, state.mirror, cx));
+        return frame.child(rtl_text(doc, block_ix, rtl, words, &base, &code, theme, &interact, state.mirror, cx));
     }
     let runs = text_runs(block, doc, &base, &code, theme, selected);
     let styled = StyledText::new(SharedString::from(block.text.clone())).with_runs(runs);
@@ -609,13 +648,31 @@ fn text_block(
         let layout = styled.layout().clone();
         let openers: Vec<_> =
             links.into_iter().map(|(range, target)| (range, link_opener(cx.entity(), target))).collect();
-        return frame.child(div().id(("md-text", block_ix)).w_full().child(styled).on_click(move |event, _, app| {
-            if let Ok(at) = index_at(&layout, align, event.position())
-                && let Some((_, open)) = openers.iter().find(|(range, _)| range.contains(&at))
-            {
-                open(app);
-            }
-        }));
+        let (hover_layout, hover_ranges): (_, Vec<Range<usize>>) =
+            (layout.clone(), openers.iter().map(|(range, _)| range.clone()).collect());
+        // A hitbox over the text for the pointer cursor, read after the text laid out.
+        let cursor = canvas(
+            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+            move |_, hitbox, window, _| {
+                if hitbox.is_hovered(window)
+                    && let Ok(at) = index_at(&hover_layout, align, window.mouse_position())
+                    && hover_ranges.iter().any(|range| range.contains(&at))
+                {
+                    window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
+                }
+            },
+        )
+        .absolute()
+        .size_full();
+        return frame.child(div().id(("md-text", block_ix)).relative().w_full().child(styled).child(cursor).on_click(
+            move |event, _, app| {
+                if let Ok(at) = index_at(&layout, align, event.position())
+                    && let Some((_, open)) = openers.iter().find(|(range, _)| range.contains(&at))
+                {
+                    open(app);
+                }
+            },
+        ));
     }
     let ranges = links.iter().map(|(range, _)| range.clone()).collect();
     let openers: Vec<_> = links.into_iter().map(|(_, target)| link_opener(cx.entity(), target)).collect();
@@ -626,12 +683,13 @@ fn text_block(
     }))
 }
 
-/// The words of a right-to-left paragraph in a wrapping row (reversed when the paragraph reads right to left). Each
-/// word with a non-ASCII letter, or a link, is drawn a character at a time: the shaper never gets the text.
+/// The `words` of a paragraph with a right-to-left letter in a wrapping row (reversed when the paragraph reads right to
+/// left). Each word with a non-ASCII letter, or a link, is drawn a character at a time: the shaper never gets the text.
 #[allow(clippy::too_many_arguments)] // The block's whole context.
 fn rtl_text(
     doc: &MdDoc,
     block_ix: usize,
+    rtl: &RtlText,
     words: &VisualText,
     base: &TextStyle,
     code: &Font,
@@ -642,16 +700,17 @@ fn rtl_text(
 ) -> Div {
     let Some(block) = doc.blocks.get(block_ix) else { return div() };
     let background = selection_background(theme);
+    let inline_runs: Vec<(TextRun, Option<usize>)> = block
+        .inlines
+        .iter()
+        .map(|inline| (inline_run(inline, doc, base, code, theme), live_link(doc, inline)))
+        .collect();
     let run_at = |offset: usize, len: usize| -> (TextRun, Option<usize>) {
-        let inline = block.inlines.iter().find(|inline| inline.range.contains(&offset));
-        let (mut run, link) = match inline {
-            Some(inline) => {
-                let mut run = inline_run(inline, doc, base, code, theme);
-                run.len = len;
-                (run, live_link(doc, inline))
-            }
-            None => (TextRun { len, font: base.font(), color: base.color, ..Default::default() }, None),
+        let (mut run, link) = match rtl.inline_of(offset).and_then(|ix| inline_runs.get(ix)) {
+            Some((run, link)) => (run.clone(), *link),
+            None => (TextRun { font: base.font(), color: base.color, ..Default::default() }, None),
         };
+        run.len = len;
         if interact.selected.as_ref().is_some_and(|range| range.contains(&offset)) {
             run.background_color = Some(background);
         }
@@ -660,7 +719,8 @@ fn rtl_text(
     let mut flow = div().w_full().flex().flex_wrap();
     if words.rtl {
         flow = flow.flex_row_reverse();
-    } else if mirror {
+    }
+    if packs_end(words.rtl, mirror) {
         flow = flow.justify_end();
     }
     let mut counter = 0;
@@ -673,6 +733,13 @@ fn rtl_text(
         flow = flow.child(rtl_word(doc, word, linked, &run_at, (block_ix, &mut counter), &interact.hit, cx));
     }
     flow
+}
+
+/// Whether a wrapping row of words needs `justify_end` to sit on the side the document reads from: a reversed row packs
+/// right by itself and a plain one left, while a mirrored document wants the right and a flipped one the left (next to
+/// its list bullets).
+fn packs_end(reversed: bool, mirror: bool) -> bool {
+    reversed != mirror
 }
 
 /// One word of `rtl_text`.
@@ -724,8 +791,8 @@ fn same_look(a: &TextRun, b: &TextRun) -> bool {
     TextRun { len: 0, ..a.clone() } == TextRun { len: 0, ..b.clone() }
 }
 
-/// A line of code as an element: wrapped styled text with its token colors, or, for a line with right-to-left letters
-/// with the display on, characters in display order colored by their logical offsets. `interact` gets presses and drags
+/// A line of code as an element: wrapped styled text with its token colors, or, for a line with right-to-left letters,
+/// characters one element each (display order with the display on, logical order off) colored by their logical offsets. `interact` gets presses and drags
 /// (as byte offsets of `line`) and says what to paint selected.
 pub(crate) fn code_line(
     line: &str,
@@ -737,16 +804,13 @@ pub(crate) fn code_line(
     interact: &Interact,
 ) -> AnyElement {
     let background = selection_background(theme);
-    if rtl && let Some(order) = display_line(line) {
-        let offsets: Vec<usize> = line.char_indices().map(|(at, _)| at).collect();
-        let chars =
-            div().flex().min_w_0().when(wrap, |d| d.flex_wrap()).children(order.into_iter().map(|(logical, ch)| {
-                let at = offsets[logical];
-                let color = token_color(token_at(spans, at), theme);
-                let shown = interact.selected.as_ref().is_some_and(|range| range.contains(&at));
-                let cell = div().text_color(rgb(color)).when(shown, |d| d.bg(background)).child(ch.to_string());
-                offset_pointer(cell, &interact.hit, at)
-            }));
+    if let Some(order) = char_order(line, text_route(rtl, line.chars().any(is_rtl_letter))) {
+        let chars = div().flex().min_w_0().when(wrap, |d| d.flex_wrap()).children(order.into_iter().map(|(at, ch)| {
+            let color = token_color(token_at(spans, at), theme);
+            let shown = interact.selected.as_ref().is_some_and(|range| range.contains(&at));
+            let cell = div().text_color(rgb(color)).when(shown, |d| d.bg(background)).child(ch.to_string());
+            offset_pointer(cell, &interact.hit, at)
+        }));
         // The space after the characters is a target of its own (a sibling, so it never overrides a character).
         let rest = offset_pointer(div().flex_1().min_w(px(4.)), &interact.hit, line.len());
         return div().w_full().flex().child(chars).child(rest).into_any_element();
@@ -824,7 +888,7 @@ fn room(doc: &MdDoc, ix: usize, viewport: f32, theme: &Theme) -> f32 {
 /// One line of muted or linked text for an image row. Right-to-left text is never handed to the shaper as one run.
 fn image_label(text: &str, color: u32, underline: bool, state: &RowState) -> AnyElement {
     let line = div().text_color(rgb(color)).when(underline, |d| d.underline());
-    match state.rtl.then(|| display_line(text)).flatten() {
+    match char_order(text, text_route(state.rtl, text.chars().any(is_rtl_letter))) {
         Some(order) => {
             line.flex().children(order.into_iter().map(|(_, ch)| div().child(ch.to_string()))).into_any_element()
         }
@@ -928,7 +992,7 @@ fn marker_gutter(marker: Marker, color: u32, mirror: bool, theme: &Theme) -> Div
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(RADIUS_SMALL))
+                .rounded(px(RADIUS_TINY))
                 .border_1()
                 .border_color(rgb(if done { theme.tokens.accent } else { theme.tokens.line }))
                 .when(done, |box_| box_.bg(rgb(theme.tokens.accent)).text_color(rgb(theme.tokens.on_accent)))
@@ -956,8 +1020,8 @@ fn code_row(
     );
     let font = pane_font(Some(&state.code_font));
     let radius = px(RADIUS_SMALL);
-    let starts = state.lines.borrow_mut().entry(block_ix).or_insert_with(|| Arc::new(line_starts(&block.text))).clone();
-    let range = code_range(block.text.len(), &starts, lines);
+    let starts = &block.line_starts;
+    let range = code_range(block.text.len(), starts, lines);
     let text = &block.text[range.clone()];
     let line_height = theme.ui(CODE * 1.45);
     let highlights = match &block.kind {
@@ -1033,7 +1097,7 @@ fn table_row(
     cx: &mut Context<PreviewView>,
 ) -> AnyElement {
     let Some(table) = doc.tables.get(table_ix) else { return div().into_any_element() };
-    let columns = table.fractions.len().max(cells.len()).max(1);
+    let columns = table.widest.len().max(cells.len()).max(1);
     let first = !matches!(
         ix.checked_sub(1).and_then(|p| doc.rows.get(p)).map(|r| &r.kind),
         Some(RowKind::TableRow { table, .. }) if *table == table_ix
@@ -1041,11 +1105,12 @@ fn table_row(
     let weight = if header { FontWeight::SEMIBOLD } else { FontWeight::NORMAL };
     let look = Look { size: BODY, line: BODY_LINE, weight, color: theme.tokens.text };
     // Mirrored: the columns show in reverse order, each with its own cell.
-    let (fractions, align) = if state.mirror {
-        mirror_table(&table.fractions, &table.align)
-    } else {
-        (table.fractions.clone(), table.align.clone())
-    };
+    let width = room(doc, ix, state.viewport, theme);
+    let pad = f32::from(theme.ui(26.)) + 1.0;
+    let fractions =
+        column_fractions(&table.widest, &table.longest, if width > 1e6 { 0.0 } else { width }, state.char_px, pad);
+    let (fractions, align) =
+        if state.mirror { mirror_table(&fractions, &table.align) } else { (fractions, table.align.clone()) };
     div()
         .w_full()
         .flex()
@@ -1263,8 +1328,7 @@ mod tests {
     #[test]
     fn code_rows_cut_the_text_by_lines() {
         let text = "a\nbb\nccc\ndddd";
-        let starts = line_starts(text);
-        assert_eq!(starts, [0, 2, 5, 9]);
+        let starts = [0, 2, 5, 9];
         let cut = |lines: Range<usize>| &text[code_range(text.len(), &starts, &lines)];
         assert_eq!(cut(1..3), "bb\nccc");
         assert_eq!(cut(0..1), "a");
@@ -1334,6 +1398,49 @@ mod tests {
         assert_eq!(word_offset(&chars, 2), 12);
         assert_eq!(word_offset(&chars, 3), 13);
         assert_eq!(word_offset(&chars, 99), 13);
+    }
+
+    #[test]
+    fn right_to_left_text_never_reaches_the_shaper() {
+        // setting x has-RTL-letter; the same rule serves paragraphs, headings, table cells and code lines.
+        assert_eq!(text_route(true, false), Route::Shaped);
+        assert_eq!(text_route(false, false), Route::Shaped);
+        assert_eq!(text_route(true, true), Route::Display);
+        assert_eq!(text_route(false, true), Route::Logical);
+    }
+
+    #[test]
+    fn every_block_kind_with_a_hebrew_letter_is_routed_per_character() {
+        let doc = parse("# שלום\n\nשלום עולם\n\n| ת |\n|--|\n| ש |\n\n```\nשלום\n```\n\nplain", Path::new("/"));
+        for setting in [true, false] {
+            let routes: Vec<Route> = doc
+                .blocks
+                .iter()
+                .map(|b| text_route(setting, b.rtl.is_some() || b.text.chars().any(is_rtl_letter)))
+                .collect();
+            let want = if setting { Route::Display } else { Route::Logical };
+            // heading, paragraph, two cells, code line: never Shaped; the plain paragraph stays Shaped.
+            assert_eq!(routes, [want, want, want, want, want, Route::Shaped], "setting {setting}");
+        }
+    }
+
+    #[test]
+    fn characters_are_ordered_by_the_route() {
+        assert_eq!(char_order("abc", Route::Shaped), None);
+        let logical = char_order("אב c", Route::Logical).unwrap();
+        assert_eq!(logical, [(0, 'א'), (2, 'ב'), (4, ' '), (5, 'c')]);
+        let display = char_order("אב c", Route::Display).unwrap();
+        assert_eq!(display.len(), 4);
+        // The display order differs from the logical one for a right-to-left base line.
+        assert_ne!(display.iter().map(|(at, _)| *at).collect::<Vec<_>>(), [0, 2, 4, 5]);
+    }
+
+    #[test]
+    fn rows_of_words_pack_toward_the_side_the_document_reads_from() {
+        assert!(!packs_end(false, false), "left to right text in a left to right document");
+        assert!(!packs_end(true, true), "right to left text in a mirrored document");
+        assert!(packs_end(false, true), "English in a mirrored document packs right");
+        assert!(packs_end(true, false), "Hebrew in a flipped document packs left, by the bullet");
     }
 
     #[test]

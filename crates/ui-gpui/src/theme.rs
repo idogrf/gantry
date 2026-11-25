@@ -113,7 +113,8 @@ pub(crate) fn theme(cx: &App) -> &Theme {
     cx.global::<Theme>()
 }
 
-/// Corner radii, in pixels: chips and small buttons, rows and tabs, panels and panes.
+/// Corner radii, in pixels: check boxes, chips and small buttons, rows and tabs, panels and panes.
+pub(crate) const RADIUS_TINY: f32 = 3.0;
 pub(crate) const RADIUS_SMALL: f32 = 8.0;
 pub(crate) const RADIUS: f32 = 12.0;
 pub(crate) const RADIUS_LARGE: f32 = 16.0;

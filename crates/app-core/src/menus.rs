@@ -63,6 +63,26 @@ pub enum MenuAction {
     RenameTab(usize),
     /// Close one pane.
     ClosePane(NodeId),
+    /// Open (or show) the preview pane that follows the Claude pane `leaf`.
+    OpenPreview(NodeId),
+    /// Make a sent file the active tab of the preview pane `leaf`.
+    ActivateSentFile {
+        /// The preview pane.
+        leaf: NodeId,
+        /// The file's id.
+        id: String,
+    },
+    /// Hide a sent file from the preview pane `leaf` (the file itself is untouched).
+    RemoveSentFile {
+        /// The preview pane.
+        leaf: NodeId,
+        /// The file's id.
+        id: String,
+    },
+    /// Hide every sent file of the session the preview pane follows.
+    ClearSentFiles(NodeId),
+    /// Copy the contents of the file the preview pane `leaf` shows.
+    CopyFileContents(NodeId),
     /// Close every pane of a tab.
     CloseTab(usize),
     /// Start a new Claude session in a folder with the named config dir (and remember it for the folder).
@@ -478,6 +498,11 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
             if let (Tone::Idle | Tone::Done | Tone::Unread, Some(leaf)) = (tone, leaf) {
                 items.push(read_mark_item(*leaf, *tone != Tone::Idle));
             }
+            if let (Some(leaf), None, false) =
+                (leaf, &session.container, matches!(session.state, SessionState::External { .. }))
+            {
+                items.push(entry("Open preview", MenuAction::OpenPreview(*leaf)));
+            }
             items.extend(pane_color_menu(context));
             items.push(entry("Copy session id", MenuAction::Copy(session.id.clone())));
             items.extend(folder_items(&session.cwd, vscode, &session.host));
@@ -490,6 +515,12 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
                 items.push(MenuItem::Separator);
                 items.push(close_item(*leaf, alone));
             }
+        }
+        RowKind::Pane { entry: pane, .. } if pane.preview => {
+            items.extend(pane_color_menu(context));
+            items.extend(remove_from_project_item(row, pane.leaf));
+            items.push(MenuItem::Separator);
+            items.push(close_item(pane.leaf, alone));
         }
         RowKind::Pane { entry: pane, .. } => {
             let vscode = vscode_args(&pane.cwd, None, pane.container.as_deref());
@@ -517,6 +548,26 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
         }
     }
     Some(tidy(items))
+}
+
+/// The menu of a preview pane's file tab or body: `file` = the file's id when a tab was clicked, `text` = the shown
+/// file is text that can be copied.
+pub fn preview_menu(leaf: NodeId, file: Option<&str>, text: bool) -> Vec<MenuItem> {
+    let mut items = Vec::new();
+    if text {
+        items.push(entry("Copy file contents", MenuAction::CopyFileContents(leaf)));
+        items.push(MenuItem::Separator);
+    }
+    if let Some(id) = file {
+        items.push(entry("Remove from list", MenuAction::RemoveSentFile { leaf, id: id.to_string() }));
+    }
+    items.push(entry("Clear all files from this session", MenuAction::ClearSentFiles(leaf)));
+    tidy(items)
+}
+
+/// The menu of the `+N` button: one entry per hidden file tab, `(id, name)`.
+pub fn hidden_tabs_menu(leaf: NodeId, files: &[(String, String)]) -> Vec<MenuItem> {
+    files.iter().map(|(id, name)| entry(name, MenuAction::ActivateSentFile { leaf, id: id.clone() })).collect()
 }
 
 /// A project heading's menu; `path` = the project key (see `protocol::host::project_key`), `container` = the dev
@@ -628,11 +679,72 @@ mod tests {
             container: None,
             color: None,
             project: None,
+            preview: false,
         };
         Row::new(RowKind::Pane { entry, tone: if ended { Tone::Closed } else { Tone::Idle }, note: String::new() })
     }
 
     const ALONE: &dyn Fn(NodeId) -> bool = &|_| true;
+
+    #[test]
+    fn a_gantry_claude_row_offers_open_preview() {
+        let ctx = two_dirs(None);
+        let offers = |row: &Row| {
+            let items = row_menu(row, ALONE, &ctx).unwrap();
+            labels(&items).contains(&"Open preview".to_string())
+        };
+        let running = SessionState::Managed { pane: 1 };
+        let row = session_row(running, Tone::Idle, Some(4));
+        assert!(offers(&row));
+        let items = row_menu(&row, ALONE, &ctx).unwrap();
+        assert!(items.iter().any(|item| matches!(item, MenuItem::Entry(e) if e.action == MenuAction::OpenPreview(4))));
+        let labels_all = labels(&items);
+        let mark = labels_all.iter().position(|l| l.starts_with("Mark ")).unwrap();
+        assert_eq!(labels_all[mark + 1], "Open preview");
+        assert!(!offers(&session_row(SessionState::External { pid: Some(9) }, Tone::Elsewhere, Some(4))));
+        assert!(!offers(&session_row(running, Tone::Idle, None)));
+        let Row { kind: RowKind::Session { mut session, tone, note, leaf }, .. } =
+            session_row(running, Tone::Idle, Some(4))
+        else {
+            unreachable!()
+        };
+        session.container = Some(protocol::message::ContainerPlace { host_folder: None, path: "/w".into() });
+        assert!(!offers(&Row::new(RowKind::Session { session, tone, note, leaf })));
+    }
+
+    #[test]
+    fn a_preview_row_offers_only_close_and_color() {
+        let Row { kind: RowKind::Pane { mut entry, tone, note }, .. } = pane_row(false, false) else { unreachable!() };
+        entry.preview = true;
+        let row = Row::new(RowKind::Pane { entry, tone, note });
+        let items = labels(&row_menu(&row, &|_| false, &two_dirs(None)).unwrap());
+        assert_eq!(items.last().map(String::as_str), Some("Close pane"));
+        for banned in ["Rename…", "Copy session id", "Copy folder path", "Open folder", "Open in VS Code"] {
+            assert!(!items.iter().any(|l| l == banned), "{banned}");
+        }
+    }
+
+    #[test]
+    fn preview_menu_offers_copy_only_for_text() {
+        assert_eq!(
+            labels(&preview_menu(3, Some("f1"), true)),
+            ["Copy file contents", "│", "Remove from list", "Clear all files from this session"]
+        );
+        assert_eq!(labels(&preview_menu(3, None, false)), ["Clear all files from this session"]);
+        assert_eq!(
+            labels(&preview_menu(3, Some("f1"), false)),
+            ["Remove from list", "Clear all files from this session"]
+        );
+    }
+
+    #[test]
+    fn hidden_tabs_menu_lists_the_hidden_files() {
+        let items = hidden_tabs_menu(3, &[("a".into(), "one.png".into()), ("b".into(), "two.md".into())]);
+        assert_eq!(labels(&items), ["one.png", "two.md"]);
+        assert!(
+            matches!(&items[1], MenuItem::Entry(e) if e.action == MenuAction::ActivateSentFile { leaf: 3, id: "b".into() })
+        );
+    }
 
     #[test]
     fn a_middle_click_closes_the_pane_or_tab_a_row_stands_for() {
@@ -812,6 +924,7 @@ mod tests {
             labels(&items),
             [
                 "Mark as unread",
+                "Open preview",
                 "Copy session id",
                 "Copy folder path",
                 "Open folder",
@@ -821,7 +934,7 @@ mod tests {
                 "Close tab"
             ]
         );
-        let MenuItem::Entry(copy) = &items[1] else { panic!() };
+        let MenuItem::Entry(copy) = &items[2] else { panic!() };
         assert_eq!(copy.action, MenuAction::Copy("s1".into()));
     }
 
@@ -875,6 +988,7 @@ mod tests {
             [
                 "Resume conversation",
                 "│",
+                "Open preview",
                 "Copy session id",
                 "Copy folder path",
                 "Open folder",

@@ -449,6 +449,7 @@ impl WorkspaceView {
                     container: leaf.launch.container.clone(),
                     color: leaf.color,
                     project: leaf.project.clone(),
+                    preview: leaf.preview.is_some(),
                 }
             })
             .collect();

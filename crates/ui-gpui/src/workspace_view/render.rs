@@ -167,6 +167,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::split_down_claude))
             .on_action(cx.listener(Self::split_down_shell))
             .on_action(cx.listener(Self::close_pane))
+            .on_action(cx.listener(Self::open_preview_action))
             .on_action(cx.listener(Self::focus_left))
             .on_action(cx.listener(Self::focus_right))
             .on_action(cx.listener(Self::focus_up))

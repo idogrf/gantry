@@ -69,6 +69,7 @@ mod workspace_actions {
             SplitDownClaude,
             SplitDownShell,
             ClosePane,
+            OpenPreview,
             FocusLeft,
             FocusRight,
             FocusUp,

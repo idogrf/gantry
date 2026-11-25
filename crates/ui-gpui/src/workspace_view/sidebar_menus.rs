@@ -1,7 +1,7 @@
 use super::layout::content_width_beside;
 use super::{
-    DialogAction, FindSession, OpenRecents, OpenSettings, SIDEBAR_EDGE, SidebarAnim, TakeOverTarget, ToggleSidebar,
-    WorkspaceView,
+    DialogAction, FindSession, OpenPreview, OpenRecents, OpenSettings, SIDEBAR_EDGE, SidebarAnim, TakeOverTarget,
+    ToggleSidebar, WorkspaceView,
 };
 
 use app_core::attention::AlertKind;
@@ -134,6 +134,12 @@ impl WorkspaceView {
                 self.start_rename(RenameTarget::Tab(index), name, window, cx);
             }
             MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
+            // Task 8 wires the preview pane in, Task 9 the file actions.
+            MenuAction::OpenPreview(_) => self.open_preview_action(&OpenPreview, window, cx),
+            MenuAction::ActivateSentFile { .. }
+            | MenuAction::RemoveSentFile { .. }
+            | MenuAction::ClearSentFiles(_)
+            | MenuAction::CopyFileContents(_) => {}
             MenuAction::CloseTab(index) => self.close_tab_at(index, window, cx),
             MenuAction::NewHere { dir, claude, host } if host.is_local() => {
                 self.open_new(claude, dir, None, None, host, None, None)

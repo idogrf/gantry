@@ -11,12 +11,13 @@ use app_core::preview::{TextDoc, file_name, fit_tabs};
 use app_core::split_tree::NodeId;
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent,
-    ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, Point,
-    Render, SharedString, UniformListScrollHandle, Window, canvas, div, img, prelude::*, px, rgb, svg, uniform_list,
+    ListHorizontalSizingBehavior, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    Pixels, Point, Render, SharedString, UniformListScrollHandle, Window, canvas, div, img, prelude::*, px, rgb, svg,
+    uniform_list,
 };
 
 use crate::assets::{CLOSE_ICON, EYE_ICON, FILE_ICON, OPEN_EXTERNAL_ICON};
-use crate::git_diff_view::size_text;
+use crate::git_diff_view::{display_chars, size_text};
 use crate::hover_card::{self, HoverCard};
 use crate::pane_drag::DraggedPane;
 use crate::settings_store::SettingsStore;
@@ -185,14 +186,13 @@ impl PreviewView {
             self.selection = None;
         }
         self.model = model;
-        let lines = match &self.model.content {
-            Content::Text(doc) => doc.line_count(),
-            _ => 0,
-        };
-        self.selection = self.selection.and_then(|(anchor, head)| {
-            let last = lines.checked_sub(1)?;
-            Some((anchor.min(last), head.min(last)))
-        });
+        // Other content (loading, an error) keeps the selection, so Text -> Loading -> Text on one file still has it.
+        if let Content::Text(doc) = &self.model.content {
+            self.selection = self.selection.and_then(|(anchor, head)| {
+                let last = doc.line_count().checked_sub(1)?;
+                Some((anchor.min(last), head.min(last)))
+            });
+        }
         cx.notify();
     }
 
@@ -382,6 +382,7 @@ impl PreviewView {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |_, _, _, cx| {
+                                    cx.emit(PreviewEvent::Focused);
                                     cx.emit(PreviewEvent::Remove(remove.clone()));
                                     cx.stop_propagation();
                                 }),
@@ -393,6 +394,7 @@ impl PreviewView {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |_, event: &MouseDownEvent, _, cx| {
+                            cx.emit(PreviewEvent::Focused);
                             cx.emit(PreviewEvent::Menu { position: event.position, file: Some(menu.clone()) });
                             cx.stop_propagation();
                         }),
@@ -415,6 +417,7 @@ impl PreviewView {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|_, event: &MouseDownEvent, _, cx| {
+                                cx.emit(PreviewEvent::Focused);
                                 cx.emit(PreviewEvent::Hidden { position: event.position });
                                 cx.stop_propagation();
                             }),
@@ -430,6 +433,7 @@ impl PreviewView {
         let theme = theme(cx).clone();
         let metrics = Self::metrics(window, cx);
         let width = px(metrics.cell_width * (doc.widest() as f32 + 2.0) + 24.0);
+        let right_to_left = cx.global::<SettingsStore>().settings().window.right_to_left;
         let selected = self.selection.map(|(anchor, head)| selection_lines(anchor, head));
         range
             .filter(|&index| index < doc.line_count())
@@ -452,7 +456,7 @@ impl PreviewView {
                     .text_size(px(metrics.size))
                     .bg(rgb(background))
                     .text_color(rgb(theme.tokens.text))
-                    .child(SharedString::from(doc.display(index).into_owned()))
+                    .child(line_text(&doc.display(index), right_to_left))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -507,7 +511,8 @@ impl PreviewView {
             }
             Content::Loading => div().size_full().into_any_element(),
             Content::Text(doc) => {
-                let longest = (0..doc.line_count()).max_by_key(|&index| doc.display(index).len());
+                // Every row has its own `min_w`, so the width needs no scan of the document.
+                let longest = (doc.line_count() > 0).then_some(0);
                 uniform_list(
                     "preview-rows",
                     doc.line_count(),
@@ -549,6 +554,16 @@ impl PreviewView {
             Content::Html => file_card(vec![muted("HTML files open in your browser").into_any_element()]),
             Content::Failed(reason) => centered(vec![muted_line(reason.clone(), theme)]),
         }
+    }
+}
+
+/// One line as an element. With right-to-left display on, a line with Hebrew or Arabic letters is drawn in display
+/// order, one character at a time (the shaper never gets right-to-left text); selection and copy stay logical.
+fn line_text(text: &str, right_to_left: bool) -> gpui::Div {
+    let reordered = right_to_left.then(|| display_chars(text, &[])).flatten();
+    match reordered {
+        Some(chars) => div().flex().items_center().children(chars.into_iter().map(|(ch, _)| div().child(ch))),
+        None => div().child(SharedString::from(text.to_string())),
     }
 }
 
@@ -604,16 +619,16 @@ impl Render for PreviewView {
             .flex_col()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 let key = &event.keystroke;
-                if key.key == "delete" {
+                if key.key == "delete" && !key.modifiers.modified() {
                     if let Some(id) = this.model.active.clone() {
                         cx.emit(PreviewEvent::Remove(id));
                         cx.stop_propagation();
                     }
-                } else if key.key == "c" && key.modifiers.secondary() {
+                } else if key.key == "c" && key.modifiers == Modifiers::secondary_key() {
                     if let Some(text) = this.copy_selection() {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                        cx.stop_propagation();
                     }
-                    cx.stop_propagation();
                 }
             }))
             .on_mouse_down(

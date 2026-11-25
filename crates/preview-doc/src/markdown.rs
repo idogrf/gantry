@@ -303,6 +303,7 @@ pub fn parse(text: &str, folder: &Path) -> MdDoc {
         },
         anchorizer: Anchorizer::new(),
         highlighted: 0,
+        depth: 0,
         footnotes: Vec::new(),
     };
     for child in root.children() {
@@ -334,6 +335,9 @@ fn first_letter_is_rtl(doc: &MdDoc) -> bool {
     }
     false
 }
+
+/// The deepest nesting of blocks or inlines that is walked; deeper content is flattened to its text.
+const MAX_DEPTH: usize = 100;
 
 /// Where a block sits: quote depth, alert, list depth.
 #[derive(Clone, Copy, Default)]
@@ -413,6 +417,8 @@ struct Builder<'a, 'n> {
     anchorizer: Anchorizer,
     /// Bytes of code highlighted so far.
     highlighted: usize,
+    /// Containers and inline levels being walked; past `MAX_DEPTH` the rest shows as plain text.
+    depth: usize,
     footnotes: Vec<Node<'n>>,
 }
 
@@ -437,8 +443,24 @@ impl<'n> Builder<'_, 'n> {
     }
 
     fn block(&mut self, node: Node<'n>, ctx: Ctx) {
-        let value = node.data().value.clone();
-        match value {
+        if self.depth >= MAX_DEPTH {
+            let mut c = Collect::default();
+            c.push(plain_text(node).trim(), InlineStyle::default(), None);
+            if !c.text.is_empty() {
+                let block = self.push_block(c.text, c.inlines, BlockKind::Paragraph);
+                let gap = self.gap();
+                self.push_row(RowKind::Text { block }, ctx, gap);
+            }
+            return;
+        }
+        self.depth += 1;
+        self.block_at(node, ctx);
+        self.depth -= 1;
+    }
+
+    fn block_at(&mut self, node: Node<'n>, ctx: Ctx) {
+        let data = node.data();
+        match &data.value {
             NodeValue::Paragraph => self.paragraph(node, ctx, None),
             NodeValue::Heading(h) => {
                 let mut c = Collect::default();
@@ -470,7 +492,7 @@ impl<'n> Builder<'_, 'n> {
                 self.push_row(RowKind::AlertTitle(kind), inner, gap);
                 self.children(node, inner);
             }
-            NodeValue::List(list) => self.list(node, &list, ctx),
+            NodeValue::List(list) => self.list(node, list, ctx),
             NodeValue::CodeBlock(code) => {
                 let math = code.info.split_whitespace().next() == Some("math");
                 let lang = if math { None } else { code.info.split_whitespace().next().map(str::to_string) };
@@ -485,7 +507,7 @@ impl<'n> Builder<'_, 'n> {
                 let gap = self.gap();
                 self.push_row(RowKind::Text { block }, ctx, gap);
             }
-            NodeValue::Table(table) => self.table(node, &table, ctx),
+            NodeValue::Table(table) => self.table(node, table, ctx),
             NodeValue::FootnoteDefinition(_) => self.footnotes.push(node),
             _ => self.children(node, ctx),
         }
@@ -518,6 +540,12 @@ impl<'n> Builder<'_, 'n> {
         }
     }
 
+    /// The marker of an item whose first block is not a paragraph (or is an image): an empty text block.
+    fn empty_item(&mut self, marker: Marker, gap: f32, ctx: Ctx) {
+        let block = self.push_block(String::new(), Vec::new(), BlockKind::Paragraph);
+        self.push_row(RowKind::Item { block, marker }, ctx, gap);
+    }
+
     /// A paragraph: its text, then each image in order with the text after it. `marker` makes the first row an item.
     fn paragraph(&mut self, node: Node<'n>, ctx: Ctx, mut marker: Option<(Marker, f32)>) {
         let mut c = Collect::default();
@@ -538,8 +566,8 @@ impl<'n> Builder<'_, 'n> {
                 }
                 Part::Image(image) => {
                     if let Some((marker, gap)) = marker.take() {
-                        let block = self.push_block(String::new(), Vec::new(), BlockKind::Paragraph);
-                        self.push_row(RowKind::Item { block, marker }, ctx, gap);
+                        self.empty_item(marker, gap, ctx);
+                        after_text = true;
                     }
                     let gap = if after_text { 8.0 } else { self.gap() };
                     self.push_row(RowKind::Image { image }, ctx, gap);
@@ -548,8 +576,7 @@ impl<'n> Builder<'_, 'n> {
             }
         }
         if let Some((marker, gap)) = marker {
-            let block = self.push_block(String::new(), Vec::new(), BlockKind::Paragraph);
-            self.push_row(RowKind::Item { block, marker }, ctx, gap);
+            self.empty_item(marker, gap, ctx);
         }
     }
 
@@ -580,14 +607,12 @@ impl<'n> Builder<'_, 'n> {
                 continue;
             }
             if let Some((marker, gap)) = pending.take() {
-                let block = self.push_block(String::new(), Vec::new(), BlockKind::Paragraph);
-                self.push_row(RowKind::Item { block, marker }, ctx, gap);
+                self.empty_item(marker, gap, ctx);
             }
             self.block(child, ctx);
         }
         if let Some((marker, gap)) = pending {
-            let block = self.push_block(String::new(), Vec::new(), BlockKind::Paragraph);
-            self.push_row(RowKind::Item { block, marker }, ctx, gap);
+            self.empty_item(marker, gap, ctx);
         }
     }
 
@@ -626,11 +651,14 @@ impl<'n> Builder<'_, 'n> {
     }
 
     fn footnote(&mut self, node: Node<'n>) {
-        let NodeValue::FootnoteDefinition(def) = node.data().value.clone() else { return };
+        let name = match &node.data().value {
+            NodeValue::FootnoteDefinition(def) => def.name.clone(),
+            _ => return,
+        };
         let first = self.doc.rows.len();
         self.children(node, Ctx::default());
         if self.doc.rows.len() > first {
-            self.doc.anchors.push((format!("fn-{}", def.name), first));
+            self.doc.anchors.push((format!("fn-{name}"), first));
         }
     }
 
@@ -644,15 +672,25 @@ impl<'n> Builder<'_, 'n> {
         link: Option<usize>,
         pull: bool,
     ) {
+        if self.depth >= MAX_DEPTH {
+            c.push(&plain_text(node), style, link);
+            return;
+        }
+        self.depth += 1;
+        self.inline_run(node, c, style, link, pull);
+        self.depth -= 1;
+    }
+
+    fn inline_run(&mut self, node: Node<'n>, c: &mut Collect, style: InlineStyle, link: Option<usize>, pull: bool) {
         for child in node.children() {
-            let value = child.data().value.clone();
-            match value {
-                NodeValue::Text(t) => c.push(&t, style, link),
+            let data = child.data();
+            match &data.value {
+                NodeValue::Text(t) => c.push(t, style, link),
                 NodeValue::SoftBreak => c.push(" ", style, link),
                 NodeValue::LineBreak => c.push("\n", style, link),
                 NodeValue::Code(code) => c.push(&code.literal, InlineStyle { code: true, ..style }, link),
                 NodeValue::Math(math) => c.push(&math.literal, InlineStyle { code: true, ..style }, link),
-                NodeValue::HtmlInline(html) | NodeValue::Raw(html) => c.push(&html, style, link),
+                NodeValue::HtmlInline(html) | NodeValue::Raw(html) => c.push(html, style, link),
                 NodeValue::Emph => self.inline_children(child, c, InlineStyle { italic: true, ..style }, link, pull),
                 NodeValue::Strong => self.inline_children(child, c, InlineStyle { bold: true, ..style }, link, pull),
                 NodeValue::Strikethrough => {
@@ -693,6 +731,14 @@ fn plain_text(node: Node<'_>) -> String {
         match &d.data().value {
             NodeValue::Text(t) => out.push_str(t),
             NodeValue::Code(c) => out.push_str(&c.literal),
+            NodeValue::CodeBlock(c) => {
+                out.push_str(&c.literal);
+                out.push(' ');
+            }
+            NodeValue::HtmlBlock(h) => {
+                out.push_str(&h.literal);
+                out.push(' ');
+            }
             NodeValue::SoftBreak | NodeValue::LineBreak => out.push(' '),
             _ => {}
         }
@@ -706,16 +752,18 @@ enum Split<'u> {
     Path { path: &'u str, fragment: Option<&'u str> },
 }
 
+fn has_scheme(url: &str) -> Option<&str> {
+    let colon = url.find(':')?;
+    let scheme = &url[..colon];
+    let mut chars = scheme.chars();
+    (chars.next()?.is_ascii_alphabetic() && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-')))
+        .then_some(scheme)
+}
+
 fn split_url(url: &str) -> Split<'_> {
     let url = url.trim();
-    if let Some(colon) = url.find(':') {
-        let scheme = &url[..colon];
-        let mut chars = scheme.chars();
-        if chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
-        {
-            return Split::Scheme(scheme);
-        }
+    if let Some(scheme) = has_scheme(url) {
+        return Split::Scheme(scheme);
     }
     let (rest, fragment) = match url.split_once('#') {
         Some((rest, fragment)) => (rest, Some(fragment)),
@@ -736,7 +784,8 @@ fn local_path(path: &str, folder: &Path) -> Option<PathBuf> {
         return None;
     }
     let path = percent_decode(path);
-    if path.contains('\0') {
+    // A scheme that was only spelled with `%XX` (or leading white space) is still a scheme.
+    if path.contains('\0') || has_scheme(path.trim_start()).is_some() {
         return None;
     }
     let joined = folder.join(&path);
@@ -1047,5 +1096,67 @@ mod tests {
         }
         let d = doc(&text);
         assert!(d.rows.len() > 10_000, "{}", d.rows.len());
+    }
+
+    /// Run `parse` on a thread with a small stack, as a hostile file would.
+    fn parse_small_stack(text: String) -> MdDoc {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || doc(&text))
+            .expect("spawn")
+            .join()
+            .expect("parse overflowed or panicked")
+    }
+
+    #[test]
+    fn deep_quotes_do_not_overflow() {
+        let d = parse_small_stack(format!("{}deep", "> ".repeat(10_000)));
+        assert!(!d.rows.is_empty());
+    }
+
+    #[test]
+    fn deep_lists_do_not_overflow() {
+        let text: String = (0..10_000).map(|i| format!("{}- x\n", " ".repeat(i.min(2000)))).collect();
+        assert!(!parse_small_stack(text).rows.is_empty());
+        let nested = format!("{}deep", "- ".repeat(10_000));
+        assert!(!parse_small_stack(nested).rows.is_empty());
+    }
+
+    #[test]
+    fn deep_emphasis_does_not_overflow() {
+        let text = format!("{}x{}", "*a _b ".repeat(10_000), "_ a*".repeat(10_000));
+        assert!(!parse_small_stack(text).rows.is_empty());
+        let links = format!("{}x{}", "[".repeat(10_000), "](u)".repeat(10_000));
+        assert!(!parse_small_stack(links).rows.is_empty());
+    }
+
+    #[test]
+    fn nesting_past_the_cap_keeps_its_text() {
+        let d = doc(&format!("{}deep words", "> ".repeat(300)));
+        assert!(d.blocks.iter().any(|b| b.text.contains("deep words")));
+    }
+
+    #[test]
+    fn a_two_mebibyte_document_parses_on_a_small_stack() {
+        let text = "Some *text* with `code` and a [link](x.md).\n\n".repeat(MAX_MARKDOWN_BYTES / 46);
+        assert!(parse_small_stack(text).rows.len() > 10_000);
+    }
+
+    #[test]
+    fn encoded_schemes_stay_inert() {
+        let f = Path::new("/d/docs");
+        for bad in
+            ["%6Aavascript:alert(1)", "  javascript:x", " %6aavascript:x", "java%73cript:x", "%66ile:///etc/passwd"]
+        {
+            assert!(matches!(classify_link(bad, f), LinkTarget::Inert(_)), "{bad}");
+        }
+        assert_eq!(classify_link("a%3Ab.md", f), LinkTarget::Inert("a%3Ab.md".into()));
+    }
+
+    #[test]
+    fn an_image_first_in_an_item_has_the_small_gap() {
+        let d = doc("para\n\n- ![a](x.png)");
+        assert!(matches!(d.rows[1].kind, RowKind::Item { .. }));
+        assert_eq!(d.rows[2].space_above, 8.0);
     }
 }

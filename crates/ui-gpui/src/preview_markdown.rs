@@ -10,17 +10,18 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use app_core::bidi::{display_line, is_rtl_letter};
+use app_core::preview::{FileKind, kind_of};
 use app_core::theme_colors::mix;
 use gpui::{
     AnyElement, Context, Div, Entity, Font, FontStyle, FontWeight, Hsla, InteractiveText, IntoElement, SharedString,
     StrikethroughStyle, StyledText, TextRun, TextStyle, UnderlineStyle, div, prelude::*, px, relative, rgb, svg,
 };
 use preview_doc::highlight::{Span, Token};
-use preview_doc::markdown::{AlertKind, Align, Block, BlockKind, Inline, LinkTarget, Marker, MdDoc, RowKind};
+use preview_doc::markdown::{AlertKind, Align, Block, BlockKind, ImageSrc, Inline, LinkTarget, Marker, MdDoc, RowKind};
 use preview_doc::words::{VisualText, Word, visual_words};
 
 use crate::assets::COPY_ICON;
-use crate::preview_view::PreviewView;
+use crate::preview_view::{Content, PreviewView};
 use crate::terminal_view::pane_font;
 use crate::theme::{RADIUS_SMALL, Theme, UI_FONT, ansi_color, token_color};
 
@@ -43,6 +44,10 @@ pub(crate) struct RowState {
     pub visual: VisualCache,
     /// The line starts of code blocks.
     pub lines: LineCache,
+    /// For an image row, what its file's read made (`None` until it arrives).
+    pub image: Option<Content>,
+    /// The list's width in px (0 before it is laid out once).
+    pub viewport: f32,
 }
 
 /// Body text size in base px.
@@ -444,20 +449,7 @@ pub(crate) fn row(
             .into_any_element(),
         RowKind::Code { block, lines } => code_row(doc, ix, *block, lines, state, theme, cx),
         RowKind::TableRow { table, cells, header } => table_row(doc, ix, *table, cells, *header, state, theme, cx),
-        RowKind::Image { image } => {
-            let alt = doc.images.get(*image).map(|i| i.alt.as_str()).filter(|alt| !alt.is_empty()).unwrap_or("Image");
-            let label = format!("[{alt}]");
-            // Right-to-left text is never handed to the shaper as one run.
-            let text = match state.rtl.then(|| display_line(&label)).flatten() {
-                Some(order) => div()
-                    .flex()
-                    .flex_wrap()
-                    .children(order.into_iter().map(|(_, ch)| div().child(ch.to_string())))
-                    .into_any_element(),
-                None => div().child(label).into_any_element(),
-            };
-            div().text_size(theme.ui(BODY)).text_color(rgb(theme.tokens.muted)).child(text).into_any_element()
-        }
+        RowKind::Image { image } => image_row(doc, ix, *image, state, theme, cx),
         RowKind::Rule => div().w_full().h(theme.ui(4.)).bg(rgb(theme.tokens.line)).into_any_element(),
         RowKind::AlertTitle(kind) => div()
             .text_size(theme.ui(BODY))
@@ -467,6 +459,84 @@ pub(crate) fn row(
             .into_any_element(),
     };
     framed(content, doc, ix, theme)
+}
+
+/// The size an image is drawn at: its natural size, shrunk (aspect kept) to fit `width`, never enlarged.
+pub(crate) fn image_box(natural: (f32, f32), width: f32) -> (f32, f32) {
+    if natural.0 <= width || natural.0 <= 0.0 {
+        return natural;
+    }
+    (width.max(0.0), natural.1 * width.max(0.0) / natural.0)
+}
+
+/// The width in px left for the content of row `ix` in a list `viewport` px wide: the text column's width less its
+/// padding, the list indent and the quote bars; unbounded before the list was laid out.
+fn room(doc: &MdDoc, ix: usize, viewport: f32, theme: &Theme) -> f32 {
+    let Some(row) = doc.rows.get(ix).filter(|_| viewport > 0.0) else { return f32::MAX };
+    let ui = |px: f32| f32::from(theme.ui(px));
+    viewport.min(ui(MAX_WIDTH)) - ui(32.) - ui(INDENT * f32::from(row.indent)) - ui(20.) * f32::from(row.quote)
+}
+
+/// One line of muted or linked text for an image row. Right-to-left text is never handed to the shaper as one run.
+fn image_label(text: &str, color: u32, underline: bool, state: &RowState) -> AnyElement {
+    let line = div().text_color(rgb(color)).when(underline, |d| d.underline());
+    match state.rtl.then(|| display_line(text)).flatten() {
+        Some(order) => line
+            .flex()
+            .flex_wrap()
+            .children(order.into_iter().map(|(_, ch)| div().child(ch.to_string())))
+            .into_any_element(),
+        None => line.whitespace_nowrap().overflow_hidden().child(text.to_string()).into_any_element(),
+    }
+}
+
+/// An image row: the picture at its natural size shrunk to the row, or a line saying why there is none.
+fn image_row(
+    doc: &MdDoc,
+    ix: usize,
+    image: usize,
+    state: &RowState,
+    theme: &Theme,
+    cx: &mut Context<PreviewView>,
+) -> AnyElement {
+    let Some(item) = doc.images.get(image) else { return div().into_any_element() };
+    let muted = theme.tokens.muted;
+    let alt = if item.alt.is_empty() { "Image" } else { item.alt.as_str() };
+    let alt_line = || image_label(&format!("[{alt}]"), muted, false, state);
+    let note = |text: &str| image_label(text, muted, false, state);
+    let live = item.link.and_then(|link| doc.links.get(link)).filter(|target| !matches!(target, LinkTarget::Inert(_)));
+    let mut open = live.cloned();
+    let body = match &item.src {
+        ImageSrc::File(path) if !matches!(kind_of(path), FileKind::Image(_)) => note("Not an image"),
+        ImageSrc::File(_) => match &state.image {
+            Some(Content::Image { image, natural }) => {
+                let (width, height) = image_box(*natural, room(doc, ix, state.viewport, theme));
+                gpui::img(image.clone())
+                    .w(px(width))
+                    .h(px(height))
+                    .object_fit(gpui::ObjectFit::Contain)
+                    .into_any_element()
+            }
+            Some(Content::Missing) => note("Image not found"),
+            Some(Content::TooLarge(_)) => note("Too large to preview"),
+            Some(Content::Failed(reason)) => note(reason),
+            _ => alt_line(),
+        },
+        ImageSrc::Web(url) => {
+            open = Some(LinkTarget::Web(url.clone()));
+            let text = if item.alt.is_empty() { url.as_str() } else { alt };
+            image_label(text, theme.tokens.accent, true, state)
+        }
+        ImageSrc::Bad => alt_line(),
+    };
+    let el = div().w_full().text_size(theme.ui(BODY)).child(body);
+    match open {
+        Some(target) => {
+            let opener = link_opener(cx.entity(), target);
+            el.id(("md-image", ix)).cursor_pointer().on_click(move |_, _, app| opener(app)).into_any_element()
+        }
+        None => el.into_any_element(),
+    }
 }
 
 /// A paragraph, heading or footnote text; headings are sized by level.
@@ -801,5 +871,12 @@ mod tests {
     fn headings_shrink_by_level() {
         let sizes: Vec<f32> = (1..=6).map(heading_size).collect();
         assert_eq!(sizes, [32.0, 24.0, 20.0, 16.0, 14.0, 13.6]);
+    }
+
+    #[test]
+    fn image_fits_the_row_and_never_grows() {
+        assert_eq!(image_box((2000., 1000.), 500.), (500., 250.));
+        assert_eq!(image_box((100., 50.), 500.), (100., 50.));
+        assert_eq!(image_box((100., 50.), 0.), (0., 0.));
     }
 }

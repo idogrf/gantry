@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use app_core::host_state::HostCard;
-use app_core::preview::{TabFit, TextDoc, file_name, fit_tabs};
+use app_core::preview::{FileKind, TabFit, TextDoc, file_name, fit_tabs, kind_of};
 use app_core::preview_zoom::{STEP, WHEEL_STEP_PX, Zoom, wheel_factor};
 use app_core::split_tree::NodeId;
 use gpui::{
@@ -20,7 +20,7 @@ use gpui::{
     MouseUpEvent, ObjectFit, PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Task,
     UniformListScrollHandle, Window, canvas, div, img, list, point, prelude::*, px, rgb, svg, uniform_list,
 };
-use preview_doc::markdown::{LinkTarget, MdDoc};
+use preview_doc::markdown::{DocImage, ImageSrc, LinkTarget, MdDoc, RowKind};
 
 use crate::assets::{CLOSE_ICON, EYE_ICON, FILE_ICON, OPEN_EXTERNAL_ICON};
 use crate::git_diff_view::{display_chars, size_text};
@@ -36,6 +36,9 @@ use app_core::theme_colors::mix;
 pub(crate) const TAB_WIDTH: f32 = 160.0;
 /// The width of the `+N` button, in UI px.
 pub(crate) const PLUS_WIDTH: f32 = 44.0;
+
+/// The most images of a markdown document read and decoded at once (those of the rows being drawn).
+pub(crate) const MAX_IMAGES_IN_VIEW: usize = 12;
 
 /// One file tab.
 pub(crate) struct PreviewTab {
@@ -89,6 +92,45 @@ pub(crate) enum Content {
     Failed(String),
 }
 
+/// Whether two contents draw the same thing: the same parsed text or decoded image (a reload makes a new one), or
+/// equal payloads.
+pub(crate) fn same_content(a: &Content, b: &Content) -> bool {
+    match (a, b) {
+        (Content::Text { doc: a, highlights: x }, Content::Text { doc: b, highlights: y }) => {
+            Arc::ptr_eq(a, b)
+                && match (x, y) {
+                    (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+                    (None, None) => true,
+                    _ => false,
+                }
+        }
+        (Content::Markdown(a), Content::Markdown(b)) => Arc::ptr_eq(a, b),
+        (Content::Image { image: a, natural: x }, Content::Image { image: b, natural: y }) => {
+            Arc::ptr_eq(a, b) && x == y
+        }
+        (Content::TooLarge(a), Content::TooLarge(b)) => a == b,
+        (Content::Unsupported { size: a }, Content::Unsupported { size: b }) => a == b,
+        (Content::Failed(a), Content::Failed(b)) => a == b,
+        (Content::Html, Content::Html)
+        | (Content::Loading, Content::Loading)
+        | (Content::Missing, Content::Missing)
+        | (Content::NoFiles, Content::NoFiles) => true,
+        (
+            Content::Text { .. }
+            | Content::Markdown(_)
+            | Content::Image { .. }
+            | Content::TooLarge(_)
+            | Content::Unsupported { .. }
+            | Content::Failed(_)
+            | Content::Html
+            | Content::Loading
+            | Content::Missing
+            | Content::NoFiles,
+            _,
+        ) => false,
+    }
+}
+
 /// Everything the view draws.
 pub(crate) struct PreviewModel {
     /// The followed session's bare title; the header reads `Preview · <title>`, or `Preview` while it is empty.
@@ -99,6 +141,8 @@ pub(crate) struct PreviewModel {
     pub active: Option<String>,
     /// The active file's body.
     pub content: Content,
+    /// The decoded or state content of the in-view images of the active markdown document, by path.
+    pub images: HashMap<PathBuf, Content>,
     /// The state of the host when it is not usable; replaces the body.
     pub host_card: Option<HostCard>,
     /// Whether Open in system viewer can be used.
@@ -132,8 +176,9 @@ pub(crate) enum PreviewEvent {
     /// The button on the host's card.
     HostAction,
     /// A click on a link of the markdown document that opens something (a web address or a file).
-    #[allow(dead_code)] // The workspace reads the target when links are wired in a later task.
     Link(LinkTarget),
+    /// The set of document images whose rows are being drawn changed (see `PreviewView::images_in_view`).
+    ImagesInView,
 }
 
 /// The lines between the two ends of a selection, whichever end is first.
@@ -220,6 +265,10 @@ pub(crate) struct PreviewView {
     md_lines: LineCache,
     /// What the rows were last measured with; a change remeasures the list.
     md_look: Option<MdLook>,
+    /// The image files of the rows laid out in the frame being drawn (cleared at its start).
+    frame_images: Vec<PathBuf>,
+    /// The image files of the rows drawn when `ImagesInView` was last sent.
+    images_in_view: Vec<PathBuf>,
 }
 
 /// The settings a markdown row's height depends on besides the width.
@@ -251,6 +300,7 @@ impl PreviewView {
                 tabs: Vec::new(),
                 active: None,
                 content: Content::NoFiles,
+                images: HashMap::new(),
                 host_card: None,
                 can_open: false,
             },
@@ -267,6 +317,8 @@ impl PreviewView {
             md_words: Rc::new(RefCell::new(HashMap::new())),
             md_lines: Rc::new(RefCell::new(HashMap::new())),
             md_look: None,
+            frame_images: Vec::new(),
+            images_in_view: Vec::new(),
         }
     }
 
@@ -281,6 +333,26 @@ impl PreviewView {
             self.panning = None;
             self.md_doc = None;
             self.copied = None;
+        }
+        if !same_file || !matches!(model.content, Content::Markdown(_)) {
+            self.images_in_view.clear();
+        }
+        // Rows whose image arrived or changed have another height now.
+        if let Content::Markdown(doc) = &model.content {
+            let changed = |path: &PathBuf| {
+                model
+                    .images
+                    .get(path)
+                    .is_some_and(|new| !self.model.images.get(path).is_some_and(|old| same_content(old, new)))
+            };
+            for (ix, row) in doc.rows.iter().enumerate() {
+                if let RowKind::Image { image } = &row.kind
+                    && let Some(DocImage { src: ImageSrc::File(path), .. }) = doc.images.get(*image)
+                    && changed(path)
+                {
+                    self.md_list.remeasure_items(ix..ix + 1);
+                }
+            }
         }
         self.model = model;
         if let Content::Markdown(doc) = &self.model.content
@@ -366,7 +438,17 @@ impl PreviewView {
     fn md_row(&mut self, ix: usize, theme: &Theme, look: &MdLook, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Content::Markdown(doc) = &self.model.content else { return div().into_any_element() };
         let doc = doc.clone();
+        self.note_row_image(&doc, ix);
+        let image = match doc.rows.get(ix).map(|row| &row.kind) {
+            Some(RowKind::Image { image }) => match doc.images.get(*image).map(|image| &image.src) {
+                Some(ImageSrc::File(path)) => self.model.images.get(path).cloned(),
+                _ => None,
+            },
+            _ => None,
+        };
         let state = RowState {
+            image,
+            viewport: f32::from(self.md_list.viewport_bounds().size.width),
             code_font: look.family.clone(),
             rtl: look.rtl,
             copied: self.copied.as_ref().map(|(block, _)| *block),
@@ -374,6 +456,32 @@ impl PreviewView {
             lines: self.md_lines.clone(),
         };
         preview_markdown::row(&doc, ix, &state, theme, cx)
+    }
+
+    /// The image files of the markdown rows drawn at the last `ImagesInView`: the ones to read and keep decoded.
+    pub(crate) fn images_in_view(&self) -> &[PathBuf] {
+        &self.images_in_view
+    }
+
+    /// Note that the row `ix` is being laid out: its image file, when it has one that is an image, joins the frame's
+    /// list (at most `MAX_IMAGES_IN_VIEW`).
+    fn note_row_image(&mut self, doc: &MdDoc, ix: usize) {
+        let Some(RowKind::Image { image }) = doc.rows.get(ix).map(|row| &row.kind) else { return };
+        let Some(ImageSrc::File(path)) = doc.images.get(*image).map(|image| &image.src) else { return };
+        if self.frame_images.len() < MAX_IMAGES_IN_VIEW
+            && matches!(kind_of(path), FileKind::Image(_))
+            && !self.frame_images.contains(path)
+        {
+            self.frame_images.push(path.clone());
+        }
+    }
+
+    /// After the list laid out: tell the workspace when the images in view differ from the last report.
+    fn sync_images(&mut self, cx: &mut Context<Self>) {
+        if self.frame_images != self.images_in_view {
+            self.images_in_view = std::mem::take(&mut self.frame_images);
+            cx.emit(PreviewEvent::ImagesInView);
+        }
     }
 
     /// What the pane shows now.
@@ -961,11 +1069,22 @@ impl PreviewView {
                 let view = cx.entity();
                 let theme = theme.clone();
                 let look = self.md_look.clone().unwrap_or_default();
-                list(self.md_list.clone(), move |ix, _, cx| {
-                    view.update(cx, |this, cx| this.md_row(ix, &theme, &look, cx))
-                })
-                .size_full()
-                .into_any_element()
+                let after = cx.entity();
+                div()
+                    .size_full()
+                    .child(
+                        list(self.md_list.clone(), move |ix, _, cx| {
+                            view.update(cx, |this, cx| this.md_row(ix, &theme, &look, cx))
+                        })
+                        .size_full(),
+                    )
+                    // Paints after the list laid out its rows, so the frame's images are complete.
+                    .child(
+                        canvas(move |_, _, cx| after.update(cx, |this, cx| this.sync_images(cx)), |_, _, _, _| {})
+                            .absolute()
+                            .size_0(),
+                    )
+                    .into_any_element()
             }
             Content::Text { doc, .. } => {
                 // Every row has its own `min_w`, so the width needs no scan of the document.
@@ -1051,6 +1170,7 @@ impl Render for PreviewView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_zoom();
         self.sync_md(window, cx);
+        self.frame_images.clear();
         let theme = theme(cx).clone();
         let active = self.model.active.clone();
         let host_card = self.model.host_card.clone();

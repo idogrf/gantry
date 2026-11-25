@@ -17,14 +17,16 @@ use app_core::split_tree::{Axis, NodeId};
 use app_core::workspace::PreviewPlace;
 use gpui::{App, AppContext, ClipboardItem, Context, Task, Window};
 use preview_doc::highlight::highlight_file;
-use preview_doc::markdown::{self, MAX_MARKDOWN_BYTES};
+use preview_doc::markdown::{self, LinkTarget, MAX_MARKDOWN_BYTES};
 use protocol::host::HostId;
 use protocol::message::SentFile;
 
 use super::layout::start_rects;
 use super::{PreviewSlot, WorkspaceView};
 use crate::context_menu::OpenMenu;
-use crate::preview_view::{Content, PreviewEvent, PreviewModel, PreviewTab, PreviewView};
+use crate::preview_view::{
+    Content, MAX_IMAGES_IN_VIEW, PreviewEvent, PreviewModel, PreviewTab, PreviewView, same_content,
+};
 use crate::theme::theme;
 
 /// What to send each host's daemon with `WatchSentFiles`: the hosts (among `connected`) whose wanted session list
@@ -55,49 +57,12 @@ fn same_model(a: &PreviewModel, b: &PreviewModel) -> bool {
         && a.host_card == b.host_card
         && a.can_open == b.can_open
         && same_content(&a.content, &b.content)
+        && a.images.len() == b.images.len()
+        && a.images.iter().all(|(path, x)| b.images.get(path).is_some_and(|y| same_content(x, y)))
         && a.tabs.len() == b.tabs.len()
         && a.tabs.iter().zip(&b.tabs).all(|(x, y)| {
             (&x.id, &x.name, &x.path, &x.caption, x.unseen) == (&y.id, &y.name, &y.path, &y.caption, y.unseen)
         })
-}
-
-/// Whether two contents draw the same thing: the same parsed text or decoded image (a reload makes a new one), or
-/// equal payloads.
-fn same_content(a: &Content, b: &Content) -> bool {
-    match (a, b) {
-        (Content::Text { doc: a, highlights: x }, Content::Text { doc: b, highlights: y }) => {
-            Arc::ptr_eq(a, b)
-                && match (x, y) {
-                    (Some(x), Some(y)) => Arc::ptr_eq(x, y),
-                    (None, None) => true,
-                    _ => false,
-                }
-        }
-        (Content::Markdown(a), Content::Markdown(b)) => Arc::ptr_eq(a, b),
-        (Content::Image { image: a, natural: x }, Content::Image { image: b, natural: y }) => {
-            Arc::ptr_eq(a, b) && x == y
-        }
-        (Content::TooLarge(a), Content::TooLarge(b)) => a == b,
-        (Content::Unsupported { size: a }, Content::Unsupported { size: b }) => a == b,
-        (Content::Failed(a), Content::Failed(b)) => a == b,
-        (Content::Html, Content::Html)
-        | (Content::Loading, Content::Loading)
-        | (Content::Missing, Content::Missing)
-        | (Content::NoFiles, Content::NoFiles) => true,
-        (
-            Content::Text { .. }
-            | Content::Markdown(_)
-            | Content::Image { .. }
-            | Content::TooLarge(_)
-            | Content::Unsupported { .. }
-            | Content::Failed(_)
-            | Content::Html
-            | Content::Loading
-            | Content::Missing
-            | Content::NoFiles,
-            _,
-        ) => false,
-    }
 }
 
 /// How a file's bytes are parsed on the background executor.
@@ -283,24 +248,57 @@ fn needs_refill(decoded: bool, parsing: bool, shown: Option<&Shown>) -> bool {
     !decoded && !parsing && shown.is_some()
 }
 
-/// The decoded files to drop: those no preview lists, those whose bytes the cache no longer holds, and the images that
-/// are not the active file of some preview (GPUI keeps a full bitmap and an atlas tile for each decoded image; one is
-/// decoded again from the cached bytes when its tab is shown).
+/// The decoded files to drop: those no preview lists (and no document shows as an `in_view` image), those whose bytes
+/// the cache no longer holds, and the images that are neither the active file of some preview nor in view in a
+/// document (GPUI keeps a full bitmap and an atlas tile for each decoded image; one is decoded again from the cached
+/// bytes when its tab is shown or it scrolls back).
 fn stale_decoded(
     decoded: &HashMap<FileKey, Content>,
     listed: &HashSet<FileKey>,
     active: &HashSet<FileKey>,
+    in_view: &HashSet<FileKey>,
     cached: impl Fn(&FileKey) -> bool,
 ) -> Vec<FileKey> {
     decoded
         .iter()
         .filter(|(key, content)| {
-            !listed.contains(*key)
+            let shown = in_view.contains(*key);
+            !(listed.contains(*key) || shown)
                 || !cached(key)
-                || (matches!(content, Content::Image { .. }) && !active.contains(*key))
+                || (matches!(content, Content::Image { .. }) && !active.contains(*key) && !shown)
         })
         .map(|(key, _)| key.clone())
         .collect()
+}
+
+/// The files to read for a document's in-view image paths: the ones whose type is an image, at most
+/// `MAX_IMAGES_IN_VIEW`, on `host`.
+fn doc_image_keys(host: &HostId, paths: &[PathBuf]) -> Vec<FileKey> {
+    paths
+        .iter()
+        .filter(|path| matches!(kind_of(path), FileKind::Image(_)))
+        .take(MAX_IMAGES_IN_VIEW)
+        .map(|path| FileKey { host: host.clone(), path: path.clone() })
+        .collect()
+}
+
+/// What following a markdown link does.
+#[derive(Debug, PartialEq)]
+enum LinkAction<'a> {
+    /// Open the address in the browser.
+    Browser(&'a str),
+    /// Show the file as a linked tab.
+    Tab(&'a Path),
+}
+
+/// What a click on `target` does at the workspace: only a web address goes to the browser and only a file path opens a
+/// tab; an anchor is the view's own and anything inert does nothing.
+fn link_action(target: &LinkTarget) -> Option<LinkAction<'_>> {
+    match target {
+        LinkTarget::Web(url) => Some(LinkAction::Browser(url)),
+        LinkTarget::File(path) => Some(LinkAction::Tab(path)),
+        LinkTarget::Anchor(_) | LinkTarget::Inert(_) => None,
+    }
 }
 
 /// The images among `contents`, which GPUI holds a decoded bitmap and an atlas tile for until released.
@@ -335,17 +333,36 @@ impl WorkspaceView {
         }
         let Some(tab) = self.workspace.active_tab().filter(|tab| !tab.settings) else { return Vec::new() };
         let sessions = self.sidebar.read(cx).sessions();
-        tab.root
-            .leaves()
-            .into_iter()
-            .filter(|leaf| self.previews.contains_key(leaf))
-            .filter_map(|leaf| {
-                let host = &self.workspace.leaves.get(&leaf)?.host;
-                self.client(host)?;
-                let file = self.workspace.preview_active(leaf, sessions)?;
-                is_read(kind_of(&file.path)).then(|| FileKey { host: host.clone(), path: file.path.clone() })
-            })
-            .collect()
+        let mut wanted = Vec::new();
+        for leaf in tab.root.leaves().into_iter().filter(|leaf| self.previews.contains_key(leaf)) {
+            let Some(host) = self.workspace.leaves.get(&leaf).map(|entry| &entry.host) else { continue };
+            if self.client(host).is_none() {
+                continue;
+            }
+            let Some(file) = self.workspace.preview_active(leaf, sessions) else { continue };
+            if is_read(kind_of(&file.path)) {
+                wanted.push(FileKey { host: host.clone(), path: file.path.clone() });
+            }
+        }
+        // The images of the document rows in view are read too (on the pane's host), and nothing else.
+        wanted.extend(self.doc_images(cx).into_iter().filter(|key| self.client(&key.host).is_some()));
+        wanted
+    }
+
+    /// The image files of the markdown documents in the visible tab's previews, in view as last reported: at most
+    /// `MAX_IMAGES_IN_VIEW` per pane.
+    fn doc_images(&self, cx: &App) -> Vec<FileKey> {
+        let Some(tab) = self.workspace.active_tab().filter(|tab| !tab.settings) else { return Vec::new() };
+        let mut out = Vec::new();
+        for leaf in tab.root.leaves() {
+            let Some(slot) = self.previews.get(&leaf) else { continue };
+            let Some(host) = self.workspace.leaves.get(&leaf).map(|entry| entry.host.clone()) else { continue };
+            let view = slot.view.read(cx);
+            if matches!(view.model().content, Content::Markdown(_)) {
+                out.extend(doc_image_keys(&host, view.images_in_view()));
+            }
+        }
+        out
     }
 
     fn send_read(&self, key: &FileKey, request: u64, known: Option<u64>) {
@@ -461,6 +478,7 @@ impl WorkspaceView {
             .keys()
             .filter_map(|leaf| self.active_file(*leaf, cx))
             .map(|(key, _)| key)
+            .chain(self.doc_images(cx))
             .filter(|key| is_read(kind_of(&key.path)))
             .filter(|key| {
                 needs_refill(self.decoded.contains_key(key), self.parsing.contains_key(key), self.reads.shown(key))
@@ -535,7 +553,8 @@ impl WorkspaceView {
         let wanted = |key: &FileKey| listed.contains(key) && self.reads.shown(key).is_some();
         self.parsing.retain(|key, _| wanted(key));
         self.parse_queued.retain(|key, _| wanted(key));
-        let gone = stale_decoded(&self.decoded, &listed, &active, |key| self.reads.shown(key).is_some());
+        let in_view: HashSet<FileKey> = self.doc_images(cx).into_iter().collect();
+        let gone = stale_decoded(&self.decoded, &listed, &active, &in_view, |key| self.reads.shown(key).is_some());
         gone.iter().filter_map(|key| self.decoded.remove(key)).collect()
     }
 
@@ -732,6 +751,15 @@ impl WorkspaceView {
             }
             _ => Content::NoFiles,
         };
+        let images = match (&host, &content) {
+            (Some(host), Content::Markdown(_)) => self
+                .doc_images(cx)
+                .into_iter()
+                .filter(|key| &key.host == host)
+                .filter_map(|key| Some((key.path.clone(), self.decoded.get(&key)?.clone())))
+                .collect(),
+            _ => HashMap::new(),
+        };
         let can_open = match (&host, file) {
             (Some(host), Some(file)) => {
                 // Only a local file of a never-read type needs a look at the disk; the others know from their read.
@@ -747,6 +775,7 @@ impl WorkspaceView {
             tabs,
             active,
             content,
+            images,
             host_card: self.workspace.leaves.get(&leaf).and_then(|entry| self.host_card(&entry.host)),
             can_open,
         }
@@ -830,6 +859,26 @@ impl WorkspaceView {
         }
     }
 
+    /// Follow a click on a link of preview `leaf`'s markdown document: a web address opens in the browser and a file
+    /// path as a linked tab (read at once); anything else is the view's own or does nothing.
+    fn follow_link(&mut self, leaf: NodeId, target: &LinkTarget, window: &mut Window, cx: &mut Context<Self>) {
+        match link_action(target) {
+            Some(LinkAction::Browser(url)) => cx.open_url(url),
+            Some(LinkAction::Tab(path)) => {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64);
+                if self.workspace.open_link(leaf, path, now_ms, self.sidebar.read(cx).sessions()).is_some() {
+                    self.save(cx);
+                    self.push_preview_models(cx);
+                    self.previews_in_view(window, cx);
+                    cx.defer_in(window, |this, window, cx| this.flush_releases(window, cx));
+                }
+            }
+            None => {}
+        }
+    }
+
     /// Something happened in preview pane `leaf`.
     fn on_preview_event(&mut self, leaf: NodeId, event: &PreviewEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
@@ -854,8 +903,12 @@ impl WorkspaceView {
                 self.open_preview_menu(hidden_tabs_menu(leaf, &files), *position, window, cx);
             }
             PreviewEvent::OpenExternal => self.open_in_system_viewer(leaf, cx),
-            // Opening links is wired in a later task.
-            PreviewEvent::Link(_) => {}
+            PreviewEvent::Link(target) => self.follow_link(leaf, target, window, cx),
+            PreviewEvent::ImagesInView => {
+                self.ask_previews(window, cx);
+                self.push_preview_models(cx);
+                cx.defer_in(window, |this, window, cx| this.flush_releases(window, cx));
+            }
         }
     }
 }
@@ -927,6 +980,7 @@ mod tests {
             }],
             active: Some("a".into()),
             content: Content::Loading,
+            images: HashMap::new(),
             host_card: None,
             can_open: false,
         }
@@ -1182,7 +1236,8 @@ mod tests {
         let listed: HashSet<FileKey> =
             ["/shown.png", "/other.png", "/other.md", "/evicted.png"].into_iter().map(key).collect();
         let active: HashSet<FileKey> = [key("/shown.png"), key("/evicted.png")].into();
-        let mut gone = stale_decoded(&decoded, &listed, &active, |key| key != &self::key("/evicted.png"));
+        let in_view = HashSet::new();
+        let mut gone = stale_decoded(&decoded, &listed, &active, &in_view, |key| key != &self::key("/evicted.png"));
         gone.sort_by(|a, b| a.path.cmp(&b.path));
         // The inactive image, the unlisted one and the one whose bytes left the cache; the text stays.
         assert_eq!(gone, [key("/evicted.png"), key("/other.png"), key("/unlisted.png")]);
@@ -1212,5 +1267,58 @@ mod tests {
         assert!(!same_model(&changed, &other));
         other.content = a;
         assert!(same_model(&changed, &other));
+    }
+
+    #[test]
+    fn in_view_images_are_kept_and_others_released() {
+        let decoded: HashMap<FileKey, Content> = [
+            (key("/doc.md"), Content::NoFiles),
+            (key("/in.png"), image()),
+            (key("/out.png"), image()),
+            (key("/in-missing.png"), Content::Missing),
+            (key("/gone.png"), image()),
+        ]
+        .into();
+        let listed: HashSet<FileKey> = [key("/doc.md")].into();
+        let active: HashSet<FileKey> = [key("/doc.md")].into();
+        let in_view: HashSet<FileKey> = [key("/in.png"), key("/in-missing.png"), key("/gone.png")].into();
+        let mut gone = stale_decoded(&decoded, &listed, &active, &in_view, |key| key != &self::key("/gone.png"));
+        gone.sort_by(|a, b| a.path.cmp(&b.path));
+        // Listed by no tab, yet kept while in view; the one out of view and the one whose bytes left the cache go.
+        assert_eq!(gone, [key("/gone.png"), key("/out.png")]);
+    }
+
+    #[test]
+    fn only_image_paths_are_wanted() {
+        let paths: Vec<PathBuf> = ["/a.png", "/notes.txt", "/b.svg", "/c.md"].iter().map(PathBuf::from).collect();
+        assert_eq!(doc_image_keys(&HostId::local(), &paths), [key("/a.png"), key("/b.svg")]);
+        let many: Vec<PathBuf> = (0..20).map(|n| PathBuf::from(format!("/{n}.png"))).collect();
+        assert_eq!(doc_image_keys(&HostId::local(), &many).len(), crate::preview_view::MAX_IMAGES_IN_VIEW);
+    }
+
+    #[test]
+    fn models_differ_when_an_image_arrives() {
+        let mut changed = model();
+        changed.images.insert(PathBuf::from("/a.png"), image());
+        assert!(!same_model(&model(), &changed));
+        let mut other = model();
+        other.images.insert(PathBuf::from("/a.png"), image());
+        // A different decode of the same file is a different image.
+        assert!(!same_model(&changed, &other));
+        other.images = changed.images.clone();
+        assert!(same_model(&changed, &other));
+        other.images.insert(PathBuf::from("/b.png"), Content::Missing);
+        assert!(!same_model(&changed, &other));
+    }
+
+    #[test]
+    fn only_a_web_link_opens_the_browser_and_only_a_file_link_a_tab() {
+        use preview_doc::markdown::LinkTarget;
+        let web = LinkTarget::Web("https://example.com".into());
+        let file = LinkTarget::File(PathBuf::from("/r/x.md"));
+        assert_eq!(link_action(&web), Some(LinkAction::Browser("https://example.com")));
+        assert_eq!(link_action(&file), Some(LinkAction::Tab(Path::new("/r/x.md"))));
+        assert_eq!(link_action(&LinkTarget::Anchor("a".into())), None);
+        assert_eq!(link_action(&LinkTarget::Inert("javascript:x".into())), None);
     }
 }

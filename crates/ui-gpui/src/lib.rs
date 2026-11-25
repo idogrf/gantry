@@ -97,7 +97,7 @@ pub fn run(launch: Launch, resume_sessions: bool) {
         }
         theme::load_fonts(cx);
         let paths = Paths::for_profile(&current_profile());
-        if let Some(root) = preview_dir::root() {
+        if let Some(root) = preview_dir::root(&current_profile()) {
             preview_dir::clear(&root);
         }
         SettingsStore::init(paths.settings_file.clone(), cx);

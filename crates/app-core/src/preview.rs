@@ -6,7 +6,8 @@ use std::collections::{BTreeSet, HashSet};
 use std::ops::Range;
 use std::path::Path;
 
-/// Largest image the pane decodes, in pixels (all frames of a GIF or animated WebP together); a larger one shows "Too large to preview".
+/// Largest image the pane decodes, in pixels (all frames of a GIF or animated WebP together); a larger one shows
+/// "Too large to preview".
 pub const MAX_IMAGE_PIXELS: u64 = 50_000_000;
 /// Longest side an image may have, in pixels (a GPU texture limit); a larger one shows "Too large to preview".
 pub const MAX_IMAGE_SIDE: u32 = 16_384;

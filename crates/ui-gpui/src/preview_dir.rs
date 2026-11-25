@@ -7,21 +7,21 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Where the copies go: `<runtime dir>/gantry-preview` when the runtime dir is set, else `<cache dir>/preview` (the
-/// platform's per-user cache folder of Gantry); `None` when neither is known.
-fn choose(runtime: Option<&Path>, cache: Option<&Path>) -> Option<PathBuf> {
+/// Where the copies of `profile` go: `<runtime dir>/gantry-preview/<profile>` when the runtime dir is set, else
+/// `<cache dir>/preview/<profile>` (the platform's per-user cache folder of Gantry); `None` when neither is known.
+fn choose(runtime: Option<&Path>, cache: Option<&Path>, profile: &str) -> Option<PathBuf> {
     match (runtime.filter(|dir| !dir.as_os_str().is_empty()), cache) {
-        (Some(runtime), _) => Some(runtime.join("gantry-preview")),
-        (None, Some(cache)) => Some(cache.join("preview")),
+        (Some(runtime), _) => Some(runtime.join("gantry-preview").join(profile)),
+        (None, Some(cache)) => Some(cache.join("preview").join(profile)),
         (None, None) => None,
     }
 }
 
-/// The private folder for this user, from the environment.
-pub fn root() -> Option<PathBuf> {
+/// The private folder of `profile` for this user, from the environment.
+pub fn root(profile: &str) -> Option<PathBuf> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     let cache = directories::ProjectDirs::from("", "", "gantry").map(|dirs| dirs.cache_dir().to_path_buf());
-    choose(runtime.as_deref(), cache.as_deref())
+    choose(runtime.as_deref(), cache.as_deref(), profile)
 }
 
 /// Whether an existing `root` may be used: a real folder (not a symlink) that `me` owns and nobody else can enter.
@@ -33,7 +33,11 @@ fn trusted(is_dir: bool, is_symlink: bool, owner: u32, mode: u32, me: u32) -> bo
 /// Make sure `root` exists as a private folder (mode 0700 on Unix), or fail without touching what is there.
 fn prepare(root: &Path) -> io::Result<()> {
     if let Some(parent) = root.parent() {
-        std::fs::create_dir_all(parent)?;
+        let mut dir = std::fs::DirBuilder::new();
+        dir.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
+        dir.create(parent)?;
     }
     #[cfg(unix)]
     {
@@ -75,7 +79,7 @@ pub fn write_private(root: &Path, path: &Path, data: &[u8]) -> io::Result<()> {
     io::Write::write_all(&mut options.open(path)?, data)
 }
 
-/// Remove what an earlier run left in `root`, when it is a private folder of this user (anything else is left alone,
+/// Remove what an earlier run of this profile left in `root`, when it is a private folder of this user (anything else is left alone,
 /// and `write_private` will refuse it). Called once at start.
 pub fn clear(root: &Path) {
     if prepare(root).is_ok()
@@ -92,10 +96,35 @@ mod tests {
     #[test]
     fn the_runtime_dir_wins_then_the_cache_dir() {
         let (run, cache) = (Path::new("/run/user/1000"), Path::new("/home/u/.cache/gantry"));
-        assert_eq!(choose(Some(run), Some(cache)), Some(PathBuf::from("/run/user/1000/gantry-preview")));
-        assert_eq!(choose(None, Some(cache)), Some(PathBuf::from("/home/u/.cache/gantry/preview")));
-        assert_eq!(choose(Some(Path::new("")), Some(cache)), Some(PathBuf::from("/home/u/.cache/gantry/preview")));
-        assert_eq!(choose(None, None), None);
+        assert_eq!(choose(Some(run), Some(cache), "dev"), Some(PathBuf::from("/run/user/1000/gantry-preview/dev")));
+        assert_eq!(choose(None, Some(cache), "dev"), Some(PathBuf::from("/home/u/.cache/gantry/preview/dev")));
+        let empty = Some(Path::new(""));
+        assert_eq!(choose(empty, Some(cache), "dev"), Some(PathBuf::from("/home/u/.cache/gantry/preview/dev")));
+        assert_eq!(choose(None, None, "dev"), None);
+    }
+
+    #[test]
+    fn each_profile_has_its_own_folder() {
+        let (run, cache) = (Path::new("/run/user/1000"), Path::new("/home/u/.cache/gantry"));
+        assert_eq!(choose(Some(run), Some(cache), "dev"), Some(PathBuf::from("/run/user/1000/gantry-preview/dev")));
+        assert_eq!(
+            choose(Some(run), Some(cache), "default"),
+            Some(PathBuf::from("/run/user/1000/gantry-preview/default"))
+        );
+        assert_eq!(choose(None, Some(cache), "dev"), Some(PathBuf::from("/home/u/.cache/gantry/preview/dev")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clearing_one_profile_leaves_the_other() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("gantry-preview");
+        let (dev, default) = (base.join("dev"), base.join("default"));
+        write_private(&dev, &dev.join("a"), b"x").unwrap();
+        write_private(&default, &default.join("b"), b"x").unwrap();
+        clear(&dev);
+        assert!(!dev.exists());
+        assert!(default.join("b").exists());
     }
 
     // The owner and mode checks are Unix concepts.

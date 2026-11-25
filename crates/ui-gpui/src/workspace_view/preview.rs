@@ -385,7 +385,7 @@ impl WorkspaceView {
 
     /// Write a remote file's bytes to a temporary copy and open that in the system viewer.
     fn open_copy(key: &FileKey, id: &str, data: &[u8], cx: &mut Context<Self>) {
-        let Some(root) = crate::preview_dir::root() else {
+        let Some(root) = crate::preview_dir::root(&daemon::paths::current_profile()) else {
             tracing::warn!("no private folder for the preview copy");
             return;
         };
@@ -430,6 +430,7 @@ impl WorkspaceView {
         self.mark_previews_seen(window, cx);
         self.push_preview_models(cx);
         self.ask_previews(window, cx);
+        cx.defer_in(window, |this, window, cx| this.flush_releases(window, cx));
     }
 
     /// Hide file `id` from preview `leaf`'s list.
@@ -438,6 +439,7 @@ impl WorkspaceView {
         self.save(cx);
         self.previews_in_view(window, cx);
         self.push_preview_models(cx);
+        cx.defer_in(window, |this, window, cx| this.flush_releases(window, cx));
     }
 
     /// Hide every file of preview `leaf`'s session.
@@ -446,6 +448,7 @@ impl WorkspaceView {
         self.save(cx);
         self.previews_in_view(window, cx);
         self.push_preview_models(cx);
+        cx.defer_in(window, |this, window, cx| this.flush_releases(window, cx));
     }
 
     /// The parsed text of file `id` of preview `leaf`, when it is decoded as text.

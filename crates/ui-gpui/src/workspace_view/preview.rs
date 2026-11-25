@@ -152,11 +152,17 @@ fn temp_copy_path(root: &Path, host: &str, id: &str, name: &str) -> PathBuf {
         .join(safe_part(name, "file"))
 }
 
-/// Whether Open in system viewer works for the shown file. A local file always opens (unless gone); a remote one needs
+/// Whether the file is known to be gone. A local file of a type the pane never reads (`Unsupported`, `Html`) is never
+/// reported `Missing`, so `exists` (a look at the disk, passed in to keep this pure) says it.
+fn gone(local: bool, exists: bool, content: &Content) -> bool {
+    matches!(content, Content::Missing) || (local && !exists)
+}
+
+/// Whether Open in system viewer works for the shown file. A local file opens unless it is gone; a remote one needs
 /// its host and is read once for it, which the daemon refuses above its cap (`TooLarge(Some)`); an image over the
 /// pixel cap (`TooLarge(None)`) is small enough to send and the viewer is the way to see it.
-fn can_open(local: bool, connected: bool, content: &Content) -> bool {
-    !matches!(content, Content::Missing) && (local || (connected && !matches!(content, Content::TooLarge(Some(_)))))
+fn can_open(local: bool, connected: bool, exists: bool, content: &Content) -> bool {
+    !gone(local, exists, content) && (local || (connected && !matches!(content, Content::TooLarge(Some(_)))))
 }
 
 /// Whether a file's decoded content must be made again from the byte cache: nothing decoded, but the cache holds it.
@@ -551,7 +557,13 @@ impl WorkspaceView {
             _ => Content::NoFiles,
         };
         let can_open = match (&host, file) {
-            (Some(host), Some(_)) => can_open(host.is_local(), self.client(host).is_some(), &content),
+            (Some(host), Some(file)) => {
+                // Only a local file of a never-read type needs a look at the disk; the others know from their read.
+                let exists = !host.is_local()
+                    || !matches!(content, Content::Unsupported { .. } | Content::Html)
+                    || file.path.exists();
+                can_open(host.is_local(), self.client(host).is_some(), exists, &content)
+            }
             _ => false,
         };
         PreviewModel {
@@ -811,14 +823,24 @@ mod tests {
     #[test]
     fn open_in_system_viewer_is_blocked_only_where_it_cannot_work() {
         let text = Content::NoFiles;
-        assert!(can_open(true, false, &text));
-        assert!(!can_open(true, false, &Content::Missing));
-        assert!(can_open(true, false, &Content::TooLarge(Some(9))));
-        assert!(!can_open(false, false, &text));
-        assert!(can_open(false, true, &text));
-        assert!(!can_open(false, true, &Content::TooLarge(Some(9))));
-        assert!(can_open(false, true, &Content::TooLarge(None)));
-        assert!(!can_open(false, true, &Content::Missing));
+        assert!(can_open(true, false, true, &text));
+        assert!(!can_open(true, false, true, &Content::Missing));
+        assert!(can_open(true, false, true, &Content::TooLarge(Some(9))));
+        assert!(!can_open(false, false, true, &text));
+        assert!(can_open(false, true, true, &text));
+        assert!(!can_open(false, true, true, &Content::TooLarge(Some(9))));
+        assert!(can_open(false, true, true, &Content::TooLarge(None)));
+        assert!(!can_open(false, true, true, &Content::Missing));
+    }
+
+    #[test]
+    fn a_deleted_local_file_of_a_never_read_type_cannot_open() {
+        let pdf = Content::Unsupported { size: None };
+        assert!(can_open(true, false, true, &pdf));
+        assert!(!can_open(true, false, false, &pdf));
+        assert!(!can_open(true, false, false, &Content::Html));
+        // A remote file's existence is not looked up on this disk.
+        assert!(can_open(false, true, false, &pdf));
     }
 
     fn key(path: &str) -> FileKey {

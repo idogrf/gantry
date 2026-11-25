@@ -26,7 +26,16 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         for event in events {
+            // By value: a file's bytes can be 25 MB, so they are moved to the cache, never cloned.
+            let event = match event {
+                ClientEvent::FileContents { request, body } => {
+                    self.on_file_contents(host, request, body, window, cx);
+                    continue;
+                }
+                event => event,
+            };
             match &event {
+                ClientEvent::FileContents { .. } => {} // taken above
                 ClientEvent::Output { pane, .. }
                 | ClientEvent::Resync { pane, .. }
                 | ClientEvent::PasteImageSaved { pane, .. }
@@ -156,9 +165,6 @@ impl WorkspaceView {
                         let reason = reason.clone();
                         view.update(cx, |view, cx| view.set_listing_failed(*request, reason, cx));
                     }
-                }
-                ClientEvent::FileContents { request, body } => {
-                    self.on_file_contents(host, *request, body.clone(), window, cx)
                 }
                 ClientEvent::GitStatus { request, state } => {
                     if self.git.apply(host, *request, Ok(state.clone()), Instant::now()) {

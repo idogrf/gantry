@@ -111,7 +111,17 @@ impl Reads {
         entry.in_flight = None;
         let new = match body {
             FileBody::Unchanged => return None,
-            FileBody::Bytes { data, mtime_ms } => Shown::Bytes { data: data.into(), mtime_ms },
+            FileBody::Bytes { data, mtime_ms } => {
+                // The cheap fields first; the bytes themselves only when those match. Nothing changed: no copy.
+                if let Some(Shown::Bytes { data: old, mtime_ms: old_mtime }) = &entry.shown
+                    && *old_mtime == mtime_ms
+                    && old.len() == data.len()
+                    && **old == data[..]
+                {
+                    return None;
+                }
+                Shown::Bytes { data: data.into(), mtime_ms }
+            }
             FileBody::Missing => Shown::Missing,
             FileBody::TooLarge { size } => Shown::TooLarge { size },
             FileBody::Failed { reason } => Shown::Failed { reason },
@@ -356,6 +366,25 @@ mod tests {
         assert_eq!(reads.shown(&k), None);
         assert!(reads.in_flight(&k));
         assert!(reads.request_now(&k, t0 + LOST_AFTER * 2).is_some());
+    }
+
+    #[test]
+    fn a_reply_with_the_same_bytes_changes_nothing() {
+        let mut reads = Reads::default();
+        let k = lkey("/a.md");
+        let reply = |reads: &mut Reads, body| {
+            let id = reads.request_now(&k, Instant::now()).unwrap().0;
+            reads.apply(&local(), id, body)
+        };
+        assert_eq!(reply(&mut reads, bytes(3, 1)), Some(k.clone()));
+        let shown = reads.shown(&k).cloned();
+        assert_eq!(reply(&mut reads, bytes(3, 1)), None);
+        assert_eq!(reads.shown(&k), shown.as_ref());
+        // A new mtime, a new length, or the same length with other bytes is a change.
+        assert_eq!(reply(&mut reads, bytes(3, 2)), Some(k.clone()));
+        assert_eq!(reply(&mut reads, bytes(4, 2)), Some(k.clone()));
+        let other = FileBody::Bytes { data: vec![8; 4], mtime_ms: 2 };
+        assert_eq!(reply(&mut reads, other), Some(k.clone()));
     }
 
     #[test]

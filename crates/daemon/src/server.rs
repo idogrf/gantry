@@ -15,8 +15,8 @@ use claude_index::index::{IndexState, SessionRecord};
 use interprocess::local_socket::tokio::{Listener, Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
 use protocol::message::{
-    ClientMessage, ContainerChoice, DaemonMessage, ImageFormat, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo,
-    SpawnRequest, TakeOverOutcome, claude_session,
+    ClientMessage, ContainerChoice, DaemonMessage, ImageFormat, PROTOCOL_VERSION, PaneId, PaneInfo, SentFile,
+    SessionInfo, SpawnRequest, TakeOverOutcome, claude_session,
 };
 use tokio::sync::Notify;
 
@@ -27,6 +27,7 @@ use crate::preview_plugin;
 use crate::process_tree;
 use crate::pty::{PtyProcess, SpawnSpec, drain_batch, spawn_output_reader};
 use crate::search::{Search, SearchEvent};
+use crate::sent_files::{self, SentFilesWatch};
 use crate::sessions::{ContainerView, Gone, PaneSession, diff, merge_records, resolve, spawn_indexer, still_claimed};
 use crate::take_over::{self, FORCE_WAIT, GRACE};
 
@@ -83,7 +84,6 @@ struct Pane {
     /// The user it runs as in that container (`docker exec -u`).
     container_user: Option<String>,
     /// Whether it was started with the preview plugin flags.
-    #[allow(dead_code)] // read by the preview pane wiring that follows
     preview: bool,
     last_focused: u64,
     needs_resync: bool,
@@ -121,6 +121,10 @@ struct State {
     sent: Vec<SessionInfo>,
     /// Processes seen exiting that the index still lists as running.
     gone: Vec<Gone>,
+    /// The files each session sent to the preview, from its transcript, until it leaves the session list.
+    sent_files: HashMap<String, Vec<SentFile>>,
+    /// The sessions the GUI asked to watch (its latest `WatchSentFiles`).
+    watch_requested: HashSet<String>,
     /// This daemon's instance id (the prefix of its panes' `GANTRY_PANE` markers).
     instance: String,
     /// Dev containers.
@@ -243,7 +247,8 @@ impl State {
             dir_exists: &|dir: &Path| dir.is_dir(),
             checks_processes: cfg!(target_os = "linux"),
         };
-        let sessions = resolve(&records, &panes, &self.gone, &view);
+        let sessions = resolve(&records, &panes, &self.gone, &view, &self.sent_files);
+        self.sent_files.retain(|id, _| sessions.iter().any(|session| &session.id == id));
         if full {
             self.control(&DaemonMessage::Sessions { sessions: sessions.clone() });
         } else {
@@ -432,6 +437,7 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
             }
         })
     };
+    let sent_files_task = tokio::spawn(watch_sent_files(shared.clone()));
     let search_task = {
         let shared = shared.clone();
         tokio::spawn(async move {
@@ -457,6 +463,7 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
     idle.abort();
     ticker.abort();
     search_task.abort();
+    sent_files_task.abort();
     for task in shared.lock().indexers.values() {
         task.abort();
     }
@@ -772,7 +779,10 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
         }
         ClientMessage::ListDir { request, path } => list_dir_request(shared, request, path),
         ClientMessage::SavePasteImage { pane, format, data } => paste_image_request(shared, pane, format, data),
-        ClientMessage::WatchSentFiles { .. } | ClientMessage::ReadFile { .. } => {}
+        ClientMessage::WatchSentFiles { sessions } => {
+            shared.lock().watch_requested = sessions.into_iter().collect();
+        }
+        ClientMessage::ReadFile { .. } => {}
         ClientMessage::GitStatus { request, folder, known_head } => {
             git_status_request(shared, request, folder, known_head)
         }
@@ -794,6 +804,43 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
             if let Some(p) = state.panes.get_mut(&pane) {
                 let _ = p.pty.kill();
             }
+        }
+    }
+}
+
+/// Every second, read the transcripts of the watched sessions (see `sent_files::watched`) off the async threads and
+/// publish the lists that changed. Does nothing while nothing is watched.
+async fn watch_sent_files(shared: Arc<Shared>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut watch = SentFilesWatch::default();
+    loop {
+        interval.tick().await;
+        let (ids, dirs) = {
+            let state = shared.lock();
+            let preview_panes: HashSet<PaneId> =
+                state.panes.iter().filter(|(_, pane)| pane.preview).map(|(id, _)| *id).collect();
+            let ids = sent_files::watched(&state.sent, &preview_panes, &state.watch_requested);
+            (ids, state.indexers.keys().cloned().collect::<Vec<PathBuf>>())
+        };
+        if ids.is_empty() {
+            watch = SentFilesWatch::default();
+            continue;
+        }
+        let read = tokio::task::spawn_blocking(move || {
+            let changes = watch.tick(&ids, &dirs);
+            (watch, changes)
+        })
+        .await;
+        let Ok((back, changes)) = read else {
+            watch = SentFilesWatch::default();
+            continue;
+        };
+        watch = back;
+        if !changes.is_empty() {
+            let mut state = shared.lock();
+            state.sent_files.extend(changes);
+            state.publish_sessions(false);
         }
     }
 }

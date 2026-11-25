@@ -367,6 +367,12 @@ impl DaemonClient {
         self.send(&ClientMessage::SetClaudeDirs { dirs });
     }
 
+    /// Ask the daemon to watch these sessions' transcripts for files sent to the preview, replacing the earlier list;
+    /// the files arrive in `SessionInfo.sent_files`.
+    pub fn watch_sent_files(&self, sessions: &[String]) {
+        self.send(&ClientMessage::WatchSentFiles { sessions: sessions.to_vec() });
+    }
+
     /// Mark the pane as most recently focused.
     pub fn focus(&self, pane: PaneId) {
         self.send(&ClientMessage::Focus { pane });

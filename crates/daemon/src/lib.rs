@@ -16,6 +16,7 @@ pub mod process_tree;
 pub mod pty;
 pub mod remote_install;
 pub mod search;
+pub mod sent_files;
 pub mod server;
 pub mod sessions;
 pub mod shell_env;

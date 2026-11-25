@@ -118,6 +118,35 @@ fn new_transcripts_arrive_as_changes() {
     wait_for(&s.conn, "s2", |s| s.title == "second");
 }
 
+/// Transcript lines for one `show_in_preview` call and its result.
+fn sent_lines(id: &str, path: &str) -> String {
+    let call = serde_json::json!({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": id, "name": claude_index::sent_files::TOOL_NAME,
+         "input": {"files": [{"path": path}]}}]}});
+    let result = serde_json::json!({"type": "user", "timestamp": "2026-11-25T10:00:00.250Z", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": id,
+         "content": [{"type": "text", "text": format!("Shown in preview:\n- {path}")}]}]}});
+    format!("{call}\n{result}\n")
+}
+
+#[test]
+fn requested_session_reports_its_sent_files() {
+    use std::io::Write;
+    let s = start(|config, work| transcript(config, "s1", work, "hello"));
+    let file = s.config.join("projects/-work/s1.jsonl");
+    let append = |data: String| {
+        let mut file = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        file.write_all(data.as_bytes()).unwrap();
+    };
+    append(sent_lines("toolu_1", "/w/a.md"));
+    wait_for(&s.conn, "s1", |_| true);
+    s.conn.client.watch_sent_files(&["s1".to_string()]);
+    let found = wait_for(&s.conn, "s1", |info| info.sent_files.len() == 1);
+    assert_eq!(found.sent_files[0].path, Path::new("/w/a.md"));
+    append(sent_lines("toolu_2", "/w/b.md"));
+    wait_for(&s.conn, "s1", |info| info.sent_files.len() == 2);
+}
+
 #[test]
 fn a_pane_whose_process_wrote_a_pid_file_is_managed() {
     let s = start(|config, work| transcript(config, "s1", work, "first"));

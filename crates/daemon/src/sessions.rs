@@ -9,7 +9,7 @@ use std::time::Duration;
 use claude_index::host::LocalHost;
 use claude_index::index::{Index, IndexState, SessionRecord};
 use claude_index::live::Activity;
-use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus};
+use protocol::message::{PaneId, SentFile, SessionInfo, SessionState, SessionStatus};
 
 use crate::containers::Registry;
 
@@ -67,6 +67,7 @@ pub fn resolve(
     panes: &[PaneSession],
     gone: &[Gone],
     view: &ContainerView,
+    sent: &HashMap<String, Vec<SentFile>>,
 ) -> Vec<SessionInfo> {
     let index_state = |r: &SessionRecord| match r.state {
         IndexState::Running { pid } if gone.iter().any(|g| g.pid == pid && g.start == r.proc_start) => {
@@ -119,7 +120,7 @@ pub fn resolve(
                 container: placed.map(|(place, _)| place),
                 claude_dir: r.claude_dir.clone(),
                 last_prompt: r.last_prompt.clone(),
-                sent_files: Vec::new(),
+                sent_files: sent.get(&r.id).cloned().unwrap_or_default(),
                 host: protocol::host::HostId::local(),
             }
         })
@@ -216,6 +217,7 @@ mod tests {
                 dir_exists: &|_| true,
                 checks_processes: true,
             },
+            &HashMap::new(),
         )
     }
 
@@ -326,7 +328,7 @@ mod tests {
             checks_processes: false,
         };
         assert_eq!(
-            states(&resolve(&records, &panes, &[], &view)),
+            states(&resolve(&records, &panes, &[], &view, &HashMap::new())),
             vec![("outside", SessionState::Closed), ("mine", SessionState::Managed { pane: 1 })]
         );
     }
@@ -342,7 +344,7 @@ mod tests {
             dir_exists: &|_| true,
             checks_processes,
         };
-        resolve(records, panes, &[], &view)
+        resolve(records, panes, &[], &view, &HashMap::new())
     }
 
     #[test]
@@ -437,7 +439,7 @@ mod tests {
             checks_processes: true,
         };
         // Pane 4 was started as `launched`, then `/clear`ed into `boxed`: the launch session is closed.
-        let sessions = resolve(&records, &[pane(4, 100, Some("launched"))], &[], &view);
+        let sessions = resolve(&records, &[pane(4, 100, Some("launched"))], &[], &view, &HashMap::new());
         assert_eq!(
             states(&sessions),
             vec![
@@ -486,6 +488,7 @@ mod tests {
                 dir_exists: &exists,
                 checks_processes: true,
             },
+            &HashMap::new(),
         )
         .remove(0);
         assert_eq!((info.cwd.as_path(), info.cwd_exists), (std::path::Path::new("/home/u/app/src"), true));

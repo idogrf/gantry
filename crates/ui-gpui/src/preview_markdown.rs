@@ -658,11 +658,9 @@ fn room(doc: &MdDoc, ix: usize, viewport: f32, theme: &Theme) -> f32 {
 fn image_label(text: &str, color: u32, underline: bool, state: &RowState) -> AnyElement {
     let line = div().text_color(rgb(color)).when(underline, |d| d.underline());
     match state.rtl.then(|| display_line(text)).flatten() {
-        Some(order) => line
-            .flex()
-            .flex_wrap()
-            .children(order.into_iter().map(|(_, ch)| div().child(ch.to_string())))
-            .into_any_element(),
+        Some(order) => {
+            line.flex().children(order.into_iter().map(|(_, ch)| div().child(ch.to_string()))).into_any_element()
+        }
         None => line.whitespace_nowrap().overflow_hidden().child(text.to_string()).into_any_element(),
     }
 }
@@ -686,6 +684,7 @@ fn image_row(
     let body = match &item.src {
         ImageSrc::File(path) if !matches!(kind_of(path), FileKind::Image(_)) => note("Not an image"),
         ImageSrc::File(_) => match &state.image {
+            Some(Content::Image { .. }) if room(doc, ix, state.viewport, theme) <= 0.0 => alt_line(),
             Some(Content::Image { image, natural }) => {
                 let (width, height) = image_box(*natural, room(doc, ix, state.viewport, theme));
                 gpui::img(image.clone())
@@ -700,7 +699,8 @@ fn image_row(
             _ => alt_line(),
         },
         ImageSrc::Web(url) => {
-            open = Some(LinkTarget::Web(url.clone()));
+            // A surrounding link wins over the image's own address.
+            open = open.or_else(|| Some(LinkTarget::Web(url.clone())));
             let text = if item.alt.is_empty() { url.as_str() } else { alt };
             image_label(text, theme.tokens.accent, true, state)
         }

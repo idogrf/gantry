@@ -753,9 +753,11 @@ impl WorkspaceView {
         };
         let images = match (&host, &content) {
             (Some(host), Content::Markdown(_)) => self
-                .doc_images(cx)
+                .previews
+                .get(&leaf)
+                .map(|slot| doc_image_keys(host, slot.view.read(cx).images_in_view()))
+                .unwrap_or_default()
                 .into_iter()
-                .filter(|key| &key.host == host)
                 .filter_map(|key| Some((key.path.clone(), self.decoded.get(&key)?.clone())))
                 .collect(),
             _ => HashMap::new(),

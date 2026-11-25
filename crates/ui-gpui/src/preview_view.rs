@@ -358,6 +358,8 @@ pub(crate) struct PreviewView {
     md_look: Option<MdLook>,
     /// The image files of the rows laid out in the frame being drawn (cleared at its start).
     frame_images: Vec<PathBuf>,
+    /// The list's width in px the rows were drawn with (read in `render`, never inside a row closure).
+    md_width: f32,
     /// The image files of the rows drawn when `ImagesInView` was last sent.
     images_in_view: Vec<PathBuf>,
 }
@@ -411,6 +413,7 @@ impl PreviewView {
             md_lines: Rc::new(RefCell::new(HashMap::new())),
             md_look: None,
             frame_images: Vec::new(),
+            md_width: 0.0,
             images_in_view: Vec::new(),
         }
     }
@@ -547,7 +550,7 @@ impl PreviewView {
         };
         let state = RowState {
             image,
-            viewport: f32::from(self.md_list.viewport_bounds().size.width),
+            viewport: self.md_width,
             code_font: look.family.clone(),
             rtl: look.rtl,
             copied: self.copied.as_ref().map(|(block, _)| *block),
@@ -578,6 +581,10 @@ impl PreviewView {
 
     /// After the list laid out: tell the workspace when the images in view differ from the last report.
     fn sync_images(&mut self, cx: &mut Context<Self>) {
+        // The list lays out with the width it had before this frame: one more frame when it changed.
+        if f32::from(self.md_list.viewport_bounds().size.width) != self.md_width {
+            cx.notify();
+        }
         if self.frame_images != self.images_in_view {
             self.images_in_view = std::mem::take(&mut self.frame_images);
             cx.emit(PreviewEvent::ImagesInView);
@@ -1382,6 +1389,9 @@ impl Render for PreviewView {
         self.sync_zoom();
         self.sync_md(window, cx);
         self.frame_images.clear();
+        if matches!(self.model.content, Content::Markdown(_)) {
+            self.md_width = f32::from(self.md_list.viewport_bounds().size.width);
+        }
         let theme = theme(cx).clone();
         let active = self.model.active.clone();
         let host_card = self.model.host_card.clone();

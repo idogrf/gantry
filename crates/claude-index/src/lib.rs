@@ -8,5 +8,6 @@ pub mod host;
 pub mod index;
 pub mod live;
 pub mod search;
+pub mod sent_files;
 pub mod transcript;
 pub mod watch;

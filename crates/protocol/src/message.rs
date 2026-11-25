@@ -182,14 +182,17 @@ pub enum TakeOverOutcome {
 /// A file Claude sent to the preview with `show_in_preview`, read from the session's transcript.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SentFile {
-    /// `"<tool_use_id>:<index in the call>"`.
+    /// `"<tool_use_id>:<index in the accepted list>"`.
     pub id: String,
-    /// The file's path as Claude gave it.
+    /// The absolute path the preview server resolved and accepted (not as Claude gave it).
     pub path: PathBuf,
     /// When Claude sent it, ms since the Unix epoch.
     pub sent_ms: u64,
     /// Claude's caption, when it gave one.
     pub caption: Option<String>,
+    /// Found by the daemon's first read of this transcript, not sent since; the GUI raises no alert for it.
+    #[serde(default)]
+    pub backlog: bool,
 }
 
 /// One Claude session, from the daemon's index.

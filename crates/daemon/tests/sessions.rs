@@ -122,7 +122,7 @@ fn new_transcripts_arrive_as_changes() {
 fn sent_lines(id: &str, path: &str) -> String {
     let call = serde_json::json!({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "id": id, "name": claude_index::sent_files::TOOL_NAME,
-         "input": {"files": [{"path": path}]}}]}});
+         "input": {"paths": [path]}}]}});
     let result = serde_json::json!({"type": "user", "timestamp": "2026-11-25T10:00:00.250Z", "message": {"content": [
         {"type": "tool_result", "tool_use_id": id,
          "content": [{"type": "text", "text": format!("Shown in preview:\n- {path}")}]}]}});

@@ -1,12 +1,15 @@
 //! The `preview-mcp` tool server: a stdio MCP server giving Claude Code a `show_in_preview` tool.
 //!
 //! Newline-delimited JSON-RPC 2.0 on stdin/stdout. Stdout carries protocol messages only, so nothing here logs.
-//! The tool result text is read back out of the transcript, so its format is a contract: `Shown in preview:`, then
-//! lines `- <absolute path>`, then optionally `Rejected:` and its lines.
+//! The tool result text is read back out of the transcript, so its format is a contract: `Shown in preview:`
+//! (`claude_index::sent_files::SHOWN_HEADER`), then lines `- <absolute path>`, then optionally `Rejected:` and its
+//! lines. The format is frozen: an older daemon may read transcripts written by a newer `preview-mcp` after a
+//! reinstall.
 
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
+use claude_index::sent_files::SHOWN_HEADER;
 use serde_json::{Value, json};
 
 /// The one tool's description, as Claude sees it.
@@ -115,7 +118,7 @@ fn call(params: &Value, cwd: &Path, home: Option<&Path>) -> Value {
     let mut sections = Vec::new();
     if !shown.is_empty() {
         let lines: Vec<String> = shown.iter().map(|path| format!("- {}", path.display())).collect();
-        sections.push(format!("Shown in preview:\n{}", lines.join("\n")));
+        sections.push(format!("{SHOWN_HEADER}\n{}", lines.join("\n")));
     }
     if !rejected.is_empty() {
         sections.push(format!("Rejected:\n{}", rejected.join("\n")));

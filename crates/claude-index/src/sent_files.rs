@@ -15,25 +15,34 @@ pub const TOOL_NAME: &str = "mcp__plugin_gantry_preview__show_in_preview";
 /// How many sent files are kept per session: the newest.
 pub const KEPT: usize = 50;
 
-const SHOWN_HEADER: &str = "Shown in preview:";
+/// The first line of a `show_in_preview` result that shows files; `- <absolute path>` lines follow it.
+///
+/// The result text format is frozen: the daemon that reads a transcript can be older than the `preview-mcp` that
+/// wrote it (a reinstall replaces the binary while the old daemon keeps running), so a change must stay readable by
+/// every earlier reader.
+pub const SHOWN_HEADER: &str = "Shown in preview:";
 
 /// One file Claude sent to the preview pane.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SentFileRecord {
-    /// `<tool_use_id>:<index>`, the index being the file's place in the server's accepted list.
+    /// `<tool_use_id>:<index>`, the index being the file's place in the result's accepted list.
     pub id: String,
-    /// The path the server accepted.
+    /// The absolute path the server resolved and accepted (not as Claude gave it).
     pub path: PathBuf,
     /// When the result was written, in milliseconds since the Unix epoch.
     pub sent_ms: u64,
     /// The caption Claude gave the call, if any.
     pub caption: Option<String>,
+    /// Found by the reader's first read of this transcript, not sent since; stays set.
+    pub backlog: bool,
 }
 
 /// Reads sent files out of one transcript, keeping its place between calls.
 #[derive(Debug, Default)]
 pub struct SentFilesReader {
     offset: u64,
+    /// Whether a read has finished since the reader was made or reset: later finds are new, earlier ones backlog.
+    scanned: bool,
     /// Open calls (tool use id -> caption) waiting for their result.
     pending: HashMap<String, Option<String>>,
     files: Vec<SentFileRecord>,
@@ -53,6 +62,7 @@ impl SentFilesReader {
         let mut changed = false;
         if meta.len() < self.offset {
             self.offset = 0;
+            self.scanned = false;
             self.pending.clear();
             changed = !self.files.is_empty();
             self.files.clear();
@@ -73,9 +83,10 @@ impl SentFilesReader {
             }
             self.offset += read as u64;
             if let Ok(record) = serde_json::from_slice::<Value>(&line) {
-                changed |= self.apply(&record, mtime_ms);
+                changed |= self.apply(&record, mtime_ms, !self.scanned);
             }
         }
+        self.scanned = true;
         if self.files.len() > KEPT {
             self.files.drain(..self.files.len() - KEPT);
         }
@@ -88,7 +99,7 @@ impl SentFilesReader {
     }
 
     /// Applies one record; returns whether files were added.
-    fn apply(&mut self, record: &Value, mtime_ms: u64) -> bool {
+    fn apply(&mut self, record: &Value, mtime_ms: u64, backlog: bool) -> bool {
         let Some(blocks) = record.get("message").and_then(|m| m.get("content")).and_then(Value::as_array) else {
             return false;
         };
@@ -123,6 +134,7 @@ impl SentFilesReader {
                             path: PathBuf::from(path),
                             sent_ms,
                             caption: caption.clone(),
+                            backlog,
                         });
                         added = true;
                     }
@@ -237,6 +249,42 @@ mod tests {
         assert_eq!(files[1].path, PathBuf::from("/w/b.png"));
         assert_eq!(files[0].caption.as_deref(), Some("look"));
         assert_eq!(files[0].sent_ms, 1_795_600_800_250);
+    }
+
+    #[test]
+    fn files_of_the_first_read_are_backlog_and_later_ones_are_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let send =
+            |id: &str| call(id, TOOL_NAME, json!({})) + &result(id, text(&format!("{SHOWN_HEADER}\n- /w/a.md")), false);
+        append(&path, &send("toolu_1"));
+        let mut reader = SentFilesReader::new();
+        reader.read_new(&path).unwrap();
+        assert!(reader.files()[0].backlog);
+        append(&path, &send("toolu_2"));
+        reader.read_new(&path).unwrap();
+        assert!(reader.files()[0].backlog);
+        assert!(!reader.files()[1].backlog);
+        // A rewritten transcript is read from the start again: what it holds is backlog.
+        std::fs::write(&path, send("toolu_3")).unwrap();
+        reader.read_new(&path).unwrap();
+        assert_eq!(reader.files().len(), 1);
+        assert!(reader.files()[0].backlog);
+    }
+
+    #[test]
+    fn an_empty_first_read_does_not_make_later_sends_backlog() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        append(&path, "");
+        let mut reader = SentFilesReader::new();
+        reader.read_new(&path).unwrap();
+        append(
+            &path,
+            &(call("toolu_1", TOOL_NAME, json!({})) + &result("toolu_1", text("Shown in preview:\n- /w/a.md"), false)),
+        );
+        reader.read_new(&path).unwrap();
+        assert!(!reader.files()[0].backlog);
     }
 
     #[test]

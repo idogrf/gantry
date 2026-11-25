@@ -1,4 +1,5 @@
-//! The subcommands that run on a host without a window: `--version`, `daemon`, `bridge`, `preview-mcp` and `internal-print-env`.
+//! The subcommands that run on a host without a window: `--version`, `daemon`, `bridge`, `preview-mcp` and
+//! `internal-print-env`.
 //! Shared by `gantry` and the window-less `gantryd` that the SSH wizard installs on remote hosts.
 
 use std::process::ExitCode;

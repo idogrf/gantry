@@ -61,6 +61,9 @@ pub fn parse_version(output: &str) -> Option<(u32, u32, u32)> {
     })
 }
 
+/// How long `probe_version` keeps reading after the program exited.
+const EXIT_GRACE: Duration = Duration::from_millis(200);
+
 /// Run `<program> --version` with `env` as its whole environment and read the version it prints. `None` when it does
 /// not start, prints no version or has not finished after `timeout` (then it is killed).
 pub fn probe_version(program: &str, env: &[(String, String)], timeout: Duration) -> Option<(u32, u32, u32)> {
@@ -86,16 +89,25 @@ pub fn probe_version(program: &str, env: &[(String, String)], timeout: Duration)
     });
     let deadline = Instant::now() + timeout;
     let mut output = Vec::new();
+    // When the direct child was seen to have exited: its last write may still be in the channel or the reader thread.
+    let mut exited_at: Option<Instant> = None;
     let version = loop {
         match rx.recv_timeout(Duration::from_millis(20)) {
             Ok(chunk) => output.extend(chunk),
             Err(RecvTimeoutError::Disconnected) => break parse_version(&String::from_utf8_lossy(&output)),
-            // The program has exited and nothing more is coming: a leftover holder of the pipe is not waited for.
-            Err(RecvTimeoutError::Timeout) if matches!(child.try_wait(), Ok(Some(_))) => {
-                break parse_version(&String::from_utf8_lossy(&output));
+            Err(RecvTimeoutError::Timeout) => {
+                let now = Instant::now();
+                if exited_at.is_none() && matches!(child.try_wait(), Ok(Some(_))) {
+                    exited_at = Some(now);
+                }
+                // After the exit, a short grace for the reader; a leftover holder of the pipe is not waited for.
+                if exited_at.is_some_and(|at| now.duration_since(at) >= EXIT_GRACE) {
+                    break parse_version(&String::from_utf8_lossy(&output));
+                }
+                if now >= deadline {
+                    break exited_at.and_then(|_| parse_version(&String::from_utf8_lossy(&output)));
+                }
             }
-            Err(RecvTimeoutError::Timeout) if Instant::now() >= deadline => break None,
-            Err(RecvTimeoutError::Timeout) => {}
         }
     };
     let _ = child.kill();
@@ -176,7 +188,22 @@ mod tests {
         let env = vec![("PATH".to_string(), std::env::var("PATH").unwrap_or_default())];
         let version = probe_version(script.to_str().unwrap(), &env, Duration::from_secs(2));
         assert!(start.elapsed() < Duration::from_secs(3));
-        assert!(version.is_none() || version == Some((2, 1, 332)));
+        assert_eq!(version, Some((2, 1, 332)));
+    }
+
+    // Needs a shell script: a program that prints its version and exits at once.
+    #[cfg(unix)]
+    #[test]
+    fn probe_reads_the_output_of_a_program_that_exits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("claude");
+        std::fs::write(&script, "#!/bin/sh\nprintf '2.1.332 (Claude Code)'\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env = vec![("PATH".to_string(), std::env::var("PATH").unwrap_or_default())];
+        for _ in 0..20 {
+            assert_eq!(probe_version(script.to_str().unwrap(), &env, Duration::from_secs(2)), Some((2, 1, 332)));
+        }
     }
 
     // Needs a shell script to stand in for a program that hangs.

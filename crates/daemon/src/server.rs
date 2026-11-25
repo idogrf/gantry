@@ -150,7 +150,7 @@ struct State {
 }
 
 /// What a probe of `claude --version` found: `None` = no version.
-type ClaudeVersion = Option<(u32, u32, u32)>;
+type ClaudeVersion = Arc<tokio::sync::Mutex<Option<(u32, u32, u32)>>>;
 
 struct Shared {
     state: Mutex<State>,
@@ -171,7 +171,7 @@ struct Shared {
     paste_dir: Option<PathBuf>,
     /// The Claude Code plugin folder; `None` = no preview flags.
     plugin_dir: Option<PathBuf>,
-    /// The version each Claude program printed for `--version`, by program (a failed probe is kept as `None`).
+    /// The version each Claude program printed for `--version`, by program (only a version is kept; each program's slot is locked while its first probe runs).
     claude_versions: Mutex<HashMap<String, ClaudeVersion>>,
 }
 
@@ -940,25 +940,31 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
 }
 
 /// The version `spec.program` reports, from the cache or by running it (off the async threads) with the pane's
-/// environment. A failed probe is cached too.
+/// environment. Only a version is cached, so a failed probe is tried again at the next spawn; spawns of one program
+/// that arrive together wait for the first probe instead of each running one.
 async fn claude_version(shared: &Arc<Shared>, spec: &SpawnRequest) -> Option<(u32, u32, u32)> {
-    let cached = shared.claude_versions.lock().unwrap_or_else(PoisonError::into_inner).get(&spec.program).copied();
-    if let Some(version) = cached {
-        return version;
-    }
     let mut env = shared.base_env.clone();
     env.retain(|(name, _)| !spec.env.iter().any(|(set, _)| set == name));
     env.extend(spec.env.iter().cloned());
     let program = spec.program.clone();
-    let version = {
-        let program = program.clone();
-        tokio::task::spawn_blocking(move || preview_plugin::probe_version(&program, &env, CLAUDE_PROBE_TIMEOUT))
-            .await
-            .ok()
-            .flatten()
-    };
-    shared.claude_versions.lock().unwrap_or_else(PoisonError::into_inner).insert(program, version);
-    version
+    cached_version(&shared.claude_versions, &spec.program, move || {
+        preview_plugin::probe_version(&program, &env, CLAUDE_PROBE_TIMEOUT)
+    })
+    .await
+}
+
+/// The cached version of `program`, else what `probe` finds (run off the async threads); only `Some` is cached.
+async fn cached_version(
+    versions: &Mutex<HashMap<String, ClaudeVersion>>,
+    program: &str,
+    probe: impl FnOnce() -> Option<(u32, u32, u32)> + Send + 'static,
+) -> Option<(u32, u32, u32)> {
+    let slot = versions.lock().unwrap_or_else(PoisonError::into_inner).entry(program.to_string()).or_default().clone();
+    let mut known = slot.lock().await;
+    if known.is_none() {
+        *known = tokio::task::spawn_blocking(probe).await.ok().flatten();
+    }
+    *known
 }
 
 /// The answer to `FindContainer` without asking Docker, when there is one: the container the last lookup found for
@@ -1311,6 +1317,49 @@ fn start_pane(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_failed_version_probe_is_not_cached_but_a_version_is() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let versions = Mutex::new(HashMap::new());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = |answer| {
+            let runs = runs.clone();
+            move || {
+                runs.fetch_add(1, Ordering::SeqCst);
+                answer
+            }
+        };
+        assert_eq!(cached_version(&versions, "claude", counted(None)).await, None);
+        assert_eq!(cached_version(&versions, "claude", counted(Some((2, 1, 332)))).await, Some((2, 1, 332)));
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(cached_version(&versions, "claude", counted(None)).await, Some((2, 1, 332)));
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn spawns_arriving_together_share_one_version_probe() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let versions = Arc::new(Mutex::new(HashMap::new()));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let (versions, runs) = (versions.clone(), runs.clone());
+                tokio::spawn(async move {
+                    cached_version(&versions, "claude", move || {
+                        runs.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(100));
+                        Some((2, 1, 332))
+                    })
+                    .await
+                })
+            })
+            .collect();
+        for task in tasks {
+            assert_eq!(task.await.unwrap(), Some((2, 1, 332)));
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn sessions_are_sent_only_once_the_first_scan_is_done() {

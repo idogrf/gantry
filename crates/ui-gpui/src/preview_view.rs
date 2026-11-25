@@ -8,12 +8,13 @@ use std::sync::Arc;
 
 use app_core::host_state::HostCard;
 use app_core::preview::{TextDoc, file_name, fit_tabs};
+use app_core::preview_zoom::{STEP, WHEEL_STEP_PX, Zoom, wheel_factor};
 use app_core::split_tree::NodeId;
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent,
+    App, Bounds, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent,
     ListHorizontalSizingBehavior, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    Pixels, Point, Render, SharedString, UniformListScrollHandle, Window, canvas, div, img, prelude::*, px, rgb, svg,
-    uniform_list,
+    PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, UniformListScrollHandle, Window,
+    canvas, div, img, point, prelude::*, px, rgb, svg, uniform_list,
 };
 
 use crate::assets::{CLOSE_ICON, EYE_ICON, FILE_ICON, OPEN_EXTERNAL_ICON};
@@ -128,6 +129,31 @@ fn copy_lines(doc: &TextDoc, lines: Range<usize>) -> String {
     doc.copy(lines)
 }
 
+/// Pixels one wheel line pans an image.
+const PAN_LINE_PX: f32 = 20.0;
+
+/// The label of the zoom bar: the scale as a rounded percent.
+fn zoom_label(zoom: &Zoom) -> String {
+    format!("{}%", zoom.percent())
+}
+
+/// The zoom factor of a wheel movement: one line (or 50 px) is one step, wheel up zooms in.
+fn wheel_zoom_factor(delta: ScrollDelta) -> f32 {
+    let dy = match delta {
+        ScrollDelta::Lines(lines) => lines.y * WHEEL_STEP_PX,
+        ScrollDelta::Pixels(pixels) => f32::from(pixels.y),
+    };
+    wheel_factor(-dy)
+}
+
+/// The pan of a wheel movement in pixels: a line is 20 px, the content follows the delta.
+fn wheel_pan(delta: ScrollDelta) -> (f32, f32) {
+    match delta {
+        ScrollDelta::Lines(lines) => (lines.x * PAN_LINE_PX, lines.y * PAN_LINE_PX),
+        ScrollDelta::Pixels(pixels) => (f32::from(pixels.x), f32::from(pixels.y)),
+    }
+}
+
 /// A font's measures at the terminal font size.
 struct Metrics {
     family: SharedString,
@@ -147,6 +173,12 @@ pub(crate) struct PreviewView {
     dragging: bool,
     /// The tab row's width in px, measured while drawing.
     row_width: f32,
+    /// How the active image is placed; `None` until an image is shown, reset when the active file changes.
+    zoom: Option<Zoom>,
+    /// The image body's bounds in the window, measured while drawing.
+    viewport: Bounds<Pixels>,
+    /// The last pointer position of a drag that pans the image.
+    panning: Option<Point<Pixels>>,
 }
 
 impl EventEmitter<PreviewEvent> for PreviewView {}
@@ -175,6 +207,9 @@ impl PreviewView {
             selection: None,
             dragging: false,
             row_width: 0.0,
+            zoom: None,
+            viewport: Bounds::default(),
+            panning: None,
         }
     }
 
@@ -184,6 +219,8 @@ impl PreviewView {
         if model.active != self.model.active {
             self.scroll = UniformListScrollHandle::new();
             self.selection = None;
+            self.zoom = None;
+            self.panning = None;
         }
         self.model = model;
         // Other content (loading, an error) keeps the selection, so Text -> Loading -> Text on one file still has it.
@@ -201,6 +238,220 @@ impl PreviewView {
         let Content::Text(doc) = &self.model.content else { return None };
         let (anchor, head) = self.selection?;
         Some(copy_lines(doc, selection_lines(anchor, head)))
+    }
+
+    /// The active image's natural size.
+    fn natural(&self) -> Option<(f32, f32)> {
+        match &self.model.content {
+            Content::Image { natural, .. } => Some(*natural),
+            _ => None,
+        }
+    }
+
+    /// The image body's size in px.
+    fn viewport_size(&self) -> (f32, f32) {
+        (f32::from(self.viewport.size.width), f32::from(self.viewport.size.height))
+    }
+
+    /// A window position as a point in the image body.
+    fn in_body(&self, position: Point<Pixels>) -> (f32, f32) {
+        (f32::from(position.x - self.viewport.origin.x), f32::from(position.y - self.viewport.origin.y))
+    }
+
+    /// Changes the zoom with `change` (given the natural and viewport sizes) and redraws.
+    fn change_zoom(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Zoom, (f32, f32), (f32, f32))) {
+        let (Some(natural), viewport) = (self.natural(), self.viewport_size()) else { return };
+        if let Some(zoom) = self.zoom.as_mut() {
+            change(zoom, natural, viewport);
+            cx.notify();
+        }
+    }
+
+    /// Zooms by `factor` around the center of the body (the zoom bar's buttons).
+    fn zoom_center(&mut self, factor: f32, cx: &mut Context<Self>) {
+        let (width, height) = self.viewport_size();
+        self.change_zoom(cx, |zoom, natural, viewport| {
+            zoom.zoom_at(factor, (width / 2.0, height / 2.0), natural, viewport)
+        });
+    }
+
+    /// Places the image for the current content: first Fit, then adapted to the body's size.
+    fn sync_zoom(&mut self) {
+        let (Some(natural), viewport) = (self.natural(), self.viewport_size()) else { return };
+        match self.zoom.as_mut() {
+            Some(zoom) => zoom.relayout(natural, viewport),
+            None => self.zoom = Some(Zoom::fit(natural, viewport)),
+        }
+    }
+
+    /// One button of the zoom bar.
+    fn zoom_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+        action: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .px(theme.ui(8.))
+            .h(theme.ui(22.))
+            .flex()
+            .items_center()
+            .rounded(px(RADIUS_SMALL))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(theme.tokens.surface)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    cx.emit(PreviewEvent::Focused);
+                    action(this, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(label)
+    }
+
+    /// The image with its zoom bar and, while part of it is out of view, the small map.
+    fn image_body(
+        &self,
+        image: &Arc<gpui::Image>,
+        natural: (f32, f32),
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let zoom = self.zoom.unwrap_or_else(|| Zoom::fit(natural, self.viewport_size()));
+        let view = cx.entity();
+        let minimap = zoom.minimap(natural, self.viewport_size());
+        let bar = div().absolute().left_0().right_0().bottom(theme.ui(12.)).flex().justify_center().child(
+            div()
+                .flex()
+                .items_center()
+                .gap(theme.ui(2.))
+                .p(theme.ui(3.))
+                .rounded(px(RADIUS_SMALL))
+                .bg(rgb(theme.tokens.raised))
+                .border_1()
+                .border_color(rgb(theme.tokens.line))
+                .text_xs()
+                .font_family(UI_FONT)
+                .text_color(rgb(theme.tokens.text))
+                .child(self.zoom_button("zoom-out", "−", theme, cx, |this, cx| this.zoom_center(1.0 / STEP, cx)))
+                .child(div().min_w(theme.ui(40.)).flex().justify_center().child(zoom_label(&zoom)))
+                .child(self.zoom_button("zoom-in", "+", theme, cx, |this, cx| this.zoom_center(STEP, cx)))
+                .child(self.zoom_button("zoom-fit", "Fit", theme, cx, |this, cx| {
+                    this.change_zoom(cx, |zoom, natural, viewport| *zoom = Zoom::fit(natural, viewport));
+                }))
+                .child(self.zoom_button("zoom-100", "100%", theme, cx, |this, cx| {
+                    let scale = this.zoom.map_or(1.0, |zoom| zoom.scale);
+                    this.zoom_center(1.0 / scale, cx);
+                })),
+        );
+        let map = minimap.map(|[x, y, w, h]| {
+            let width = theme.ui(120.);
+            let height = width * (natural.1 / natural.0);
+            div()
+                .absolute()
+                .right(theme.ui(12.))
+                .bottom(theme.ui(12.))
+                .w(width)
+                .h(height)
+                .bg(rgb(theme.tokens.raised))
+                .border_1()
+                .border_color(rgb(theme.tokens.line))
+                .on_mouse_down(MouseButton::Left, cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()))
+                .child(img(image.clone()).absolute().size_full().object_fit(ObjectFit::Contain))
+                .child(
+                    div()
+                        .absolute()
+                        .left(width * x)
+                        .top(height * y)
+                        .w(width * w)
+                        .h(height * h)
+                        .border_2()
+                        .border_color(rgb(theme.tokens.accent)),
+                )
+        });
+        div()
+            .id("preview-image")
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        view.update(cx, |this, cx| {
+                            let resized = (this.viewport.size.width - bounds.size.width).abs() > px(0.5)
+                                || (this.viewport.size.height - bounds.size.height).abs() > px(0.5);
+                            this.viewport = bounds;
+                            if resized {
+                                cx.notify();
+                            }
+                        })
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(
+                img(image.clone())
+                    .object_fit(ObjectFit::Fill)
+                    .absolute()
+                    .left(px(zoom.origin.0))
+                    .top(px(zoom.origin.1))
+                    .w(px(natural.0 * zoom.scale))
+                    .h(px(natural.1 * zoom.scale)),
+            )
+            .child(bar)
+            .children(map)
+            .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
+                let pointer = this.in_body(event.position);
+                let delta = event.delta;
+                if event.modifiers.secondary() {
+                    let factor = wheel_zoom_factor(delta);
+                    this.change_zoom(cx, |zoom, natural, viewport| zoom.zoom_at(factor, pointer, natural, viewport));
+                } else {
+                    let pan = wheel_pan(delta);
+                    this.change_zoom(cx, |zoom, natural, viewport| zoom.pan(pan, natural, viewport));
+                }
+                cx.stop_propagation();
+            }))
+            .on_pinch(cx.listener(|this, event: &PinchEvent, _, cx| {
+                let pointer = this.in_body(event.position);
+                let factor = 1.0 + event.delta;
+                this.change_zoom(cx, |zoom, natural, viewport| zoom.zoom_at(factor, pointer, natural, viewport));
+                cx.stop_propagation();
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    cx.emit(PreviewEvent::Focused);
+                    if event.click_count == 2 {
+                        let pointer = this.in_body(event.position);
+                        this.panning = None;
+                        this.change_zoom(cx, |zoom, natural, viewport| zoom.toggle(pointer, natural, viewport));
+                    } else {
+                        this.panning = Some(event.position);
+                    }
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                let Some(last) = this.panning else { return };
+                if event.pressed_button != Some(MouseButton::Left) {
+                    this.panning = None;
+                    return;
+                }
+                let delta = point(event.position.x - last.x, event.position.y - last.y);
+                this.panning = Some(event.position);
+                let pan = (f32::from(delta.x), f32::from(delta.y));
+                this.change_zoom(cx, |zoom, natural, viewport| zoom.pan(pan, natural, viewport));
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.panning = None))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.panning = None))
+            .into_any_element()
     }
 
     fn active_tab(&self) -> Option<&PreviewTab> {
@@ -524,13 +775,7 @@ impl PreviewView {
                 .size_full()
                 .into_any_element()
             }
-            Content::Image { image, .. } => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(img(image.clone()).max_w_full().max_h_full().object_fit(ObjectFit::Contain))
-                .into_any_element(),
+            Content::Image { image, natural } => self.image_body(image, *natural, theme, cx),
             Content::Missing => centered(vec![muted("This file no longer exists").into_any_element()]),
             Content::TooLarge(size) => {
                 let mut lines =
@@ -598,6 +843,7 @@ fn plain_card(title: &str) -> HoverCard {
 
 impl Render for PreviewView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_zoom();
         let theme = theme(cx).clone();
         let active = self.model.active.clone();
         let host_card = self.model.host_card.clone();
@@ -666,5 +912,25 @@ mod tests {
     fn copy_selection_copies_whole_lines() {
         let doc = TextDoc::parse(b"a\nb\nc").unwrap();
         assert_eq!(copy_lines(&doc, 1..3), "b\nc");
+    }
+
+    #[test]
+    fn zoom_bar_label_is_the_rounded_percent() {
+        let mut zoom = Zoom::fit((1000.0, 1000.0), (333.0, 333.0));
+        zoom.scale = 0.333;
+        assert_eq!(zoom_label(&zoom), "33%");
+    }
+
+    #[test]
+    fn a_wheel_line_zooms_one_step_and_up_zooms_in() {
+        let line = ScrollDelta::Lines(gpui::point(0.0, 1.0));
+        assert_eq!(wheel_zoom_factor(line), STEP);
+        assert!((wheel_zoom_factor(ScrollDelta::Pixels(gpui::point(px(0.), px(-50.)))) - 1.0 / STEP).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_wheel_line_pans_20_px_and_pixels_pass_through() {
+        assert_eq!(wheel_pan(ScrollDelta::Lines(gpui::point(1.0, -2.0))), (20.0, -40.0));
+        assert_eq!(wheel_pan(ScrollDelta::Pixels(gpui::point(px(3.), px(4.)))), (3.0, 4.0));
     }
 }

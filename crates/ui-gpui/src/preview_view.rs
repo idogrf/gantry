@@ -78,7 +78,7 @@ pub(crate) enum Content {
 
 /// Everything the view draws.
 pub(crate) struct PreviewModel {
-    /// The session's title, after `Preview ·` in the header.
+    /// The followed session's bare title; the header reads `Preview · <title>`, or `Preview` while it is empty.
     pub title: String,
     /// The file tabs, oldest first.
     pub tabs: Vec<PreviewTab>,
@@ -510,7 +510,8 @@ impl PreviewView {
 
     fn header(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let leaf = self.leaf;
-        let title = format!("Preview · {}", self.model.title);
+        let title =
+            if self.model.title.is_empty() { "Preview".to_string() } else { format!("Preview · {}", self.model.title) };
         let can_open = self.model.can_open;
         let icon_button = |id: &'static str, path: &'static str| {
             div()
@@ -607,6 +608,7 @@ impl PreviewView {
             .mb(theme.ui(4.))
             .flex()
             .items_center()
+            .overflow_hidden()
             .child(
                 canvas(
                     move |bounds, _, cx| {
@@ -625,7 +627,7 @@ impl PreviewView {
             )
             .children(tabs.map(|(index, tab)| {
                 let active = self.model.active.as_deref() == Some(tab.id.as_str());
-                let group = SharedString::from(format!("preview-tab-{index}"));
+                let group = SharedString::from(format!("preview-tab-{}", tab.id));
                 let (activate, remove, menu) = (tab.id.clone(), tab.id.clone(), tab.id.clone());
                 let card = HoverCard {
                     title: tab.name.clone(),
@@ -636,7 +638,7 @@ impl PreviewView {
                     folder: Some(tab.path.display().to_string()),
                 };
                 div()
-                    .id(("preview-tab", index))
+                    .id(SharedString::from(format!("preview-tab-{}", tab.id)))
                     .group(group.clone())
                     .flex_none()
                     .w(theme.ui(TAB_WIDTH))
@@ -668,7 +670,7 @@ impl PreviewView {
                     })
                     .child(
                         div()
-                            .id(("preview-tab-x", index))
+                            .id(SharedString::from(format!("preview-tab-x-{}", tab.id)))
                             .flex_none()
                             .size(theme.ui(16.))
                             .flex()

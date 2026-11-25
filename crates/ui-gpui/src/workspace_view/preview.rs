@@ -70,7 +70,22 @@ fn same_content(a: &Content, b: &Content) -> bool {
         (Content::TooLarge(a), Content::TooLarge(b)) => a == b,
         (Content::Unsupported { size: a }, Content::Unsupported { size: b }) => a == b,
         (Content::Failed(a), Content::Failed(b)) => a == b,
-        _ => std::mem::discriminant(a) == std::mem::discriminant(b),
+        (Content::Html, Content::Html)
+        | (Content::Loading, Content::Loading)
+        | (Content::Missing, Content::Missing)
+        | (Content::NoFiles, Content::NoFiles) => true,
+        (
+            Content::Text(_)
+            | Content::Image { .. }
+            | Content::TooLarge(_)
+            | Content::Unsupported { .. }
+            | Content::Failed(_)
+            | Content::Html
+            | Content::Loading
+            | Content::Missing
+            | Content::NoFiles,
+            _,
+        ) => false,
     }
 }
 
@@ -520,7 +535,7 @@ impl WorkspaceView {
             _ => false,
         };
         PreviewModel {
-            title: info.map_or_else(|| "Preview".to_string(), |info| format!("Preview · {}", session_title(info))),
+            title: info.map(session_title).unwrap_or_default(),
             tabs,
             active,
             content,
@@ -690,7 +705,7 @@ mod tests {
 
     fn model() -> PreviewModel {
         PreviewModel {
-            title: "Preview".into(),
+            title: String::new(),
             tabs: vec![PreviewTab {
                 id: "a".into(),
                 name: "a.md".into(),
@@ -712,7 +727,7 @@ mod tests {
         changed.tabs[0].unseen = false;
         assert!(!same_model(&model(), &changed));
         let mut changed = model();
-        changed.title = "Preview · x".into();
+        changed.title = "x".into();
         assert!(!same_model(&model(), &changed));
         let mut changed = model();
         changed.content = Content::NoFiles;

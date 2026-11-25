@@ -439,7 +439,8 @@ pub struct Leaf {
 pub struct PreviewLeaf {
     /// The Claude leaf it follows.
     pub follows: NodeId,
-    /// The session it shows: the followed leaf's, kept after that leaf closes.
+    /// The session it shows: the followed leaf's. The model keeps it when that leaf closes; the window then closes the
+    /// follower, so a preview does not outlive its Claude pane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
     /// The active tab's file id; `None` = the newest file.
@@ -4318,7 +4319,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_the_claude_leaf_keeps_the_last_session() {
+    fn the_model_keeps_the_session_when_the_claude_leaf_closes() {
         let mut ws = Workspace::default();
         let claude = claude_with(&mut ws, 1, "s1");
         let Some(PreviewPlace::Split { leaf, .. }) = ws.open_preview(claude) else { panic!() };

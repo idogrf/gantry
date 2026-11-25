@@ -503,7 +503,7 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
             if let (Tone::Idle | Tone::Done | Tone::Unread, Some(leaf)) = (tone, leaf) {
                 items.push(read_mark_item(*leaf, *tone != Tone::Idle));
             }
-            // Only a live Gantry Claude pane on this machine: never Closed, External or a dev container row.
+            // Only a live Gantry Claude pane: never Closed, External or a dev container row.
             if let (Some(leaf), None, true) = (
                 leaf,
                 &session.container,
@@ -558,8 +558,8 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
     Some(tidy(items))
 }
 
-/// The menu of a preview pane's file tab or body: `file` = the file's id when a tab was clicked, `text` = the shown
-/// `copy` = the id of the file whose text can be copied (the clicked tab's, else the shown file's), if it is text.
+/// The menu of a preview pane's file tab or body: `file` = the file's id when a tab was clicked, `copy` = the id of
+/// the file whose text can be copied (the clicked tab's, else the shown file's), if it is text.
 pub fn preview_menu(leaf: NodeId, file: Option<&str>, copy: Option<&str>) -> Vec<MenuItem> {
     let mut items = Vec::new();
     if let Some(id) = copy {

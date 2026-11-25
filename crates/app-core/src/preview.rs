@@ -6,8 +6,10 @@ use std::collections::{BTreeSet, HashSet};
 use std::ops::Range;
 use std::path::Path;
 
-/// Largest image the pane decodes, in pixels; a larger one shows "Too large to preview".
+/// Largest image the pane decodes, in pixels (all frames of a GIF or animated WebP together); a larger one shows "Too large to preview".
 pub const MAX_IMAGE_PIXELS: u64 = 50_000_000;
+/// Longest side an image may have, in pixels (a GPU texture limit); a larger one shows "Too large to preview".
+pub const MAX_IMAGE_SIDE: u32 = 16_384;
 /// Largest file with an unknown extension that is shown as text, in bytes.
 pub const MAX_UNKNOWN_TEXT: usize = 1024 * 1024;
 /// Most characters of one text line that are drawn; the rest is replaced by `…`.
@@ -112,6 +114,71 @@ pub fn image_size(bytes: &[u8], kind: ImageType) -> Option<(u32, u32)> {
         (Some(w), Some(h)) => (w, h),
         _ => (300, 150),
     })
+}
+
+/// How many frames a GIF or animated WebP holds, from its block structure alone (no decoding); 1 for anything else,
+/// including data that stops short.
+pub fn frame_count(bytes: &[u8], kind: ImageType) -> u64 {
+    match kind {
+        ImageType::Gif => gif_frames(bytes),
+        ImageType::Webp => webp_frames(bytes),
+        ImageType::Png | ImageType::Jpeg | ImageType::Svg => 1,
+    }
+}
+
+/// Image descriptors in a GIF: walks the blocks, skipping their data. A cut-off file counts what it holds up to the cut.
+fn gif_frames(bytes: &[u8]) -> u64 {
+    // The offset after a run of data sub-blocks (each a length byte and that many bytes, ended by a zero length).
+    let skip_sub_blocks = |mut at: usize| -> Option<usize> {
+        loop {
+            let len = usize::from(*bytes.get(at)?);
+            at += 1 + len;
+            if len == 0 {
+                return Some(at);
+            }
+        }
+    };
+    // A color table's size in bytes from the packed flags that announce it.
+    let table = |flags: u8| if flags & 0x80 != 0 { 3 << ((flags & 7) + 1) } else { 0 };
+    let mut frames = 0u64;
+    let Some(&flags) = bytes.get(10) else { return 1 };
+    let mut at = 13 + table(flags);
+    while let Some(&block) = bytes.get(at) {
+        let next = match block {
+            0x21 => skip_sub_blocks(at + 2),
+            0x2C => {
+                frames += 1;
+                // Descriptor (10 bytes), local color table, LZW minimum code size, then the data.
+                bytes.get(at + 9).and_then(|&local| skip_sub_blocks(at + 10 + table(local) + 1))
+            }
+            _ => None,
+        };
+        let Some(next) = next else { break };
+        at = next;
+    }
+    frames.max(1)
+}
+
+/// `ANMF` chunks in an animated WebP: walks the RIFF chunks.
+fn webp_frames(bytes: &[u8]) -> u64 {
+    let mut at = 12;
+    let mut frames = 0;
+    while let Some(head) = bytes.get(at..at + 8) {
+        if &head[..4] == b"ANMF" {
+            frames += 1;
+        }
+        let size = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+        let Some(next) = at.checked_add(8 + size + (size & 1)) else { break };
+        at = next;
+    }
+    frames.max(1)
+}
+
+/// Whether an image of `size` is past what the pane decodes: a side over `MAX_IMAGE_SIDE`, or all its frames together
+/// over `MAX_IMAGE_PIXELS` (GPUI keeps every frame of an animation as a bitmap).
+pub fn image_too_large(bytes: &[u8], kind: ImageType, size: (u32, u32)) -> bool {
+    let (width, height) = (u64::from(size.0), u64::from(size.1));
+    size.0.max(size.1) > MAX_IMAGE_SIDE || frame_count(bytes, kind) * width * height > MAX_IMAGE_PIXELS
 }
 
 /// The value of attribute `name` in an element's text, matching whole attribute names only.
@@ -316,6 +383,67 @@ mod tests {
         let (w, h) = image_size(&png(20000, 20000), ImageType::Png).unwrap();
         assert_eq!((w, h), (20000, 20000));
         assert!(u64::from(w) * u64::from(h) > MAX_IMAGE_PIXELS);
+    }
+
+    fn gif(frames: usize, side: u16) -> Vec<u8> {
+        let mut out = b"GIF89a".to_vec();
+        out.extend(side.to_le_bytes());
+        out.extend(side.to_le_bytes());
+        out.extend([0x80, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff]); // flags, background, aspect, a 2-color table
+        for _ in 0..frames {
+            out.extend([0x21, 0xF9, 4, 0, 0, 0, 0, 0]); // graphic control extension
+            out.extend([0x2C, 0, 0, 0, 0, 1, 0, 1, 0, 0]); // image descriptor, no local table
+            out.extend([2, 1, 0x44, 0]); // LZW code size, one data block, end
+        }
+        out.push(0x3B);
+        out
+    }
+
+    fn webp(animated: bool, frames: usize, side: u32) -> Vec<u8> {
+        let mut body = b"WEBPVP8X".to_vec();
+        body.extend(10u32.to_le_bytes());
+        body.extend([if animated { 2 } else { 0 }, 0, 0, 0]);
+        body.extend(&(side - 1).to_le_bytes()[..3]);
+        body.extend(&(side - 1).to_le_bytes()[..3]);
+        for _ in 0..frames {
+            body.extend(b"ANMF");
+            body.extend(3u32.to_le_bytes());
+            body.extend([0, 0, 0, 0]); // 3 bytes and one pad byte
+        }
+        let mut out = b"RIFF".to_vec();
+        out.extend((body.len() as u32).to_le_bytes());
+        out.extend(body);
+        out
+    }
+
+    #[test]
+    fn frames_are_counted_from_the_block_structure() {
+        assert_eq!(frame_count(&gif(1, 4), ImageType::Gif), 1);
+        assert_eq!(frame_count(&gif(7, 4), ImageType::Gif), 7);
+        let cut = gif(7, 4);
+        assert_eq!(frame_count(&cut[..cut.len() - 20], ImageType::Gif), 6);
+        assert_eq!(frame_count(b"GIF", ImageType::Gif), 1);
+        assert_eq!(frame_count(&webp(true, 5, 8), ImageType::Webp), 5);
+        assert_eq!(frame_count(&webp(false, 0, 8), ImageType::Webp), 1);
+        assert_eq!(frame_count(&png(1, 1), ImageType::Png), 1);
+    }
+
+    #[test]
+    fn an_animation_counts_all_its_frames_against_the_pixel_cap() {
+        // 2000 x 2000 is 4 M pixels: fine once, over 50 M with 13 frames.
+        assert!(!image_too_large(&gif(1, 2000), ImageType::Gif, (2000, 2000)));
+        assert!(!image_too_large(&gif(12, 2000), ImageType::Gif, (2000, 2000)));
+        assert!(image_too_large(&gif(13, 2000), ImageType::Gif, (2000, 2000)));
+        assert!(image_too_large(&webp(true, 13, 2000), ImageType::Webp, (2000, 2000)));
+        assert!(!image_too_large(&webp(true, 12, 2000), ImageType::Webp, (2000, 2000)));
+    }
+
+    #[test]
+    fn a_long_side_is_over_the_cap_even_with_few_pixels() {
+        assert!(!image_too_large(&png(16_384, 100), ImageType::Png, (16_384, 100)));
+        assert!(image_too_large(&png(16_385, 1), ImageType::Png, (16_385, 1)));
+        assert!(image_too_large(&png(1, 16_385), ImageType::Png, (1, 16_385)));
+        assert!(image_too_large(&png(20000, 20000), ImageType::Png, (20000, 20000)));
     }
 
     #[test]

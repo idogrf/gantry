@@ -510,8 +510,11 @@ impl PreviewView {
 
     fn header(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let leaf = self.leaf;
-        let title =
-            if self.model.title.is_empty() { "Preview".to_string() } else { format!("Preview · {}", self.model.title) };
+        let title = if self.model.title.is_empty() {
+            "Preview".to_string()
+        } else {
+            format!("Preview · {}", self.model.title)
+        };
         let can_open = self.model.can_open;
         let icon_button = |id: &'static str, path: &'static str| {
             div()

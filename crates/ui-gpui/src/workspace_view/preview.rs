@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use app_core::menus::{hidden_tabs_menu, preview_menu};
 use app_core::preview::{
-    FileKind, ImageType, MAX_IMAGE_PIXELS, MAX_UNKNOWN_TEXT, TextDoc, file_name, image_size, is_read, kind_of,
+    FileKind, ImageType, MAX_UNKNOWN_TEXT, TextDoc, file_name, image_size, image_too_large, is_read, kind_of,
     newly_sent, row_title,
 };
 use app_core::preview_reads::{FileKey, POLL, Shown};
@@ -110,7 +110,7 @@ fn content_for(path: &Path, shown: Option<&Shown>) -> Content {
             let Some((width, height)) = image_size(data, kind) else {
                 return Content::Failed("not a readable image".into());
             };
-            if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+            if image_too_large(data, kind, (width, height)) {
                 return Content::TooLarge(None);
             }
             let format = match kind {

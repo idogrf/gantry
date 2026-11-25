@@ -39,6 +39,8 @@ pub(crate) struct RowState {
     pub code_font: SharedString,
     /// `window.rightToLeft`: text with right-to-left letters is drawn in display order, a character at a time.
     pub rtl: bool,
+    /// The document is laid out right to left (`doc_rtl`): gutters, bars and table columns mirror, text aligns right.
+    pub mirror: bool,
     /// The code block whose Copy button shows `Copied`.
     pub copied: Option<usize>,
     /// The words of right-to-left paragraphs.
@@ -247,6 +249,22 @@ fn word_offset(chars: &[(char, usize)], index: usize) -> usize {
         }
     }
     chars.last().map_or(0, |(_, offset)| *offset)
+}
+
+/// Whether the document is laid out right to left: `window.rightToLeft` is on and the document's own direction
+/// (`doc_rtl`, from its first letter) differs from the flip toggle's state.
+pub(crate) fn doc_rtl(setting: bool, doc_rtl: bool, flipped: bool) -> bool {
+    setting && (doc_rtl != flipped)
+}
+
+/// A table's column fractions and alignments in mirrored order: the columns reversed, `Left` and `Right` swapped.
+pub(crate) fn mirror_table(fractions: &[f32], align: &[Align]) -> (Vec<f32>, Vec<Align>) {
+    let swap = |a: &Align| match a {
+        Align::Left => Align::Right,
+        Align::Right => Align::Left,
+        other => *other,
+    };
+    (fractions.iter().rev().copied().collect(), align.iter().rev().map(swap).collect())
 }
 
 /// Body text size in base px.
@@ -504,7 +522,7 @@ fn text_block(
         let words =
             state.visual.borrow_mut().entry(block_ix).or_insert_with(|| Arc::new(visual_words(&block.text))).clone();
         let interact = Interact { hit, selected };
-        return frame.child(rtl_text(doc, block_ix, &words, &base, &code, theme, &interact, cx));
+        return frame.child(rtl_text(doc, block_ix, &words, &base, &code, theme, &interact, state.mirror, cx));
     }
     let runs = text_runs(block, doc, &base, &code, theme, selected);
     let styled = StyledText::new(SharedString::from(block.text.clone())).with_runs(runs);
@@ -537,6 +555,7 @@ fn rtl_text(
     code: &Font,
     theme: &Theme,
     interact: &Interact,
+    mirror: bool,
     cx: &mut Context<PreviewView>,
 ) -> Div {
     let Some(block) = doc.blocks.get(block_ix) else { return div() };
@@ -559,6 +578,8 @@ fn rtl_text(
     let mut flow = div().w_full().flex().flex_wrap();
     if words.rtl {
         flow = flow.flex_row_reverse();
+    } else if mirror {
+        flow = flow.justify_end();
     }
     let mut counter = 0;
     for word in &words.words {
@@ -674,22 +695,30 @@ pub(crate) fn row(
         RowKind::Item { block, marker } => div()
             .w_full()
             .flex()
+            .when(state.mirror, |d| d.flex_row_reverse())
             .items_start()
-            .child(marker_gutter(*marker, color, theme))
-            .child(div().flex_1().min_w_0().child(text_block(doc, *block, body, state, theme, cx)))
+            .child(marker_gutter(*marker, color, state.mirror, theme))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .when(state.mirror, |d| d.text_right())
+                    .child(text_block(doc, *block, body, state, theme, cx)),
+            )
             .into_any_element(),
         RowKind::Code { block, lines } => code_row(doc, ix, *block, lines, state, theme, cx),
         RowKind::TableRow { table, cells, header } => table_row(doc, ix, *table, cells, *header, state, theme, cx),
         RowKind::Image { image } => image_row(doc, ix, *image, state, theme, cx),
         RowKind::Rule => div().w_full().h(theme.ui(4.)).bg(rgb(theme.tokens.line)).into_any_element(),
         RowKind::AlertTitle(kind) => div()
+            .when(state.mirror, |d| d.text_right())
             .text_size(theme.ui(BODY))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(rgb(alert_color(*kind, theme)))
             .child(kind.title())
             .into_any_element(),
     };
-    framed(content, doc, ix, theme)
+    framed(content, doc, ix, state.mirror, theme)
 }
 
 /// The size an image is drawn at: its natural size, shrunk (aspect kept) to fit `width`, never enlarged.
@@ -780,25 +809,25 @@ fn text_row(
     cx: &mut Context<PreviewView>,
 ) -> Div {
     let Some(BlockKind::Heading { level }) = doc.blocks.get(block).map(|b| &b.kind) else {
-        return text_block(doc, block, body, state, theme, cx);
+        return text_block(doc, block, body, state, theme, cx).when(state.mirror, |d| d.text_right());
     };
     let size = heading_size(*level);
     let color = if *level == 6 { theme.tokens.muted } else { body.color };
     let look = Look { size, line: HEADING_LINE, weight: FontWeight::SEMIBOLD, color };
-    let text = text_block(doc, block, look, state, theme, cx);
+    let text = text_block(doc, block, look, state, theme, cx).when(state.mirror, |d| d.text_right());
     if *level <= 2 { text.pb(theme.ui(size * 0.3)).border_b_1().border_color(rgb(theme.tokens.line)) } else { text }
 }
 
 /// The marker column of a list item.
-fn marker_gutter(marker: Marker, color: u32, theme: &Theme) -> Div {
+fn marker_gutter(marker: Marker, color: u32, mirror: bool, theme: &Theme) -> Div {
     let gutter = div()
         .flex_none()
         .w(theme.ui(INDENT))
         .h(theme.ui(BODY * BODY_LINE))
-        .pr(theme.ui(8.))
+        .when(mirror, |g| g.pl(theme.ui(8.)).justify_start())
+        .when(!mirror, |g| g.pr(theme.ui(8.)).justify_end())
         .flex()
         .items_center()
-        .justify_end()
         .text_size(theme.ui(BODY))
         .text_color(rgb(color));
     match marker {
@@ -922,13 +951,19 @@ fn table_row(
     );
     let weight = if header { FontWeight::SEMIBOLD } else { FontWeight::NORMAL };
     let look = Look { size: BODY, line: BODY_LINE, weight, color: theme.tokens.text };
+    // Mirrored: the columns show in reverse order, each with its own cell.
+    let (fractions, align) = if state.mirror {
+        mirror_table(&table.fractions, &table.align)
+    } else {
+        (table.fractions.clone(), table.align.clone())
+    };
     div()
         .w_full()
         .flex()
         .when(header, |row| row.bg(rgb(theme.tokens.raised)))
         .when(first, |row| row.border_t_1().border_color(rgb(theme.tokens.line)))
         .children((0..columns).map(|col| {
-            let fraction = table.fractions.get(col).copied().unwrap_or(1.0 / columns as f32);
+            let fraction = fractions.get(col).copied().unwrap_or(1.0 / columns as f32);
             let cell = div()
                 .flex_none()
                 .w(relative(fraction))
@@ -939,12 +974,13 @@ fn table_row(
                 .border_r_1()
                 .when(col == 0, |cell| cell.border_l_1())
                 .border_color(rgb(theme.tokens.line));
-            let cell = match table.align.get(col) {
+            let cell = match align.get(col) {
                 Some(Align::Center) => cell.text_center(),
                 Some(Align::Right) => cell.text_right(),
                 _ => cell,
             };
-            match cells.get(col) {
+            let source = if state.mirror { Some(columns - 1 - col) } else { Some(col) };
+            match source.and_then(|source| cells.get(source)) {
                 Some(block) => cell.child(text_block(doc, *block, look, state, theme, cx)),
                 None => cell,
             }
@@ -954,19 +990,20 @@ fn table_row(
 
 /// The row's content with its quote bars, list indent and the space above it. A bar that the row above shares runs
 /// through the gap.
-fn framed(content: AnyElement, doc: &MdDoc, ix: usize, theme: &Theme) -> AnyElement {
+fn framed(content: AnyElement, doc: &MdDoc, ix: usize, mirror: bool, theme: &Theme) -> AnyElement {
     let row = &doc.rows[ix];
     let previous = ix.checked_sub(1).and_then(|p| doc.rows.get(p));
     let shared = previous.map_or(0, |p| p.quote.min(row.quote));
     let gap = theme.ui(row.space_above);
     let bar = row.alert.map_or(theme.tokens.line, |kind| alert_color(kind, theme));
-    let mut el = div().w_full().pl(theme.ui(INDENT * f32::from(row.indent))).child(content);
+    let indent = theme.ui(INDENT * f32::from(row.indent));
+    let mut el = div().w_full().when(mirror, |d| d.pr(indent)).when(!mirror, |d| d.pl(indent)).child(content);
     for level in (1..=row.quote).rev() {
         el = div()
             .w_full()
-            .border_l(theme.ui(4.))
             .border_color(rgb(bar))
-            .pl(theme.ui(16.))
+            .when(mirror, |d| d.border_r(theme.ui(4.)).pr(theme.ui(16.)))
+            .when(!mirror, |d| d.border_l(theme.ui(4.)).pl(theme.ui(16.)))
             .when(level == shared, |d| d.pt(gap))
             .child(el);
     }
@@ -1091,6 +1128,24 @@ mod tests {
         assert_eq!(shown, [(4..6, Token::Keyword), (7..8, Token::String)]);
         assert_eq!(token_at(&shown, 5), Token::Keyword);
         assert_eq!(token_at(&shown, 6), Token::Plain);
+    }
+
+    #[test]
+    fn direction_follows_setting_document_and_flip() {
+        assert!(!doc_rtl(false, true, false));
+        assert!(doc_rtl(true, true, false));
+        assert!(!doc_rtl(true, true, true));
+        assert!(doc_rtl(true, false, true));
+        assert!(!doc_rtl(false, false, true));
+    }
+
+    #[test]
+    fn mirrored_tables_reverse_columns_and_swap_alignment() {
+        let (fractions, align) = mirror_table(&[0.2, 0.8], &[Align::Left, Align::Center]);
+        assert_eq!(fractions, [0.8, 0.2]);
+        assert_eq!(align, [Align::Center, Align::Right]);
+        let (_, align) = mirror_table(&[0.5, 0.5], &[Align::Right, Align::Left]);
+        assert_eq!(align, [Align::Right, Align::Left]);
     }
 
     #[test]

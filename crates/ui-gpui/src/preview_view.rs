@@ -22,12 +22,13 @@ use gpui::{
 };
 use preview_doc::markdown::{DocImage, ImageSrc, LinkTarget, MdDoc, RowKind};
 
-use crate::assets::{CLOSE_ICON, EYE_ICON, FILE_ICON, OPEN_EXTERNAL_ICON};
+use crate::assets::{CLOSE_ICON, DIRECTION_ICON, EYE_ICON, FILE_ICON, OPEN_EXTERNAL_ICON};
 use crate::git_diff_view::size_text;
 use crate::hover_card::{self, HoverCard};
 use crate::pane_drag::DraggedPane;
 use crate::preview_markdown::{
-    self, Gesture, Interact, LineCache, RowState, Unit, VisualCache, code_line, display_spans, drag_selection, pad,
+    self, Gesture, Interact, LineCache, RowState, Unit, VisualCache, code_line, display_spans, doc_rtl, drag_selection,
+    pad,
 };
 use crate::settings_store::SettingsStore;
 use crate::terminal_view::{host_card_element, installed_families, installed_family, pane_font};
@@ -362,6 +363,8 @@ pub(crate) struct PreviewView {
     md_words: VisualCache,
     /// The line starts of the document's code blocks, filled as they are first drawn.
     md_lines: LineCache,
+    /// The ⇄ toggle: the document's direction is flipped. Reset when the active file changes, kept on a reload.
+    flipped: bool,
     /// What the rows were last measured with; a change remeasures the list.
     md_look: Option<MdLook>,
     /// The image files of the rows laid out in the frame being drawn (cleared at its start).
@@ -380,6 +383,8 @@ struct MdLook {
     line_height: f32,
     ui_scale: f32,
     rtl: bool,
+    /// The document is laid out right to left (`doc_rtl`).
+    mirror: bool,
 }
 
 impl EventEmitter<PreviewEvent> for PreviewView {}
@@ -423,6 +428,7 @@ impl PreviewView {
             md_words: Rc::new(RefCell::new(HashMap::new())),
             md_lines: Rc::new(RefCell::new(HashMap::new())),
             md_look: None,
+            flipped: false,
             frame_images: Vec::new(),
             md_width: 0.0,
             images_in_view: Vec::new(),
@@ -433,6 +439,9 @@ impl PreviewView {
     /// count) and start over when it changes.
     pub(crate) fn set_model(&mut self, model: PreviewModel, cx: &mut Context<Self>) {
         let same_file = model.active == self.model.active;
+        if !keep_flip(self.model.active.as_deref(), model.active.as_deref()) {
+            self.flipped = false;
+        }
         if !same_file {
             self.scroll = UniformListScrollHandle::new();
             self.selection = None;
@@ -530,6 +539,7 @@ impl PreviewView {
         if !matches!(self.model.content, Content::Markdown(_)) {
             return;
         }
+        let Content::Markdown(doc) = &self.model.content else { return };
         let metrics = Self::metrics(window, cx);
         let settings = cx.global::<SettingsStore>().settings();
         let look = MdLook {
@@ -538,6 +548,7 @@ impl PreviewView {
             line_height: metrics.row_height,
             ui_scale: theme(cx).ui_scale,
             rtl: settings.window.right_to_left,
+            mirror: doc_rtl(settings.window.right_to_left, doc.rtl, self.flipped),
         };
         if self.md_look.as_ref() != Some(&look) {
             if self.md_look.is_some() {
@@ -564,6 +575,7 @@ impl PreviewView {
             viewport: self.md_width,
             code_font: look.family.clone(),
             rtl: look.rtl,
+            mirror: look.mirror,
             copied: self.copied.as_ref().map(|(block, _)| *block),
             selection: self.md_selection,
             visual: self.md_words.clone(),
@@ -1045,6 +1057,9 @@ impl PreviewView {
             format!("Preview · {}", self.model.title)
         };
         let can_open = self.model.can_open;
+        let can_flip = matches!(self.model.content, Content::Markdown(_))
+            && cx.global::<SettingsStore>().settings().window.right_to_left;
+        let flipped = self.flipped;
         let icon_button = |id: &'static str, path: &'static str| {
             div()
                 .id(id)
@@ -1088,6 +1103,19 @@ impl PreviewView {
                     .child("Follows session"),
             )
             .child(div().flex_1())
+            .when(can_flip, |header| {
+                header.child(
+                    icon_button("preview-flip", DIRECTION_ICON)
+                        .when(flipped, |button| button.bg(rgb(theme.tokens.surface)))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(theme.tokens.surface)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.flipped = !this.flipped;
+                            cx.notify();
+                        }))
+                        .tooltip(hover_card::tooltip(plain_card("Flip text direction"))),
+                )
+            })
             .child(
                 icon_button("preview-open", OPEN_EXTERNAL_ICON)
                     .when(!can_open, |button| button.opacity(0.4))
@@ -1424,6 +1452,11 @@ fn muted_line(text: String, theme: &Theme) -> gpui::AnyElement {
     div().text_xs().text_color(rgb(theme.tokens.muted)).child(text).into_any_element()
 }
 
+/// Whether the flip toggle survives a model change: a reload of the same file keeps it, another file (or none) resets.
+pub(crate) fn keep_flip(old_active: Option<&str>, new_active: Option<&str>) -> bool {
+    old_active.is_some() && old_active == new_active
+}
+
 /// A hover card with only a title.
 fn plain_card(title: &str) -> HoverCard {
     HoverCard { title: title.to_string(), status: None, dir: None, container: false, host: None, folder: None }
@@ -1500,6 +1533,15 @@ impl Render for PreviewView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_flip_resets_on_another_file_but_not_on_reload() {
+        assert!(keep_flip(Some("a.md"), Some("a.md")));
+        assert!(!keep_flip(Some("a.md"), Some("b.md")));
+        assert!(!keep_flip(Some("a.md"), None));
+        assert!(!keep_flip(None, Some("a.md")));
+        assert!(!keep_flip(None, None));
+    }
 
     #[test]
     fn block_selection_orders_its_range() {

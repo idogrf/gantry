@@ -61,6 +61,9 @@ pub(crate) const OPEN_EXTERNAL_ICON: &str = "icons/open-external.svg";
 /// The Copy button's icon on a markdown code block (two overlapping sheets), drawn by `preview_markdown`.
 pub(crate) const COPY_ICON: &str = "icons/copy.svg";
 
+/// The preview header's flip text direction button (two opposite arrows), drawn by `preview_view`.
+pub(crate) const DIRECTION_ICON: &str = "icons/direction.svg";
+
 /// The app icon in color, drawn next to the name in the title bar (a picture, not a tinted icon like the others).
 pub(crate) const LOGO: &str = "icons/gantry.png";
 
@@ -93,6 +96,7 @@ impl AssetSource for Assets {
             FILE_ICON => Some(include_bytes!("../assets/icons/file.svg")),
             OPEN_EXTERNAL_ICON => Some(include_bytes!("../assets/icons/open-external.svg")),
             COPY_ICON => Some(include_bytes!("../assets/icons/copy.svg")),
+            DIRECTION_ICON => Some(include_bytes!("../assets/icons/direction.svg")),
             LOGO => Some(include_bytes!("../assets/icons/gantry.png")),
             _ => None,
         };

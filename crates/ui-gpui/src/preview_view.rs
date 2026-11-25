@@ -8,7 +8,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use app_core::host_state::HostCard;
 use app_core::preview::{FileKind, TabFit, TextDoc, file_name, fit_tabs, kind_of};
@@ -260,6 +260,14 @@ fn display_range(doc: &TextDoc, line: usize, raw: Range<usize>) -> Range<usize> 
     first_at(raw.start)..first_at(raw.end)
 }
 
+/// How long a pane may go undrawn before a drag scroll takes it for hidden (one late frame is not that).
+const HIDDEN_AFTER: Duration = Duration::from_millis(100);
+
+/// Whether a pane last drawn `since_drawn` ago is hidden (not in the visible tab).
+fn pane_hidden(since_drawn: Duration) -> bool {
+    since_drawn > HIDDEN_AFTER
+}
+
 /// The width of the zone along the top and bottom edge of the body where a drag scrolls it, in px.
 const EDGE_PX: f32 = 24.0;
 /// The most a drag scrolls per tick, in px.
@@ -341,8 +349,8 @@ pub(crate) struct PreviewView {
     md_press: Option<(Unit, Range<usize>)>,
     /// A press landed on text since the root view last saw one (a press elsewhere clears the selection).
     pressed_text: bool,
-    /// The pane was drawn since the drag scroll last changed something (a hidden pane stops the loop).
-    shown: bool,
+    /// When the pane was last drawn (a pane not drawn for `HIDDEN_AFTER` is hidden and stops the drag scroll).
+    drawn: Instant,
     /// The loop that scrolls while a drag sits at an edge of the body.
     auto_scroll: Option<Task<()>>,
     /// The tab row's width in px, measured while drawing.
@@ -417,7 +425,7 @@ impl PreviewView {
             dragging: false,
             md_press: None,
             pressed_text: false,
-            shown: true,
+            drawn: Instant::now(),
             row_width: 0.0,
             zoom: None,
             viewport: Bounds::default(),
@@ -752,9 +760,13 @@ impl PreviewView {
 
     /// One step of the drag scroll; `false` ends the loop (button up, window inactive or the pointer left the zone).
     fn auto_scroll_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        // A pane that was not drawn since the last change is not in the visible tab any more.
-        if !self.dragging || !window.is_window_active() || !self.shown {
+        if !self.dragging || !window.is_window_active() {
             self.dragging = false;
+            return false;
+        }
+        // Nothing changing (the end of the list) draws nothing either, so this only ends the loop: the next pointer
+        // move over a visible pane starts it again.
+        if pane_hidden(self.drawn.elapsed()) {
             return false;
         }
         let Some((top, bottom)) = self.body_edges() else { return false };
@@ -792,8 +804,6 @@ impl PreviewView {
             _ => return false,
         };
         if changed {
-            // Drawn again before the next tick, or the pane is hidden and the loop ends.
-            self.shown = false;
             cx.notify();
         }
         true
@@ -1464,7 +1474,7 @@ fn plain_card(title: &str) -> HoverCard {
 
 impl Render for PreviewView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.shown = true;
+        self.drawn = Instant::now();
         self.sync_zoom();
         self.sync_md(window, cx);
         self.frame_images.clear();
@@ -1576,6 +1586,12 @@ mod tests {
         let one_line = TextSelection { anchor: (2, 6), head: (2, 3) };
         assert_eq!(line_range(&one_line, 2, 9), Some(3..6));
         assert_eq!(line_range(&one_line, 2, 4), Some(3..4));
+    }
+
+    #[test]
+    fn a_pane_is_hidden_only_after_a_while_undrawn() {
+        assert!(!pane_hidden(Duration::from_millis(20)));
+        assert!(pane_hidden(Duration::from_millis(150)));
     }
 
     #[test]

@@ -52,8 +52,15 @@ pub(crate) enum Content {
     NoFiles,
     /// The file is being read.
     Loading,
-    /// A text file.
-    Text(Arc<TextDoc>),
+    /// A text file, with its syntax colors when it has a known syntax and is small enough.
+    Text {
+        /// The parsed text.
+        doc: Arc<TextDoc>,
+        /// The colored spans of each line.
+        highlights: Option<Arc<preview_doc::highlight::Highlights>>,
+    },
+    /// A markdown document.
+    Markdown(Arc<preview_doc::markdown::MdDoc>),
     /// A decoded image with its natural size in pixels.
     Image {
         /// The image.
@@ -237,7 +244,7 @@ impl PreviewView {
         }
         self.model = model;
         // Other content (loading, an error) keeps the selection, so Text -> Loading -> Text on one file still has it.
-        if let Content::Text(doc) = &self.model.content {
+        if let Content::Text { doc, .. } = &self.model.content {
             self.selection = self.selection.and_then(|(anchor, head)| {
                 let last = doc.line_count().checked_sub(1)?;
                 Some((anchor.min(last), head.min(last)))
@@ -253,7 +260,7 @@ impl PreviewView {
 
     /// The selected lines as text, `None` with no selection.
     pub(crate) fn copy_selection(&self) -> Option<String> {
-        let Content::Text(doc) = &self.model.content else { return None };
+        let Content::Text { doc, .. } = &self.model.content else { return None };
         let (anchor, head) = self.selection?;
         Some(copy_lines(doc, selection_lines(anchor, head)))
     }
@@ -733,7 +740,7 @@ impl PreviewView {
 
     /// The visible lines of a text file.
     fn text_rows(&self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        let Content::Text(doc) = &self.model.content else { return Vec::new() };
+        let Content::Text { doc, .. } = &self.model.content else { return Vec::new() };
         let theme = theme(cx).clone();
         let metrics = Self::metrics(window, cx);
         let width = px(metrics.cell_width * (doc.widest() as f32 + 2.0) + 24.0);
@@ -814,8 +821,8 @@ impl PreviewView {
             Content::NoFiles => {
                 div().size_full().flex().items_center().justify_center().child(muted("No files yet")).into_any_element()
             }
-            Content::Loading => div().size_full().into_any_element(),
-            Content::Text(doc) => {
+            Content::Loading | Content::Markdown(_) => div().size_full().into_any_element(),
+            Content::Text { doc, .. } => {
                 // Every row has its own `min_w`, so the width needs no scan of the document.
                 let longest = (doc.line_count() > 0).then_some(0);
                 uniform_list(

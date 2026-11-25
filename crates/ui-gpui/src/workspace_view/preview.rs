@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use app_core::menus::{hidden_tabs_menu, preview_menu};
 use app_core::preview::{
-    FileKind, ImageType, MAX_UNKNOWN_TEXT, TextDoc, file_name, image_size, image_too_large, is_read, kind_of,
+    FileKind, ImageType, MAX_UNKNOWN_TEXT, TextDoc, file_name, image_size, image_too_large, is_link, is_read, kind_of,
     newly_sent, row_title,
 };
 use app_core::preview_reads::{FileKey, POLL, Shown};
@@ -16,6 +16,8 @@ use app_core::session_tree::session_title;
 use app_core::split_tree::{Axis, NodeId};
 use app_core::workspace::PreviewPlace;
 use gpui::{App, AppContext, ClipboardItem, Context, Task, Window};
+use preview_doc::highlight::highlight_file;
+use preview_doc::markdown::{self, MAX_MARKDOWN_BYTES};
 use protocol::host::HostId;
 use protocol::message::SentFile;
 
@@ -63,7 +65,15 @@ fn same_model(a: &PreviewModel, b: &PreviewModel) -> bool {
 /// equal payloads.
 fn same_content(a: &Content, b: &Content) -> bool {
     match (a, b) {
-        (Content::Text(a), Content::Text(b)) => Arc::ptr_eq(a, b),
+        (Content::Text { doc: a, highlights: x }, Content::Text { doc: b, highlights: y }) => {
+            Arc::ptr_eq(a, b)
+                && match (x, y) {
+                    (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+                    (None, None) => true,
+                    _ => false,
+                }
+        }
+        (Content::Markdown(a), Content::Markdown(b)) => Arc::ptr_eq(a, b),
         (Content::Image { image: a, natural: x }, Content::Image { image: b, natural: y }) => {
             Arc::ptr_eq(a, b) && x == y
         }
@@ -75,7 +85,8 @@ fn same_content(a: &Content, b: &Content) -> bool {
         | (Content::Missing, Content::Missing)
         | (Content::NoFiles, Content::NoFiles) => true,
         (
-            Content::Text(_)
+            Content::Text { .. }
+            | Content::Markdown(_)
             | Content::Image { .. }
             | Content::TooLarge(_)
             | Content::Unsupported { .. }
@@ -89,29 +100,58 @@ fn same_content(a: &Content, b: &Content) -> bool {
     }
 }
 
-/// What the pane shows for `path` given the last reply about it (`None` = no reply yet).
-fn content_for(path: &Path, shown: Option<&Shown>) -> Content {
+/// How a file's bytes are parsed on the background executor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ParseKind {
+    /// A text file of a known kind: parsed and highlighted.
+    Text,
+    /// A markdown file: parsed into a document (plain text above `MAX_MARKDOWN_BYTES`).
+    Markdown,
+    /// A file of no known kind: text when it is UTF-8 and small enough.
+    Unknown,
+}
+
+/// One file version waiting to be parsed.
+#[derive(Clone)]
+pub(super) struct ParseJob {
+    /// What to make of the bytes.
+    pub kind: ParseKind,
+    /// The file's path (its extension picks the syntax, its folder resolves a markdown document's links).
+    pub path: PathBuf,
+    /// The file's bytes.
+    pub data: Arc<[u8]>,
+    /// The modification time the bytes came with, to tell a stale result.
+    pub mtime_ms: u64,
+}
+
+/// What `decode_now` makes of a file: content at once, or a parse for the background executor.
+enum Decode {
+    Ready(Content),
+    Parse(ParseJob),
+}
+
+/// What the pane shows for `path` given the last reply about it (`None` = no reply yet): everything that needs no
+/// parsing at once (an image is only header-checked), text and markdown as a job.
+fn decode_now(path: &Path, shown: Option<&Shown>) -> Decode {
     let kind = kind_of(path);
     if !is_read(kind) {
-        return if kind == FileKind::Html { Content::Html } else { Content::Unsupported { size: None } };
+        return Decode::Ready(if kind == FileKind::Html { Content::Html } else { Content::Unsupported { size: None } });
     }
-    let Some(shown) = shown else { return Content::Loading };
-    let (data, len) = match shown {
-        Shown::Missing => return Content::Missing,
-        Shown::TooLarge { size } => return Content::TooLarge(Some(*size)),
-        Shown::Failed { reason } => return Content::Failed(reason.clone()),
-        Shown::Bytes { data, .. } => (data, data.len() as u64),
+    let Some(shown) = shown else { return Decode::Ready(Content::Loading) };
+    let (data, mtime_ms) = match shown {
+        Shown::Missing => return Decode::Ready(Content::Missing),
+        Shown::TooLarge { size } => return Decode::Ready(Content::TooLarge(Some(*size))),
+        Shown::Failed { reason } => return Decode::Ready(Content::Failed(reason.clone())),
+        Shown::Bytes { data, mtime_ms } => (data, *mtime_ms),
     };
-    let unsupported = Content::Unsupported { size: Some(len) };
-    let text =
-        |data: &[u8]| TextDoc::parse(data).map_or_else(|| unsupported.clone(), |doc| Content::Text(Arc::new(doc)));
+    let job = |kind| Decode::Parse(ParseJob { kind, path: path.to_path_buf(), data: data.clone(), mtime_ms });
     match kind {
         FileKind::Image(kind) => {
             let Some((width, height)) = image_size(data, kind) else {
-                return Content::Failed("not a readable image".into());
+                return Decode::Ready(Content::Failed("not a readable image".into()));
             };
             if image_too_large(data, kind, (width, height)) {
-                return Content::TooLarge(None);
+                return Decode::Ready(Content::TooLarge(None));
             }
             let format = match kind {
                 ImageType::Png => gpui::ImageFormat::Png,
@@ -120,16 +160,61 @@ fn content_for(path: &Path, shown: Option<&Shown>) -> Content {
                 ImageType::Webp => gpui::ImageFormat::Webp,
                 ImageType::Svg => gpui::ImageFormat::Svg,
             };
-            Content::Image {
+            Decode::Ready(Content::Image {
                 image: Arc::new(gpui::Image::from_bytes(format, data.to_vec())),
                 natural: (width as f32, height as f32),
-            }
+            })
         }
-        // Markdown is shown as plain text until the rendered view lands.
-        FileKind::Text | FileKind::Markdown => text(data),
-        FileKind::Unknown if data.len() <= MAX_UNKNOWN_TEXT => text(data),
-        _ => unsupported,
+        FileKind::Text => job(ParseKind::Text),
+        FileKind::Markdown => job(ParseKind::Markdown),
+        FileKind::Unknown => job(ParseKind::Unknown),
+        _ => Decode::Ready(Content::Unsupported { size: Some(data.len() as u64) }),
     }
+}
+
+/// Parse (and highlight) a job's bytes. Runs on the background executor only: the first highlight loads the syntaxes.
+fn run_parse(job: &ParseJob) -> Content {
+    let unsupported = Content::Unsupported { size: Some(job.data.len() as u64) };
+    let text = |highlight: bool| match TextDoc::parse(&job.data) {
+        // The BOM-free text: highlight offsets are byte offsets into what `TextDoc` shows.
+        Some(doc) => {
+            let highlights = highlight.then(|| highlight_file(&job.path, doc.text())).flatten().map(Arc::new);
+            Content::Text { doc: Arc::new(doc), highlights }
+        }
+        None => unsupported.clone(),
+    };
+    match job.kind {
+        ParseKind::Text => text(true),
+        ParseKind::Markdown if job.data.len() > MAX_MARKDOWN_BYTES => text(false),
+        ParseKind::Markdown => match std::str::from_utf8(&job.data) {
+            Ok(source) => {
+                let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+                Content::Markdown(Arc::new(markdown::parse(source, job.path.parent().unwrap_or(Path::new("")))))
+            }
+            Err(_) => unsupported,
+        },
+        ParseKind::Unknown if job.data.len() <= MAX_UNKNOWN_TEXT => text(true),
+        ParseKind::Unknown => unsupported,
+    }
+}
+
+/// The source text of text or markdown content.
+fn source_text(content: &Content) -> Option<&str> {
+    match content {
+        Content::Text { doc, .. } => Some(doc.text()),
+        Content::Markdown(doc) => Some(doc.source()),
+        _ => None,
+    }
+}
+
+/// Whether a parse made from bytes modified at `mtime_ms` still matches what the cache holds.
+fn parse_is_current(shown: Option<&Shown>, mtime_ms: u64) -> bool {
+    matches!(shown, Some(Shown::Bytes { mtime_ms: now, .. }) if *now == mtime_ms)
+}
+
+/// Whether the unseen dot and the saved seen list cover tab `id`: not a file opened from a link.
+fn tracks_seen(id: &str) -> bool {
+    !is_link(id)
 }
 
 /// A path component made safe: no separators, and not `.` or `..` (empty becomes `fallback`).
@@ -164,9 +249,10 @@ fn can_open(local: bool, connected: bool, exists: bool, content: &Content) -> bo
     !gone(local, exists, content) && (local || (connected && !matches!(content, Content::TooLarge(Some(_)))))
 }
 
-/// Whether a file's decoded content must be made again from the byte cache: nothing decoded, but the cache holds it.
-fn needs_refill(decoded: bool, shown: Option<&Shown>) -> bool {
-    !decoded && shown.is_some()
+/// Whether a file's decoded content must be made again from the byte cache: nothing decoded and no parse under way,
+/// but the cache holds it.
+fn needs_refill(decoded: bool, parsing: bool, shown: Option<&Shown>) -> bool {
+    !decoded && !parsing && shown.is_some()
 }
 
 /// The decoded files to drop: those no preview lists, those whose bytes the cache no longer holds, and the images that
@@ -281,7 +367,8 @@ impl WorkspaceView {
             .filter(|leaf| self.previews.contains_key(leaf))
             .filter_map(|leaf| {
                 let (_, session) = self.workspace.preview_session(leaf)?;
-                Some((session.to_string(), self.workspace.preview_active(leaf, sessions)?.id.clone()))
+                let id = self.workspace.preview_active(leaf, sessions)?.id.clone();
+                tracks_seen(&id).then(|| (session.to_string(), id))
             })
             .collect();
         let mut changed = false;
@@ -306,8 +393,7 @@ impl WorkspaceView {
         let changed = self.reads.apply(host, request, body);
         let mut old = Vec::new();
         if let Some(key) = &changed {
-            let content = content_for(&key.path, self.reads.shown(key));
-            old.extend(self.decoded.insert(key.clone(), content));
+            old.extend(self.start_decode(key.clone(), cx));
         }
         // A wish whose request is over is answered (or dropped when the file could not be read).
         let waiting: Vec<FileKey> =
@@ -340,19 +426,67 @@ impl WorkspaceView {
     }
 
     /// Decode each shown file the cache holds but `decoded` lost (it was unlisted for a while, and the daemon answers
-    /// `Unchanged` for it), once.
-    fn refill_decoded(&mut self, cx: &App) {
+    /// `Unchanged` for it), once: a file whose parse is running is left to it.
+    fn refill_decoded(&mut self, cx: &mut Context<Self>) {
         let wanted: Vec<FileKey> = self
             .previews
             .keys()
             .filter_map(|leaf| self.active_file(*leaf, cx))
             .map(|(key, _)| key)
             .filter(|key| is_read(kind_of(&key.path)))
-            .filter(|key| needs_refill(self.decoded.contains_key(key), self.reads.shown(key)))
+            .filter(|key| {
+                needs_refill(self.decoded.contains_key(key), self.parsing.contains_key(key), self.reads.shown(key))
+            })
             .collect();
         for key in wanted {
-            let content = content_for(&key.path, self.reads.shown(&key));
-            self.decoded.insert(key, content);
+            let old = self.start_decode(key, cx);
+            self.pending_release.extend(images_of(old.into_iter().collect()));
+        }
+    }
+
+    /// The one way into `decoded`: content that needs no parse goes in at once, a text or markdown file is parsed on
+    /// the background executor (one parse per file at a time, the newest job waits). While it runs the old content stays
+    /// shown. Returns the content a direct insert replaced.
+    fn start_decode(&mut self, key: FileKey, cx: &mut Context<Self>) -> Option<Content> {
+        match decode_now(&key.path, self.reads.shown(&key)) {
+            Decode::Ready(content) => {
+                self.parse_queued.remove(&key);
+                self.decoded.insert(key, content)
+            }
+            Decode::Parse(job) => {
+                if self.parsing.contains_key(&key) {
+                    self.parse_queued.insert(key, job);
+                } else {
+                    self.spawn_parse(key, job, cx);
+                }
+                None
+            }
+        }
+    }
+
+    fn spawn_parse(&mut self, key: FileKey, job: ParseJob, cx: &mut Context<Self>) {
+        let mtime_ms = job.mtime_ms;
+        let done_key = key.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let content = cx.background_executor().spawn(async move { run_parse(&job) }).await;
+            this.update(cx, |view, cx| view.parse_done(done_key, mtime_ms, content, cx)).ok();
+        });
+        self.parsing.insert(key, task);
+    }
+
+    /// A parse finished: keep its content unless the file changed or went away meanwhile, then start the queued job.
+    fn parse_done(&mut self, key: FileKey, mtime_ms: u64, content: Content, cx: &mut Context<Self>) {
+        self.parsing.remove(&key);
+        if parse_is_current(self.reads.shown(&key), mtime_ms) {
+            let old = self.decoded.insert(key.clone(), content);
+            self.pending_release.extend(images_of(old.into_iter().collect()));
+            self.push_preview_models(cx);
+            cx.notify();
+        }
+        if let Some(job) = self.parse_queued.remove(&key)
+            && parse_is_current(self.reads.shown(&key), job.mtime_ms)
+        {
+            self.spawn_parse(key, job, cx);
         }
     }
 
@@ -368,6 +502,10 @@ impl WorkspaceView {
         }
         let active: HashSet<FileKey> =
             self.previews.keys().filter_map(|leaf| self.active_file(*leaf, cx)).map(|(key, _)| key).collect();
+        // A parse of a file nothing lists any more (or whose bytes left the cache) is cancelled by dropping its task.
+        let wanted = |key: &FileKey| listed.contains(key) && self.reads.shown(key).is_some();
+        self.parsing.retain(|key, _| wanted(key));
+        self.parse_queued.retain(|key, _| wanted(key));
         let gone = stale_decoded(&self.decoded, &listed, &active, |key| self.reads.shown(key).is_some());
         gone.iter().filter_map(|key| self.decoded.remove(key)).collect()
     }
@@ -381,6 +519,8 @@ impl WorkspaceView {
     /// Forget a host's reads and the Open in system viewer wishes waiting on them.
     pub(super) fn forget_host_reads(&mut self, host: &HostId) {
         self.reads.forget_host(host);
+        self.parsing.retain(|key, _| &key.host != host);
+        self.parse_queued.retain(|key, _| &key.host != host);
         self.open_after_read.retain(|key, _| &key.host != host);
     }
 
@@ -452,21 +592,21 @@ impl WorkspaceView {
         cx.defer_in(window, |this, window, cx| this.flush_releases(window, cx));
     }
 
-    /// The parsed text of file `id` of preview `leaf`, when it is decoded as text.
-    fn text_of(&self, leaf: NodeId, id: &str, cx: &App) -> Option<Arc<TextDoc>> {
+    /// The decoded text or markdown of file `id` of preview `leaf`.
+    fn source_of(&self, leaf: NodeId, id: &str, cx: &App) -> Option<Content> {
         let host = self.workspace.leaves.get(&leaf)?.host.clone();
         let file =
             self.workspace.preview_files(leaf, self.sidebar.read(cx).sessions()).into_iter().find(|f| f.id == id)?;
-        match self.decoded.get(&FileKey { host, path: file.path.clone() })? {
-            Content::Text(doc) => Some(doc.clone()),
-            _ => None,
-        }
+        let content = self.decoded.get(&FileKey { host, path: file.path.clone() })?;
+        source_text(content).map(|_| content.clone())
     }
 
     /// Put the text of file `id` on the clipboard.
     pub(super) fn copy_file_contents(&mut self, leaf: NodeId, id: &str, cx: &mut Context<Self>) {
-        if let Some(doc) = self.text_of(leaf, id, cx) {
-            cx.write_to_clipboard(ClipboardItem::new_string(doc.text().to_string()));
+        if let Some(content) = self.source_of(leaf, id, cx)
+            && let Some(text) = source_text(&content)
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
         }
     }
 
@@ -545,7 +685,8 @@ impl WorkspaceView {
                 name: file_name(&file.path),
                 path: file.path.clone(),
                 caption: file.caption.clone(),
-                unseen: !seen_in.is_some_and(|session| self.workspace.is_seen(session, &file.id)),
+                unseen: tracks_seen(&file.id)
+                    && !seen_in.is_some_and(|session| self.workspace.is_seen(session, &file.id)),
             })
             .collect();
         let active = self.workspace.preview_active(leaf, sessions).map(|file| file.id.clone());
@@ -556,7 +697,7 @@ impl WorkspaceView {
                 let key = FileKey { host: host.clone(), path: file.path.clone() };
                 match self.decoded.get(&key) {
                     Some(content) => content.clone(),
-                    None => content_for(&file.path, None),
+                    None => Content::Loading,
                 }
             }
             _ => Content::NoFiles,
@@ -674,7 +815,7 @@ impl WorkspaceView {
             PreviewEvent::Menu { position, file } => {
                 let active = self.active_file(leaf, cx).map(|(_, id)| id);
                 let target = file.clone().or(active);
-                let copy = target.filter(|id| self.text_of(leaf, id, cx).is_some());
+                let copy = target.filter(|id| self.source_of(leaf, id, cx).is_some());
                 self.open_preview_menu(preview_menu(leaf, file.as_deref(), copy.as_deref()), *position, window, cx);
             }
             PreviewEvent::Hidden { position } => {
@@ -788,26 +929,120 @@ mod tests {
         Shown::Bytes { data: data.into(), mtime_ms: 1 }
     }
 
+    /// What `decode_now` answers at once; a deferred parse panics.
+    fn ready(path: &str, shown: Option<&Shown>) -> Content {
+        match decode_now(Path::new(path), shown) {
+            Decode::Ready(content) => content,
+            Decode::Parse(_) => panic!("{path} was deferred"),
+        }
+    }
+
+    /// The content of a file after its parse ran (what the background executor makes).
+    fn parsed(path: &str, shown: &Shown) -> Content {
+        match decode_now(Path::new(path), Some(shown)) {
+            Decode::Ready(content) => content,
+            Decode::Parse(job) => run_parse(&job),
+        }
+    }
+
+    fn job_kind(path: &str, shown: &Shown) -> Option<ParseKind> {
+        match decode_now(Path::new(path), Some(shown)) {
+            Decode::Parse(job) => Some(job.kind),
+            Decode::Ready(_) => None,
+        }
+    }
+
     #[test]
-    fn content_for_maps_every_answer() {
-        let p = Path::new;
-        assert!(matches!(content_for(p("/a.png"), Some(&bytes(png(1, 1)))), Content::Image { natural: (1., 1.), .. }));
-        assert!(matches!(content_for(p("/a.png"), Some(&bytes(png(20000, 20000)))), Content::TooLarge(None)));
-        assert!(matches!(content_for(p("/a.png"), Some(&bytes(b"junk".to_vec()))), Content::Failed(_)));
-        assert!(matches!(content_for(p("/a.md"), Some(&bytes(b"# hi".to_vec()))), Content::Text(_)));
-        assert!(matches!(content_for(p("/a.md"), Some(&bytes(vec![0xff, 0xfe]))), Content::Unsupported { .. }));
-        let big = bytes(vec![b'a'; 2 * 1024 * 1024]);
-        assert!(matches!(content_for(p("/x.xyz"), Some(&big)), Content::Unsupported { size: Some(_) }));
-        assert!(matches!(content_for(p("/x.xyz"), Some(&bytes(b"ok".to_vec()))), Content::Text(_)));
-        assert!(matches!(content_for(p("/report.pdf"), None), Content::Unsupported { size: None }));
-        assert!(matches!(content_for(p("/page.html"), None), Content::Html));
-        assert!(matches!(content_for(p("/a.md"), Some(&Shown::Missing)), Content::Missing));
-        assert!(matches!(content_for(p("/a.md"), Some(&Shown::TooLarge { size: 9 })), Content::TooLarge(Some(9))));
+    fn decode_now_defers_text_and_markdown() {
+        assert_eq!(job_kind("/a.md", &bytes(b"# hi".to_vec())), Some(ParseKind::Markdown));
+        assert_eq!(job_kind("/a.rs", &bytes(b"fn x(){}".to_vec())), Some(ParseKind::Text));
+        assert_eq!(job_kind("/a.xyz", &bytes(b"x".to_vec())), Some(ParseKind::Unknown));
+        assert!(matches!(ready("/a.png", Some(&bytes(png(1, 1)))), Content::Image { natural: (1., 1.), .. }));
+        assert!(matches!(ready("/a.md", None), Content::Loading));
+        assert!(matches!(ready("/report.pdf", None), Content::Unsupported { size: None }));
+        assert!(matches!(ready("/page.html", None), Content::Html));
+        assert!(matches!(ready("/a.md", Some(&Shown::Missing)), Content::Missing));
+        assert!(matches!(ready("/a.md", Some(&Shown::TooLarge { size: 9 })), Content::TooLarge(Some(9))));
         assert!(matches!(
-            content_for(p("/a.md"), Some(&Shown::Failed { reason: "x".into() })),
+            ready("/a.md", Some(&Shown::Failed { reason: "x".into() })),
             Content::Failed(reason) if reason == "x"
         ));
-        assert!(matches!(content_for(p("/a.md"), None), Content::Loading));
+        assert!(matches!(ready("/a.png", Some(&bytes(png(20000, 20000)))), Content::TooLarge(None)));
+        assert!(matches!(ready("/a.png", Some(&bytes(b"junk".to_vec()))), Content::Failed(_)));
+    }
+
+    #[test]
+    fn run_parse_maps_every_kind() {
+        assert!(matches!(parsed("/a.md", &bytes(b"# hi".to_vec())), Content::Markdown(_)));
+        assert!(matches!(parsed("/a.rs", &bytes(b"fn x(){}".to_vec())), Content::Text { highlights: Some(_), .. }));
+        assert!(matches!(parsed("/a.txt", &bytes(b"x".to_vec())), Content::Text { highlights: None, .. }));
+        assert!(matches!(parsed("/a.md", &bytes(vec![0xff, 0xfe])), Content::Unsupported { size: Some(2) }));
+        let big = bytes(vec![b'a'; 2 * 1024 * 1024]);
+        assert!(matches!(parsed("/x.xyz", &big), Content::Unsupported { size: Some(_) }));
+        assert!(matches!(parsed("/x.xyz", &bytes(b"ok".to_vec())), Content::Text { .. }));
+    }
+
+    #[test]
+    fn a_bom_does_not_shift_the_highlight_offsets() {
+        let mut data = vec![0xef, 0xbb, 0xbf];
+        data.extend(b"fn x(){}");
+        let Content::Text { doc, highlights: Some(highlights) } = parsed("/a.rs", &bytes(data)) else {
+            panic!("highlighted text expected");
+        };
+        assert!(!doc.text().starts_with('\u{feff}'));
+        assert!(highlights.line(0).iter().all(|span| span.range.end <= doc.line_len(0)));
+    }
+
+    #[test]
+    fn markdown_over_the_cap_shows_as_plain_text() {
+        let big = bytes(vec![b'a'; MAX_MARKDOWN_BYTES + 1]);
+        assert!(matches!(parsed("/a.md", &big), Content::Text { highlights: None, .. }));
+    }
+
+    #[test]
+    fn same_content_compares_markdown_by_pointer() {
+        let a = parsed("/a.md", &bytes(b"# hi".to_vec()));
+        let b = parsed("/a.md", &bytes(b"# hi".to_vec()));
+        assert!(!same_content(&a, &b));
+        assert!(same_content(&a, &a.clone()));
+        let text = parsed("/a.txt", &bytes(b"# hi".to_vec()));
+        assert!(!same_content(&a, &text));
+        assert!(!same_content(&text, &a));
+        let rust = parsed("/a.rs", &bytes(b"fn x(){}".to_vec()));
+        let again = parsed("/a.rs", &bytes(b"fn x(){}".to_vec()));
+        assert!(same_content(&rust, &rust.clone()));
+        assert!(!same_content(&rust, &again));
+    }
+
+    #[test]
+    fn source_text_covers_text_and_markdown() {
+        let md = parsed("/a.md", &bytes(b"# hi".to_vec()));
+        assert_eq!(source_text(&md), Some("# hi"));
+        assert_eq!(source_text(&parsed("/a.txt", &bytes(b"x".to_vec()))), Some("x"));
+        assert_eq!(source_text(&image()), None);
+        assert_eq!(source_text(&Content::Loading), None);
+    }
+
+    #[test]
+    fn a_parse_result_is_kept_only_for_the_bytes_it_was_made_from() {
+        let shown = Shown::Bytes { data: b"x".to_vec().into(), mtime_ms: 5 };
+        assert!(parse_is_current(Some(&shown), 5));
+        assert!(!parse_is_current(Some(&shown), 4));
+        assert!(!parse_is_current(Some(&Shown::Missing), 5));
+        assert!(!parse_is_current(None, 5));
+    }
+
+    #[test]
+    fn linked_tabs_never_count_as_unseen() {
+        assert!(tracks_seen("toolu_1:0"));
+        assert!(!tracks_seen("link:/a/b.md"));
+    }
+
+    #[test]
+    fn a_file_being_parsed_is_not_decoded_again() {
+        let held = bytes(b"x".to_vec());
+        assert!(!needs_refill(false, true, Some(&held)));
+        assert!(needs_refill(false, false, Some(&held)));
     }
 
     #[test]
@@ -853,7 +1088,7 @@ mod tests {
     }
 
     fn image() -> Content {
-        content_for(Path::new("/a.png"), Some(&bytes(png(1, 1))))
+        ready("/a.png", Some(&bytes(png(1, 1))))
     }
 
     #[test]
@@ -878,15 +1113,15 @@ mod tests {
     #[test]
     fn a_cached_file_is_decoded_again_instead_of_loading() {
         let held = bytes(b"x".to_vec());
-        assert!(needs_refill(false, Some(&held)));
-        assert!(!needs_refill(true, Some(&held)));
-        assert!(!needs_refill(false, None));
+        assert!(needs_refill(false, false, Some(&held)));
+        assert!(!needs_refill(true, false, Some(&held)));
+        assert!(!needs_refill(false, false, None));
     }
 
     #[test]
     fn a_reloaded_file_is_a_different_content() {
-        let a = content_for(Path::new("/a.md"), Some(&bytes(b"one".to_vec())));
-        let b = content_for(Path::new("/a.md"), Some(&bytes(b"two".to_vec())));
+        let a = parsed("/a.md", &bytes(b"one".to_vec()));
+        let b = parsed("/a.md", &bytes(b"two".to_vec()));
         assert!(same_content(&a, &a.clone()));
         assert!(!same_content(&a, &b));
         assert!(same_content(&Content::TooLarge(Some(1)), &Content::TooLarge(Some(1))));

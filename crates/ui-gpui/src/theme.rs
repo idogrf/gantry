@@ -456,6 +456,18 @@ mod tests {
     }
 
     #[test]
+    fn syntax_colors_are_readable_on_markdown_code_blocks() {
+        use preview_doc::highlight::Token::*;
+        for preset in PRESETS {
+            let theme = theme(preset);
+            for token in [Plain, Comment, Keyword, String, Number, Function, Type, Tag] {
+                let ratio = contrast(token_color(token, &theme), theme.tokens.raised);
+                assert!(ratio >= 3.0, "{preset:?} {token:?} on raised: {ratio:.2}");
+            }
+        }
+    }
+
+    #[test]
     fn pane_cards_match_the_terminal_background() {
         for preset in PRESETS {
             assert_eq!(

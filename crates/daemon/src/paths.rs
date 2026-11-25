@@ -50,6 +50,8 @@ pub struct Paths {
     pub search_dir: PathBuf,
     /// Where pasted images are saved (beside the socket).
     pub paste_dir: PathBuf,
+    /// The Claude Code plugin folder preview panes load (daemon-owned, beside the layout).
+    pub plugin_dir: PathBuf,
     /// User settings, shared by every profile.
     pub settings_file: PathBuf,
     socket: SocketLocation,
@@ -111,6 +113,7 @@ impl Paths {
         let containers_file = layout_file.with_file_name("containers.json");
         let search_dir = layout_file.with_file_name("search");
         let paste_dir = runtime_dir.join("paste");
+        let plugin_dir = layout_file.with_file_name("claude-plugin");
         Paths {
             profile: profile.into(),
             lock_file: runtime_dir.join("daemon.lock"),
@@ -120,6 +123,7 @@ impl Paths {
             containers_file,
             search_dir,
             paste_dir,
+            plugin_dir,
             settings_file,
             socket,
         }

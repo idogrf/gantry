@@ -23,6 +23,7 @@ use tokio::sync::Notify;
 use crate::containers::{self, PANE_MARKER, Registry, marker};
 use crate::outbox::Outbox;
 use crate::paste_image;
+use crate::preview_plugin;
 use crate::process_tree;
 use crate::pty::{PtyProcess, SpawnSpec, drain_batch, spawn_output_reader};
 use crate::search::{Search, SearchEvent};
@@ -36,6 +37,8 @@ const RESYNC_TICK: Duration = Duration::from_millis(100);
 const EXIT_DRAIN: Duration = Duration::from_millis(300);
 /// After a failed Docker lookup, new panes skip Docker for this long (a hung Docker would delay every new pane).
 const DOCKER_RETRY: Duration = Duration::from_secs(30);
+/// How long `claude --version` may take before the preview flags are left out.
+const CLAUDE_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Least time between Docker lookups caused by container ids the registry does not know.
 const UNKNOWN_CONTAINER_REFRESH: Duration = Duration::from_secs(10);
 
@@ -57,6 +60,8 @@ pub struct ServerOptions {
     pub docker: Option<String>,
     /// Where pasted images are saved; `None` turns image paste off.
     pub paste_dir: Option<PathBuf>,
+    /// The Claude Code plugin folder preview panes load; `None` never adds the preview flags.
+    pub plugin_dir: Option<PathBuf>,
 }
 
 struct Pane {
@@ -77,6 +82,9 @@ struct Pane {
     container_id: Option<String>,
     /// The user it runs as in that container (`docker exec -u`).
     container_user: Option<String>,
+    /// Whether it was started with the preview plugin flags.
+    #[allow(dead_code)] // read by the preview pane wiring that follows
+    preview: bool,
     last_focused: u64,
     needs_resync: bool,
 }
@@ -137,6 +145,9 @@ struct State {
     docker_failed_at: Option<Instant>,
 }
 
+/// What a probe of `claude --version` found: `None` = no version.
+type ClaudeVersion = Option<(u32, u32, u32)>;
+
 struct Shared {
     state: Mutex<State>,
     shutdown: Notify,
@@ -154,6 +165,10 @@ struct Shared {
     search: Option<Search>,
     /// Where pasted images are saved; `None` = image paste off.
     paste_dir: Option<PathBuf>,
+    /// The Claude Code plugin folder; `None` = no preview flags.
+    plugin_dir: Option<PathBuf>,
+    /// The version each Claude program printed for `--version`, by program (a failed probe is kept as `None`).
+    claude_versions: Mutex<HashMap<String, ClaudeVersion>>,
 }
 
 impl Shared {
@@ -371,13 +386,16 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
     let shared = Arc::new(Shared {
         state: Mutex::new(state),
         shutdown: Notify::new(),
-        base_env: options.base_env,
+        // A pane is no child session of a Claude that happens to have started the daemon.
+        base_env: options.base_env.into_iter().filter(|(name, _)| name != "CLAUDE_CODE_CHILD_SESSION").collect(),
         owner_uid: options.owner_uid,
         instance,
         docker: options.docker,
         claude_dir: claude_dir.clone(),
         search,
         paste_dir: options.paste_dir,
+        plugin_dir: options.plugin_dir,
+        claude_versions: Mutex::new(HashMap::new()),
     });
     refresh_containers(&shared);
     let probes = shared.docker.is_some().then(|| {
@@ -856,7 +874,42 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
         .unwrap_or_else(|| spec.cwd.clone());
     let cwd = app_core::settings::expand_home(&cwd, std::env::home_dir().as_deref());
     let command = (spec.program.clone(), spec.args.clone());
-    start_pane(shared, client_id, request, spec, cwd, |_| command, None);
+    let Some(plugin_dir) = shared.plugin_dir.clone().filter(|_| spec.preview && spec.claude) else {
+        start_pane(shared, client_id, request, spec, cwd, |_| command, None, false);
+        return;
+    };
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        let version = claude_version(&shared, &spec).await;
+        let preview = version.is_some_and(|version| version >= preview_plugin::MIN_CLAUDE);
+        let (program, mut args) = command;
+        if preview {
+            args.extend(preview_plugin::preview_args(&plugin_dir));
+        }
+        start_pane(&shared, client_id, request, spec, cwd, |_| (program, args), None, preview);
+    });
+}
+
+/// The version `spec.program` reports, from the cache or by running it (off the async threads) with the pane's
+/// environment. A failed probe is cached too.
+async fn claude_version(shared: &Arc<Shared>, spec: &SpawnRequest) -> Option<(u32, u32, u32)> {
+    let cached = shared.claude_versions.lock().unwrap_or_else(PoisonError::into_inner).get(&spec.program).copied();
+    if let Some(version) = cached {
+        return version;
+    }
+    let mut env = shared.base_env.clone();
+    env.retain(|(name, _)| !spec.env.iter().any(|(set, _)| set == name));
+    env.extend(spec.env.iter().cloned());
+    let program = spec.program.clone();
+    let version = {
+        let program = program.clone();
+        tokio::task::spawn_blocking(move || preview_plugin::probe_version(&program, &env, CLAUDE_PROBE_TIMEOUT))
+            .await
+            .ok()
+            .flatten()
+    };
+    shared.claude_versions.lock().unwrap_or_else(PoisonError::into_inner).insert(program, version);
+    version
 }
 
 /// The answer to `FindContainer` without asking Docker, when there is one: the container the last lookup found for
@@ -1061,11 +1114,14 @@ fn spawn_in_container(shared: Arc<Shared>, client_id: u64, request: u64, spec: S
             cwd,
             |id| containers::exec_command(&container, &inner_cwd, &program, &args, &marker(&instance, id)),
             Some((folder, container.id.clone(), container.remote_user.clone())),
+            false,
         );
     });
 }
 
-/// Start a pane for `spec` in `cwd`, running the command `command` builds from the new pane's id.
+/// Start a pane for `spec` in `cwd`, running the command `command` builds from the new pane's id. `preview` = the
+/// command carries the preview plugin flags.
+#[allow(clippy::too_many_arguments)]
 fn start_pane(
     shared: &Arc<Shared>,
     client_id: u64,
@@ -1074,6 +1130,7 @@ fn start_pane(
     cwd: PathBuf,
     command: impl FnOnce(PaneId) -> (String, Vec<String>),
     container: Option<(PathBuf, String, Option<String>)>,
+    preview: bool,
 ) {
     let session_arg = claude_session(spec.claude, &spec.program, &spec.args).map(String::from);
     let mut state = shared.lock();
@@ -1117,6 +1174,7 @@ fn start_pane(
         container_id: container.as_ref().map(|(_, id, _)| id.clone()),
         container_user: container.as_ref().and_then(|(_, _, user)| user.clone()),
         container: container.map(|(folder, _, _)| folder),
+        preview,
         last_focused: state.focus_seq,
         needs_resync: false,
     };
@@ -1264,6 +1322,8 @@ mod tests {
             claude_dir: None,
             search: None,
             paste_dir: None,
+            plugin_dir: None,
+            claude_versions: Mutex::new(HashMap::new()),
         });
         let spec = || SpawnRequest {
             preview: false,
@@ -1306,6 +1366,8 @@ mod tests {
             claude_dir: None,
             search: None,
             paste_dir: None,
+            plugin_dir: None,
+            claude_versions: Mutex::new(HashMap::new()),
         });
         let spec = SpawnRequest {
             preview: false,
@@ -1356,6 +1418,8 @@ mod tests {
             claude_dir: None,
             search: None,
             paste_dir: None,
+            plugin_dir: None,
+            claude_versions: Mutex::new(HashMap::new()),
         });
         let spec = SpawnRequest {
             preview: false,
@@ -1373,7 +1437,7 @@ mod tests {
         let script = "trap 'echo winch' WINCH; echo up; while :; do sleep 0.05; done";
         let command = |_| ("sh".to_string(), vec!["-c".to_string(), script.to_string()]);
         let container = container.then(|| (PathBuf::from("/"), "abc".to_string(), None));
-        start_pane(&shared, 1, 1, spec, "/".into(), command, container);
+        start_pane(&shared, 1, 1, spec, "/".into(), command, container, false);
         tokio::time::sleep(Duration::from_millis(1500)).await;
         let text = {
             let state = shared.lock();
@@ -1415,6 +1479,8 @@ mod tests {
             claude_dir: None,
             search: None,
             paste_dir: None,
+            plugin_dir: None,
+            claude_versions: Mutex::new(HashMap::new()),
         });
         let poisoner = shared.clone();
         let _ = std::thread::spawn(move || {

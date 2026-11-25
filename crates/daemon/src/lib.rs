@@ -11,6 +11,7 @@ pub mod outbox;
 pub mod paste_image;
 pub mod paths;
 pub mod preview_mcp;
+pub mod preview_plugin;
 pub mod process_tree;
 pub mod pty;
 pub mod remote_install;

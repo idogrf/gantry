@@ -31,6 +31,7 @@ async fn start_server(idle_timeout: Duration) -> Harness {
         search_dir: None,
         docker: None,
         paste_dir: Some(paths.paste_dir.clone()),
+        plugin_dir: None,
     };
     let server = tokio::spawn(serve(listener, options));
     Harness { paths, server, _dir: dir }
@@ -363,6 +364,7 @@ async fn start_search_server(claude: &std::path::Path, data: &std::path::Path) -
         docker: None,
         search_dir: Some(data.join("search")),
         paste_dir: None,
+        plugin_dir: None,
     };
     let server = tokio::spawn(serve(listener, options));
     Harness { paths, server, _dir: dir }
@@ -488,7 +490,121 @@ async fn image_paste_is_off_without_a_paste_dir() {
         search_dir: None,
         docker: None,
         paste_dir: None,
+        plugin_dir: None,
     };
     let _server = tokio::spawn(serve(listener, options));
     assert!(!welcome_paste_image(&paths).await);
+}
+
+/// A server with `base_env` and a plugin folder inside `plugin_dir`.
+async fn start_plugin_server(base_env: Vec<(String, String)>, plugin_dir: &std::path::Path) -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path(), "test");
+    std::fs::create_dir_all(&paths.runtime_dir).unwrap();
+    let listener = ListenerOptions::new().name(paths.socket_name().unwrap()).create_tokio().unwrap();
+    let options = ServerOptions {
+        base_env,
+        owner_uid: None,
+        idle_timeout: Duration::from_secs(30),
+        claude_dir: None,
+        containers_file: None,
+        search_dir: None,
+        docker: None,
+        paste_dir: None,
+        plugin_dir: Some(plugin_dir.to_path_buf()),
+    };
+    let server = tokio::spawn(serve(listener, options));
+    Harness { paths, server, _dir: dir }
+}
+
+/// A fake `claude` (a shell script, so Unix only): `--version` prints `version`, any other run writes its arguments,
+/// one per line, to `args` and stays alive for a while.
+fn fake_claude(dir: &std::path::Path, version: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let (script, args) = (dir.join("claude"), dir.join("args"));
+    let body = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf '%s\\n' '{version}'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > '{}'\nsleep 5\n",
+        args.display()
+    );
+    std::fs::write(&script, body).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (script, args)
+}
+
+fn claude_request(program: &std::path::Path, preview: bool) -> SpawnRequest {
+    SpawnRequest {
+        preview,
+        program: program.to_string_lossy().into_owned(),
+        args: vec!["--model".into(), "x".into()],
+        claude: true,
+        ..sh("", None)
+    }
+}
+
+/// The arguments the fake claude wrote, once it has started.
+async fn recorded_args(args: &std::path::Path) -> Vec<String> {
+    for _ in 0..100 {
+        if let Ok(text) = std::fs::read_to_string(args)
+            && text.ends_with('\n')
+        {
+            return text.lines().map(String::from).collect();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the fake claude never wrote its arguments");
+}
+
+#[tokio::test]
+async fn preview_claude_pane_gets_the_flags() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (script, args) = fake_claude(tmp.path(), "2.1.332 (Claude Code)");
+    let plugin = tmp.path().join("plugin");
+    let h = start_plugin_server(std::env::vars().collect(), &plugin).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    c.spawn_request(claude_request(&script, true)).await;
+    let mut expected: Vec<String> = vec!["--model".into(), "x".into()];
+    expected.extend(daemon::preview_plugin::preview_args(&plugin));
+    assert_eq!(recorded_args(&args).await, expected);
+}
+
+#[tokio::test]
+async fn no_flags_without_preview() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (script, args) = fake_claude(tmp.path(), "2.1.332 (Claude Code)");
+    let h = start_plugin_server(std::env::vars().collect(), &tmp.path().join("plugin")).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    c.spawn_request(claude_request(&script, false)).await;
+    assert_eq!(recorded_args(&args).await, ["--model", "x"]);
+}
+
+#[tokio::test]
+async fn no_flags_below_the_minimum_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (script, args) = fake_claude(tmp.path(), "2.1.100 (Claude Code)");
+    let h = start_plugin_server(std::env::vars().collect(), &tmp.path().join("plugin")).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    c.spawn_request(claude_request(&script, true)).await;
+    assert_eq!(recorded_args(&args).await, ["--model", "x"]);
+}
+
+#[tokio::test]
+async fn no_flags_for_a_wrapper_without_a_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (script, args) = fake_claude(tmp.path(), "");
+    let h = start_plugin_server(std::env::vars().collect(), &tmp.path().join("plugin")).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    c.spawn_request(claude_request(&script, true)).await;
+    assert_eq!(recorded_args(&args).await, ["--model", "x"]);
+}
+
+#[tokio::test]
+async fn child_session_marker_is_not_passed_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env: Vec<(String, String)> = std::env::vars().collect();
+    env.push(("CLAUDE_CODE_CHILD_SESSION".into(), "1".into()));
+    let h = start_plugin_server(env, &tmp.path().join("plugin")).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    let pane = c.spawn("env; printf END_OF_ENV; sleep 5").await;
+    let text = c.output_until(pane, "END_OF_ENV").await;
+    assert!(!text.contains("CLAUDE_CODE_CHILD_SESSION"), "{text}");
 }

@@ -25,6 +25,11 @@ allow = [
 ]
 private = { ignore = true }
 
+# comrak's grapheme tables; Unicode-DFS-2016 is permissive (predecessor of Unicode-3.0).
+[[licenses.exceptions]]
+name = "finl_unicode"
+allow = ["Unicode-DFS-2016"]
+
 [bans]
 multiple-versions = "allow"
 

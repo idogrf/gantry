@@ -8,12 +8,14 @@ use app_core::session_tree::Tone;
 use std::path::Path;
 
 use app_core::settings::{ProjectColors, StatusFills};
-use app_core::theme_colors::{Preset, Tokens, ToneColors, tone_colors};
+use app_core::theme_colors::{Preset, Tokens, ToneColors, terminal_palette, tone_colors};
 use app_core::workspace::DirBadge;
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Div, ElementId, FontWeight, Global, Hsla, IntoElement, ParentElement,
     Pixels, Styled, Svg, div, hsla, linear_color_stop, linear_gradient, px, relative, rgb, rgba, svg,
 };
+
+use preview_doc::highlight::Token;
 
 use crate::assets::{CONTAINER_ICON, PIN_ICON, SSH_ICON};
 
@@ -55,6 +57,26 @@ impl Theme {
     /// `size` scaled with the interface font size.
     pub fn ui(&self, size: f32) -> Pixels {
         px(size * self.ui_scale)
+    }
+}
+
+/// The color of a syntax token: plain text and comments from the app colors, the rest from the terminal's ANSI colors
+/// of the preset (keyword 5, string 2, number 3, function 4, type 6, tag 1), as `0xRRGGBB`.
+#[allow(dead_code)] // drawn by the preview view in a later task
+pub(crate) fn token_color(token: Token, theme: &Theme) -> u32 {
+    let ansi = |i: usize| {
+        let c = terminal_palette(theme.preset).ansi[i];
+        (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)
+    };
+    match token {
+        Token::Plain => theme.tokens.text,
+        Token::Comment => theme.tokens.muted,
+        Token::Keyword => ansi(5),
+        Token::String => ansi(2),
+        Token::Number => ansi(3),
+        Token::Function => ansi(4),
+        Token::Type => ansi(6),
+        Token::Tag => ansi(1),
     }
 }
 
@@ -419,6 +441,18 @@ mod tests {
             assert!(contrast(theme.tone(tone).fill.unwrap(), theme.tokens.surface) >= 7.0, "{tone:?}");
         }
         assert!(contrast(theme.tone(Tone::Idle).fill.unwrap(), theme.tokens.surface) < 1.5);
+    }
+
+    #[test]
+    fn syntax_colors_are_readable() {
+        use preview_doc::highlight::Token::*;
+        for preset in PRESETS {
+            let theme = theme(preset);
+            for token in [Plain, Comment, Keyword, String, Number, Function, Type, Tag] {
+                let ratio = contrast(token_color(token, &theme), theme.tokens.terminal);
+                assert!(ratio >= 3.0, "{preset:?} {token:?}: {ratio:.2}");
+            }
+        }
     }
 
     #[test]

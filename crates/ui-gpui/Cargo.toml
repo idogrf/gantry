@@ -12,6 +12,7 @@ workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 app-core.workspace = true
+preview-doc.workspace = true
 daemon.workspace = true
 protocol.workspace = true
 claude-index.workspace = true

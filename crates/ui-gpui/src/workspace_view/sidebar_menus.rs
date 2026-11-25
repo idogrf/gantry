@@ -134,12 +134,11 @@ impl WorkspaceView {
                 self.start_rename(RenameTarget::Tab(index), name, window, cx);
             }
             MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
-            // Task 8 wires the preview pane in, Task 9 the file actions.
             MenuAction::OpenPreview(leaf) => self.open_preview_for(leaf, window, cx),
-            MenuAction::ActivateSentFile { .. }
-            | MenuAction::RemoveSentFile { .. }
-            | MenuAction::ClearSentFiles(_)
-            | MenuAction::CopyFileContents(_) => {}
+            MenuAction::ActivateSentFile { leaf, id } => self.activate_file(leaf, &id, window, cx),
+            MenuAction::RemoveSentFile { leaf, id } => self.remove_file(leaf, &id, window, cx),
+            MenuAction::ClearSentFiles(leaf) => self.clear_files(leaf, window, cx),
+            MenuAction::CopyFileContents(leaf) => self.copy_file_contents(leaf, cx),
             MenuAction::CloseTab(index) => self.close_tab_at(index, window, cx),
             MenuAction::NewHere { dir, claude, host } if host.is_local() => {
                 self.open_new(claude, dir, None, None, host, None, None)

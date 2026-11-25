@@ -344,6 +344,14 @@ pub struct WorkspaceView {
     watch_sent: HashMap<HostId, Vec<String>>,
     /// Hosts whose session list just arrived: their daemon is told what to watch again, even an empty list.
     watch_fresh: HashSet<HostId>,
+    /// The bookkeeping and byte cache of the preview files' reads.
+    reads: app_core::preview_reads::Reads,
+    /// Each shown file's decoded content (an image decoded, a text parsed), made once per reply that changed it.
+    decoded: HashMap<app_core::preview_reads::FileKey, crate::preview_view::Content>,
+    /// Remote files an Open in system viewer waits for, with the sent file's id: the reply writes the copy and opens it.
+    open_after_read: HashMap<app_core::preview_reads::FileKey, String>,
+    /// The timer that asks for the shown files again every `preview_reads::POLL`.
+    preview_task: Option<Task<()>>,
     /// What each preview's sidebar entry last got (title, directory), to refresh it when it changes.
     preview_rows: HashMap<NodeId, (String, PathBuf)>,
     /// Spawn request id → leaf waiting for it.
@@ -656,6 +664,10 @@ impl WorkspaceView {
             watch_sent: HashMap::new(),
             watch_fresh: HashSet::new(),
             preview_rows: HashMap::new(),
+            reads: Default::default(),
+            decoded: HashMap::new(),
+            open_after_read: HashMap::new(),
+            preview_task: None,
             pending: HashMap::new(),
             next_request: 0,
             search_answers: HashMap::new(),
@@ -767,6 +779,7 @@ impl WorkspaceView {
         this.publish_update_row(cx);
         this.release_task = Some(this.start_release_timer(cx));
         this.git_task = Some(Self::start_git_timer(window, cx));
+        this.preview_task = Some(Self::start_preview_timer(window, cx));
         let leaves: Vec<NodeId> = this.workspace.leaves.keys().copied().collect();
         for leaf in leaves {
             if this.workspace.is_preview(leaf) {

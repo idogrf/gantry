@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use app_core::host_state::HostCard;
-use app_core::preview::{TextDoc, file_name, fit_tabs};
+use app_core::preview::{TabFit, TextDoc, file_name, fit_tabs};
 use app_core::preview_zoom::{STEP, WHEEL_STEP_PX, Zoom, wheel_factor};
 use app_core::split_tree::NodeId;
 use gpui::{
@@ -46,8 +46,6 @@ pub(crate) struct PreviewTab {
 }
 
 /// What the body shows for the active file.
-// Most variants are set by the file reads of the next change (Task 9).
-#[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) enum Content {
     /// The session has sent no files.
@@ -94,8 +92,6 @@ pub(crate) struct PreviewModel {
     pub can_open: bool,
 }
 
-// The payloads of the tab, menu and hidden-tabs events are read by the next change (Task 9).
-#[allow(dead_code)]
 /// What the user did in the pane.
 pub(crate) enum PreviewEvent {
     /// A mouse press in the pane.
@@ -578,15 +574,30 @@ impl PreviewView {
             )
     }
 
-    fn tab_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Which tabs fit the row and which are behind the `+N` button.
+    fn tab_fit(&self, theme: &Theme) -> TabFit {
         let active_index = self.model.active.as_ref().and_then(|id| self.model.tabs.iter().position(|t| &t.id == id));
-        let fit = fit_tabs(
+        fit_tabs(
             self.model.tabs.len(),
             active_index,
             self.row_width,
             f32::from(theme.ui(TAB_WIDTH)),
             f32::from(theme.ui(PLUS_WIDTH)),
-        );
+        )
+    }
+
+    /// The tabs behind the `+N` button as `(id, name)`.
+    pub(crate) fn hidden_tabs(&self, theme: &Theme) -> Vec<(String, String)> {
+        let fit = self.tab_fit(theme);
+        fit.hidden
+            .iter()
+            .filter_map(|&i| self.model.tabs.get(i))
+            .map(|tab| (tab.id.clone(), tab.name.clone()))
+            .collect()
+    }
+
+    fn tab_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let fit = self.tab_fit(theme);
         let view = cx.entity();
         let tabs = fit.shown.iter().filter_map(|&index| self.model.tabs.get(index).map(|tab| (index, tab)));
         div()

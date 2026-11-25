@@ -97,6 +97,7 @@ impl WorkspaceView {
                     self.watch_sent.remove(host);
                     self.watch_fresh.insert(host.clone());
                     self.update_previews(cx);
+                    self.previews_in_view(window, cx);
                     self.remember_folders(host, cx);
                     self.push_recents(cx);
                     self.resume_finished(window, cx);
@@ -114,6 +115,7 @@ impl WorkspaceView {
                     let upserted = upserted.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.apply(host, upserted, removed, cx));
                     self.update_previews(cx);
+                    self.previews_in_view(window, cx);
                     self.remember_folders(host, cx);
                     self.restart_drained(host, window, cx);
                     for alert in alerts {
@@ -155,8 +157,9 @@ impl WorkspaceView {
                         view.update(cx, |view, cx| view.set_listing_failed(*request, reason, cx));
                     }
                 }
-                // The preview pane that asks for files comes in a later change.
-                ClientEvent::FileContents { .. } => {}
+                ClientEvent::FileContents { request, body } => {
+                    self.on_file_contents(host, *request, body.clone(), window, cx)
+                }
                 ClientEvent::GitStatus { request, state } => {
                     if self.git.apply(host, *request, Ok(state.clone()), Instant::now()) {
                         self.refresh_git_diff(false, cx);
@@ -218,6 +221,7 @@ impl WorkspaceView {
                     if let Some(conn) = self.hosts.get_mut(host) {
                         conn.connected = false;
                     }
+                    self.reads.forget_host(host);
                     let leaves: Vec<NodeId> = self
                         .workspace
                         .leaves
@@ -328,6 +332,7 @@ impl WorkspaceView {
         if self.unseen.len() != before {
             self.sync_unseen(cx);
         }
+        self.previews_in_view(window, cx);
         if active {
             cx.notify();
         }

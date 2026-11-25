@@ -56,6 +56,7 @@ impl WorkspaceView {
     /// connected.
     pub(super) fn forget_host(&mut self, host: &HostId, cx: &mut Context<Self>) {
         self.retries.remove(host);
+        self.reads.forget_host(host);
         // A later connection is a new daemon: it is told what to watch again.
         self.watch_sent.remove(host);
         self.watch_fresh.remove(host);
@@ -513,6 +514,7 @@ impl WorkspaceView {
         if let Some(conn) = self.hosts.get_mut(host) {
             conn.connected = false;
         }
+        self.reads.forget_host(host);
         self.take_overs.retain(|(taking, _), _| taking != host);
         let leaves = &self.workspace.leaves;
         self.renames.retain(|leaf, _| leaves.get(leaf).is_some_and(|entry| entry.host != *host));
@@ -551,6 +553,7 @@ impl WorkspaceView {
         if let Some(conn) = self.hosts.get_mut(host) {
             conn.connected = false;
         }
+        self.reads.forget_host(host);
         self.take_overs.retain(|(taking, _), _| taking != host);
         let leaves = &self.workspace.leaves;
         self.renames.retain(|leaf, _| leaves.get(leaf).is_some_and(|entry| entry.host != *host));

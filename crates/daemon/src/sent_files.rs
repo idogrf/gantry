@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use claude_index::sent_files::SentFilesReader;
 use protocol::message::{PaneId, SentFile, SessionInfo, SessionState};
 
-/// The session ids to read transcripts of: those Managed by a pane that has the preview plugin, plus `requested`
-/// (the GUI's own list, kept even when the session is not in `sessions`).
+/// The session ids to read transcripts of: those Managed by a pane that has the preview plugin, plus the
+/// `requested` ones (the GUI's own list) that are in `sessions`. An unlisted id is not watched: its list would be
+/// dropped with the session, and a reader that already consumed the transcript would never report it again.
 pub fn watched(
     sessions: &[SessionInfo],
     preview_panes: &HashSet<PaneId>,
@@ -17,7 +18,8 @@ pub fn watched(
         SessionState::Managed { pane } if preview_panes.contains(&pane) => Some(session.id.clone()),
         _ => None,
     });
-    managed.chain(requested.iter().cloned()).collect()
+    let asked = sessions.iter().filter(|session| requested.contains(&session.id)).map(|session| session.id.clone());
+    managed.chain(asked).collect()
 }
 
 /// The newest `<dir>/projects/*/<session>.jsonl` over `dirs`.
@@ -37,10 +39,10 @@ pub fn transcript_path(dirs: &[PathBuf], session: &str) -> Option<PathBuf> {
     newest.map(|(_, path)| path)
 }
 
-/// One transcript reader per watched session.
+/// One transcript reader per watched session, with the transcript it reads.
 #[derive(Debug, Default)]
 pub struct SentFilesWatch {
-    readers: HashMap<String, SentFilesReader>,
+    readers: HashMap<String, (PathBuf, SentFilesReader)>,
 }
 
 impl SentFilesWatch {
@@ -51,7 +53,11 @@ impl SentFilesWatch {
         let mut changes = Vec::new();
         for id in ids {
             let Some(path) = transcript_path(dirs, id) else { continue };
-            let reader = self.readers.entry(id.clone()).or_default();
+            let (read_path, reader) = self.readers.entry(id.clone()).or_default();
+            if *read_path != path {
+                *read_path = path.clone();
+                *reader = SentFilesReader::new();
+            }
             match reader.read_new(&path) {
                 Ok(true) => {
                     let files = reader
@@ -129,7 +135,7 @@ mod tests {
             session("c", SessionState::Closed),
         ];
         let got = watched(&sessions, &HashSet::from([1]), &ids(&["c", "unlisted"]));
-        assert_eq!(got, ids(&["a", "c", "unlisted"]));
+        assert_eq!(got, ids(&["a", "c"]));
     }
 
     #[test]
@@ -141,6 +147,34 @@ mod tests {
         let dirs = [one.path().to_path_buf(), two.path().to_path_buf()];
         assert_eq!(transcript_path(&dirs, "s1"), Some(wanted));
         assert_eq!(transcript_path(&dirs, "missing"), None);
+    }
+
+    #[test]
+    fn a_session_listed_late_still_reports_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        append(&dir.path().join("projects/p/s1.jsonl"), &sent("toolu_1", "/w/a.md"));
+        let dirs = [dir.path().to_path_buf()];
+        let mut watch = SentFilesWatch::default();
+        let requested = ids(&["s1"]);
+        // Not listed yet: not watched, so nothing is consumed.
+        assert!(watched(&[], &HashSet::new(), &requested).is_empty());
+        assert!(watch.tick(&HashSet::new(), &dirs).is_empty());
+        let listed = [session("s1", SessionState::Closed)];
+        let now = watched(&listed, &HashSet::new(), &requested);
+        assert_eq!(watch.tick(&now, &dirs).len(), 1);
+    }
+
+    #[test]
+    fn a_new_transcript_path_starts_the_reader_over() {
+        let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        append(&one.path().join("projects/p/s1.jsonl"), &sent("toolu_1", "/w/a.md"));
+        let mut watch = SentFilesWatch::default();
+        let want = ids(&["s1"]);
+        assert_eq!(watch.tick(&want, &[one.path().to_path_buf()]).len(), 1);
+        append(&two.path().join("projects/p/s1.jsonl"), &sent("toolu_2", "/w/b.md"));
+        let changes = watch.tick(&want, &[two.path().to_path_buf()]);
+        assert_eq!(changes[0].1.len(), 1);
+        assert_eq!(changes[0].1[0].id, "toolu_2:0");
     }
 
     #[test]

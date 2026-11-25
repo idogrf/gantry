@@ -198,6 +198,14 @@ fn run_parse(job: &ParseJob) -> Content {
     }
 }
 
+/// What a file shows before any read has been answered (`Loading`, or the card of a never-read type).
+fn ready_content(path: &Path) -> Content {
+    match decode_now(path, None) {
+        Decode::Ready(content) => content,
+        Decode::Parse(_) => Content::Loading,
+    }
+}
+
 /// The source text of text or markdown content.
 fn source_text(content: &Content) -> Option<&str> {
     match content {
@@ -210,6 +218,26 @@ fn source_text(content: &Content) -> Option<&str> {
 /// Whether a parse made from bytes modified at `mtime_ms` still matches what the cache holds.
 fn parse_is_current(shown: Option<&Shown>, mtime_ms: u64) -> bool {
     matches!(shown, Some(Shown::Bytes { mtime_ms: now, .. }) if *now == mtime_ms)
+}
+
+/// What to do when a parse of bytes modified at `mtime_ms` ends: whether to show its content, and whether to start
+/// the queued job (which `queued_mtime` is the time of). A result for older bytes is still shown while a newer job is
+/// queued (the file may change faster than it parses; the queued job then replaces it), but never when the file is
+/// gone or nothing newer is coming.
+fn after_parse(shown: Option<&Shown>, mtime_ms: u64, queued_mtime: Option<u64>) -> (bool, bool) {
+    let has_bytes = matches!(shown, Some(Shown::Bytes { .. }));
+    let keep = has_bytes && (parse_is_current(shown, mtime_ms) || queued_mtime.is_some());
+    (keep, queued_mtime.is_some_and(|mtime| parse_is_current(shown, mtime)))
+}
+
+/// Route a new job for `key`: it starts now (returned) unless a parse is `running`, when it replaces the queued job.
+fn route_job(running: bool, queue: &mut HashMap<FileKey, ParseJob>, key: FileKey, job: ParseJob) -> Option<ParseJob> {
+    if running {
+        queue.insert(key, job);
+        None
+    } else {
+        Some(job)
+    }
 }
 
 /// Whether the unseen dot and the saved seen list cover tab `id`: not a file opened from a link.
@@ -454,9 +482,8 @@ impl WorkspaceView {
                 self.decoded.insert(key, content)
             }
             Decode::Parse(job) => {
-                if self.parsing.contains_key(&key) {
-                    self.parse_queued.insert(key, job);
-                } else {
+                if let Some(job) = route_job(self.parsing.contains_key(&key), &mut self.parse_queued, key.clone(), job)
+                {
                     self.spawn_parse(key, job, cx);
                 }
                 None
@@ -474,17 +501,19 @@ impl WorkspaceView {
         self.parsing.insert(key, task);
     }
 
-    /// A parse finished: keep its content unless the file changed or went away meanwhile, then start the queued job.
+    /// A parse finished: keep its content (see `after_parse`), then start the queued job.
     fn parse_done(&mut self, key: FileKey, mtime_ms: u64, content: Content, cx: &mut Context<Self>) {
         self.parsing.remove(&key);
-        if parse_is_current(self.reads.shown(&key), mtime_ms) {
+        let queued = self.parse_queued.get(&key).map(|job| job.mtime_ms);
+        let (keep, run_queued) = after_parse(self.reads.shown(&key), mtime_ms, queued);
+        if keep {
             let old = self.decoded.insert(key.clone(), content);
             self.pending_release.extend(images_of(old.into_iter().collect()));
             self.push_preview_models(cx);
             cx.notify();
         }
         if let Some(job) = self.parse_queued.remove(&key)
-            && parse_is_current(self.reads.shown(&key), job.mtime_ms)
+            && run_queued
         {
             self.spawn_parse(key, job, cx);
         }
@@ -697,7 +726,8 @@ impl WorkspaceView {
                 let key = FileKey { host: host.clone(), path: file.path.clone() };
                 match self.decoded.get(&key) {
                     Some(content) => content.clone(),
-                    None => Content::Loading,
+                    // Never-read types (HTML, PDF) have no decoded entry: their card comes from the type alone.
+                    None => ready_content(&file.path),
                 }
             }
             _ => Content::NoFiles,
@@ -1032,6 +1062,52 @@ mod tests {
         assert!(!parse_is_current(Some(&shown), 4));
         assert!(!parse_is_current(Some(&Shown::Missing), 5));
         assert!(!parse_is_current(None, 5));
+    }
+
+    #[test]
+    fn a_never_read_file_without_a_decoded_entry_shows_its_card() {
+        assert!(matches!(ready_content(Path::new("/page.html")), Content::Html));
+        let pdf = ready_content(Path::new("/report.pdf"));
+        assert!(matches!(pdf, Content::Unsupported { size: None }));
+        assert!(matches!(ready_content(Path::new("/a.md")), Content::Loading));
+        // A deleted local file of that type cannot open (the existence check applies to these cards).
+        assert!(!can_open(true, false, false, &pdf));
+        assert!(can_open(true, false, true, &pdf));
+    }
+
+    fn job(mtime_ms: u64) -> ParseJob {
+        ParseJob { kind: ParseKind::Text, path: "/a.rs".into(), data: Arc::from(&b"x"[..]), mtime_ms }
+    }
+
+    #[test]
+    fn a_change_during_a_parse_queues_one_job_and_the_stale_result_is_kept_until_it_lands() {
+        let mut queue = HashMap::new();
+        let k = key("/a.rs");
+        let at = |m| Shown::Bytes { data: b"x".to_vec().into(), mtime_ms: m };
+        // First job runs at once; two changes while it runs leave only the newest queued.
+        assert!(route_job(false, &mut queue, k.clone(), job(1)).is_some());
+        assert!(route_job(true, &mut queue, k.clone(), job(2)).is_none());
+        assert!(route_job(true, &mut queue, k.clone(), job(3)).is_none());
+        let queued = queue.get(&k).map(|job| job.mtime_ms);
+        assert_eq!(queued, Some(3));
+        // The first result is stale but nothing newer is shown yet: kept, and the queued job starts.
+        assert_eq!(after_parse(Some(&at(3)), 1, queued), (true, true));
+        // The queued job's own result is current; nothing is queued after it.
+        assert_eq!(after_parse(Some(&at(3)), 3, None), (true, false));
+        // A stale result with nothing queued, or for a file that is gone, is dropped.
+        assert_eq!(after_parse(Some(&at(3)), 1, None), (false, false));
+        assert_eq!(after_parse(Some(&Shown::Missing), 1, Some(3)), (false, false));
+    }
+
+    #[test]
+    fn highlighted_and_plain_text_are_different_content() {
+        let Content::Text { doc, highlights: Some(highlights) } = parsed("/a.rs", &bytes(b"fn x(){}".to_vec())) else {
+            panic!("highlighted text expected");
+        };
+        let with = Content::Text { doc: doc.clone(), highlights: Some(highlights) };
+        let without = Content::Text { doc, highlights: None };
+        assert!(!same_content(&with, &without));
+        assert!(!same_content(&without, &with));
     }
 
     #[test]

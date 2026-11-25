@@ -498,6 +498,15 @@ async fn image_paste_is_off_without_a_paste_dir() {
 
 /// A server with `base_env` and a plugin folder inside `plugin_dir`.
 async fn start_plugin_server(base_env: Vec<(String, String)>, plugin_dir: &std::path::Path) -> Harness {
+    start_plugin_server_indexing(base_env, plugin_dir, None).await
+}
+
+/// `start_plugin_server` that also indexes the Claude config dir `claude_dir`.
+async fn start_plugin_server_indexing(
+    base_env: Vec<(String, String)>,
+    plugin_dir: &std::path::Path,
+    claude_dir: Option<std::path::PathBuf>,
+) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::in_dir(dir.path(), "test");
     std::fs::create_dir_all(&paths.runtime_dir).unwrap();
@@ -506,7 +515,7 @@ async fn start_plugin_server(base_env: Vec<(String, String)>, plugin_dir: &std::
         base_env,
         owner_uid: None,
         idle_timeout: Duration::from_secs(30),
-        claude_dir: None,
+        claude_dir,
         containers_file: None,
         search_dir: None,
         docker: None,
@@ -565,6 +574,46 @@ async fn preview_claude_pane_gets_the_flags() {
     let mut expected: Vec<String> = vec!["--model".into(), "x".into()];
     expected.extend(daemon::preview_plugin::preview_args(&plugin));
     assert_eq!(recorded_args(&args).await, expected);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_preview_panes_own_session_reports_its_sent_files_unasked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (script, _args) = fake_claude(tmp.path(), "2.1.332 (Claude Code)");
+    let (config, work) = (tmp.path().join("config"), tmp.path().join("work"));
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(config.join("projects/-work")).unwrap();
+    let call = serde_json::json!({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "toolu_1", "name": claude_index::sent_files::TOOL_NAME,
+         "input": {"paths": ["plan.md"]}}]}});
+    let result = serde_json::json!({"type": "user", "timestamp": "2026-11-25T10:00:00.250Z", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "text",
+         "text": format!("{}\n- {}/plan.md", claude_index::sent_files::SHOWN_HEADER, work.display())}]}]}});
+    let first = serde_json::json!({"type": "user", "cwd": work, "message": {"content": "hello"}});
+    std::fs::write(config.join("projects/-work/s1.jsonl"), format!("{first}\n{call}\n{result}\n")).unwrap();
+    let h = start_plugin_server_indexing(std::env::vars().collect(), &tmp.path().join("plugin"), Some(config)).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    let mut request = claude_request(&script, true);
+    request.args = vec!["--session-id".into(), "s1".into()];
+    request.cwd = work.clone();
+    let (pane, _) = c.spawn_request(request).await;
+    c.send(&ClientMessage::ListPanes).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "no sent files reported");
+        let sessions = match c.control().await {
+            DaemonMessage::Sessions { sessions } => sessions,
+            DaemonMessage::SessionsChanged { upserted, .. } => upserted,
+            _ => continue,
+        };
+        if let Some(session) = sessions.iter().find(|s| s.id == "s1" && !s.sent_files.is_empty()) {
+            assert_eq!(session.state, SessionState::Managed { pane });
+            assert_eq!(session.sent_files[0].path, work.join("plan.md"));
+            assert!(session.sent_files[0].backlog);
+            return;
+        }
+    }
 }
 
 #[tokio::test]

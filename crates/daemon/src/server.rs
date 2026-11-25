@@ -199,8 +199,13 @@ impl State {
     }
 
     fn control(&self, message: &DaemonMessage) {
+        self.send_frame(Frame::control(message));
+    }
+
+    /// Queue a frame built earlier, so a large message is not serialized while the state is locked.
+    fn send_frame(&self, frame: Frame) {
         if let Some(client) = &self.client {
-            client.outbox.push_control(Frame::control(message));
+            client.outbox.push_control(frame);
         }
     }
 
@@ -831,16 +836,17 @@ async fn watch_sent_files(shared: Arc<Shared>) {
         }
         let read = tokio::task::spawn_blocking(move || {
             let changes = watch.tick(&ids, &dirs);
-            (watch, changes)
+            (watch, ids, changes)
         })
         .await;
-        let Ok((back, changes)) = read else {
+        let Ok((back, ids, mut changes)) = read else {
             watch = SentFilesWatch::default();
             continue;
         };
         watch = back;
+        let mut state = shared.lock();
+        changes.extend(watch.missing(&ids, &state.sent_files));
         if !changes.is_empty() {
-            let mut state = shared.lock();
             state.sent_files.extend(changes);
             state.publish_sessions(false);
         }
@@ -1025,7 +1031,8 @@ fn read_file_request(shared: &Arc<Shared>, request: u64, path: String, known_mti
     let shared = shared.clone();
     tokio::task::spawn_blocking(move || {
         let body = crate::read_file::read_file(&path, known_mtime_ms, std::env::home_dir().as_deref());
-        shared.lock().control(&DaemonMessage::FileContents { request, body });
+        let frame = Frame::control(&DaemonMessage::FileContents { request, body });
+        shared.lock().send_frame(frame);
     });
 }
 

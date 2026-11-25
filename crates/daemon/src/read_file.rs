@@ -1,5 +1,6 @@
 //! Reading one file for the preview pane (`ReadFile`).
 
+use std::io::Read;
 use std::path::Path;
 
 use protocol::message::FileBody;
@@ -32,8 +33,12 @@ pub fn read_file(path: &str, known_mtime_ms: Option<u64>, home: Option<&Path>) -
     if mtime_ms != 0 && known_mtime_ms == Some(mtime_ms) {
         return FileBody::Unchanged;
     }
-    match std::fs::read(&expanded) {
-        Ok(data) => FileBody::Bytes { data, mtime_ms },
+    // Read at most one byte past the cap: a file that grew since `metadata` is still refused.
+    let mut data = Vec::new();
+    let read = std::fs::File::open(&expanded).and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut data));
+    match read {
+        Ok(_) if data.len() as u64 > MAX_BYTES => FileBody::TooLarge { size: data.len() as u64 },
+        Ok(_) => FileBody::Bytes { data, mtime_ms },
         Err(error) => FileBody::Failed { reason: reason(&error) },
     }
 }

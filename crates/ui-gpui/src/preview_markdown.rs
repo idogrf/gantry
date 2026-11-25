@@ -177,6 +177,60 @@ pub(crate) fn press_selection(
     }
 }
 
+/// What a press selects, and so the step a drag extends it by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unit {
+    /// One click: characters.
+    Char,
+    /// Two clicks: words.
+    Word,
+    /// Three clicks: the whole block.
+    Block,
+}
+
+impl Unit {
+    /// The unit of a press that is the `clicks`-th in a row.
+    pub(crate) fn of(clicks: usize) -> Self {
+        match clicks {
+            0 | 1 => Unit::Char,
+            2 => Unit::Word,
+            _ => Unit::Block,
+        }
+    }
+}
+
+/// The selection a drag to `offset` makes after a press of `unit` that selected `origin` (a caret for characters): by
+/// characters it runs from the press to the pointer, by words from the pressed word to the word under the pointer (the
+/// pressed word stays selected), by blocks it stays the whole block.
+pub(crate) fn drag_selection(
+    unit: Unit,
+    origin: &Range<usize>,
+    block: usize,
+    offset: usize,
+    text: &str,
+) -> BlockSelection {
+    let (anchor, head) = match unit {
+        Unit::Char => (origin.start, offset),
+        Unit::Block => (0, text.len()),
+        Unit::Word => {
+            let word = word_bounds(text, offset);
+            if offset >= origin.end {
+                (origin.start, word.end.max(origin.end))
+            } else if offset < origin.start {
+                (origin.end, word.start.min(origin.start))
+            } else {
+                (origin.start, origin.end)
+            }
+        }
+    };
+    BlockSelection { block, anchor, head }
+}
+
+/// An empty strip `width` wide that reports a press or drag on it as `offset` (the margin beside a line of text).
+pub(crate) fn pad(width: gpui::Pixels, hit: &Hit, offset: usize) -> Div {
+    offset_pointer(div().flex_none().w(width), hit, offset)
+}
+
 /// The part of `range` that falls in a line of `len` bytes starting `base` bytes into its block, relative to the line.
 fn clip_range(range: &Range<usize>, base: usize, len: usize) -> Option<Range<usize>> {
     let (start, end) = (range.start.max(base), range.end.min(base + len));
@@ -582,17 +636,17 @@ pub(crate) fn code_line(
     let background = selection_background(theme);
     if rtl && let Some(order) = display_line(line) {
         let offsets: Vec<usize> = line.char_indices().map(|(at, _)| at).collect();
-        return div()
-            .flex()
-            .when(wrap, |d| d.flex_wrap())
-            .children(order.into_iter().map(|(logical, ch)| {
+        let chars =
+            div().flex().min_w_0().when(wrap, |d| d.flex_wrap()).children(order.into_iter().map(|(logical, ch)| {
                 let at = offsets[logical];
                 let color = token_color(token_at(spans, at), theme);
                 let shown = interact.selected.as_ref().is_some_and(|range| range.contains(&at));
                 let cell = div().text_color(rgb(color)).when(shown, |d| d.bg(background)).child(ch.to_string());
                 offset_pointer(cell, &interact.hit, at)
-            }))
-            .into_any_element();
+            }));
+        // The space after the characters is a target of its own (a sibling, so it never overrides a character).
+        let rest = offset_pointer(div().flex_1().min_w(px(4.)), &interact.hit, line.len());
+        return div().w_full().flex().child(chars).child(rest).into_any_element();
     }
     let mut runs = token_runs(line.len(), spans.iter().cloned(), font, theme);
     if let Some(range) = interact.selected.clone() {
@@ -1063,6 +1117,28 @@ mod tests {
         // Shift on another block starts over.
         let other = Some(BlockSelection { block: 5, anchor: 1, head: 3 });
         assert_eq!(at(other, 9, true, 1), BlockSelection { block: 2, anchor: 9, head: 9 });
+    }
+
+    #[test]
+    fn a_drag_extends_a_press_by_its_unit() {
+        let text = "hello big world";
+        let word = 6..9;
+        let drag = |unit, origin: Range<usize>, offset| {
+            let s = drag_selection(unit, &origin, 0, offset, text);
+            (s.anchor, s.head)
+        };
+        // Jitter inside the pressed word keeps it.
+        assert_eq!(drag(Unit::Word, word.clone(), 7), (6, 9));
+        assert_eq!(drag(Unit::Word, word.clone(), 6), (6, 9));
+        // Onto the next word, by words; back before the word, from its end.
+        assert_eq!(drag(Unit::Word, word.clone(), 12), (6, 15));
+        assert_eq!(drag(Unit::Word, word.clone(), 2), (9, 0));
+        // A block stays whole; characters follow the pointer.
+        assert_eq!(drag(Unit::Block, 0..15, 4), (0, 15));
+        assert_eq!(drag(Unit::Char, 3..3, 8), (3, 8));
+        assert_eq!(Unit::of(1), Unit::Char);
+        assert_eq!(Unit::of(2), Unit::Word);
+        assert_eq!(Unit::of(5), Unit::Block);
     }
 
     #[test]

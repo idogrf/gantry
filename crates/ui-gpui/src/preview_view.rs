@@ -26,7 +26,9 @@ use crate::assets::{CLOSE_ICON, EYE_ICON, FILE_ICON, OPEN_EXTERNAL_ICON};
 use crate::git_diff_view::size_text;
 use crate::hover_card::{self, HoverCard};
 use crate::pane_drag::DraggedPane;
-use crate::preview_markdown::{self, Gesture, Interact, LineCache, RowState, VisualCache, code_line, display_spans};
+use crate::preview_markdown::{
+    self, Gesture, Interact, LineCache, RowState, Unit, VisualCache, code_line, display_spans, drag_selection, pad,
+};
 use crate::settings_store::SettingsStore;
 use crate::terminal_view::{host_card_element, installed_families, installed_family, pane_font};
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, theme};
@@ -334,6 +336,12 @@ pub(crate) struct PreviewView {
     md_selection: Option<BlockSelection>,
     /// The left button is held after a press on text.
     dragging: bool,
+    /// What the last markdown press selected: its unit and the range it covered.
+    md_press: Option<(Unit, Range<usize>)>,
+    /// A press landed on text since the root view last saw one (a press elsewhere clears the selection).
+    pressed_text: bool,
+    /// The pane was drawn since the drag scroll last changed something (a hidden pane stops the loop).
+    shown: bool,
     /// The loop that scrolls while a drag sits at an edge of the body.
     auto_scroll: Option<Task<()>>,
     /// The tab row's width in px, measured while drawing.
@@ -402,6 +410,9 @@ impl PreviewView {
             md_selection: None,
             auto_scroll: None,
             dragging: false,
+            md_press: None,
+            pressed_text: false,
+            shown: true,
             row_width: 0.0,
             zoom: None,
             viewport: Bounds::default(),
@@ -626,19 +637,30 @@ impl PreviewView {
         }
         match gesture {
             Gesture::Press { shift, clicks } => {
-                self.md_selection =
-                    Some(preview_markdown::press_selection(self.md_selection, block, offset, shift, clicks, text));
+                let selection =
+                    preview_markdown::press_selection(self.md_selection, block, offset, shift, clicks, text);
+                let unit = Unit::of(clicks);
+                let origin = if unit == Unit::Char { selection.anchor..selection.anchor } else { selection.range() };
+                self.md_press = Some((unit, origin));
+                self.md_selection = Some(selection);
                 self.selection = None;
                 self.dragging = true;
+                self.pressed_text = true;
             }
             Gesture::Drag => {
                 // A selection never leaves its block: another block's text does not move it.
-                match self.md_selection.as_mut() {
-                    Some(selection) if self.dragging && selection.block == block && selection.head != offset => {
-                        selection.head = offset;
-                    }
-                    _ => return,
+                let (Some(selection), Some((unit, origin))) = (self.md_selection.as_mut(), self.md_press.as_ref())
+                else {
+                    return;
+                };
+                if !self.dragging || selection.block != block {
+                    return;
                 }
+                let next = drag_selection(*unit, origin, block, offset, text);
+                if next == *selection {
+                    return;
+                }
+                *selection = next;
             }
         }
         cx.notify();
@@ -654,6 +676,7 @@ impl PreviewView {
                 self.selection = Some(TextSelection { anchor, head: at });
                 self.md_selection = None;
                 self.dragging = true;
+                self.pressed_text = true;
             }
             Gesture::Drag => match self.selection.as_mut() {
                 Some(selection) if self.dragging && selection.head != at => selection.head = at,
@@ -661,6 +684,16 @@ impl PreviewView {
             },
         }
         cx.notify();
+    }
+
+    /// A left press reached the root view: unless it was on text (or extends with Shift) it clears the selection.
+    fn press_elsewhere(&mut self, shift: bool, cx: &mut Context<Self>) {
+        let on_text = std::mem::take(&mut self.pressed_text);
+        if !on_text && !shift && (self.selection.is_some() || self.md_selection.is_some()) {
+            self.selection = None;
+            self.md_selection = None;
+            cx.notify();
+        }
     }
 
     /// The button went up: the drag and its scroll loop end.
@@ -707,7 +740,9 @@ impl PreviewView {
 
     /// One step of the drag scroll; `false` ends the loop (button up, window inactive or the pointer left the zone).
     fn auto_scroll_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.dragging || !window.is_window_active() {
+        // A pane that was not drawn since the last change is not in the visible tab any more.
+        if !self.dragging || !window.is_window_active() || !self.shown {
+            self.dragging = false;
             return false;
         }
         let Some((top, bottom)) = self.body_edges() else { return false };
@@ -715,13 +750,16 @@ impl PreviewView {
         if step == 0.0 {
             return false;
         }
-        match &self.model.content {
+        let changed = match &self.model.content {
             Content::Markdown(doc) => {
+                let (top, head) = (self.md_list.logical_scroll_top(), self.md_selection.map(|s| s.head));
+                let place = |o: ListOffset| (o.item_ix, f32::from(o.offset_in_item));
                 self.md_list.scroll_by(px(step));
                 if let Some(selection) = self.md_selection.as_mut() {
                     let length = doc.blocks.get(selection.block).map_or(0, |b| b.text.len());
                     selection.head = if step < 0.0 { 0 } else { length };
                 }
+                place(top) != place(self.md_list.logical_scroll_top()) || head != self.md_selection.map(|s| s.head)
             }
             Content::Text { doc, .. } => {
                 let handle = self.scroll.0.borrow().base_handle.clone();
@@ -732,14 +770,20 @@ impl PreviewView {
                 let last = doc.line_count().saturating_sub(1);
                 let first_in_view = ((-moved / row) as usize).min(last);
                 let last_in_view = (((-moved + f32::from(handle.bounds().size.height)) / row) as usize).min(last);
+                let head = self.selection.map(|s| s.head);
                 if let Some(selection) = self.selection.as_mut() {
                     selection.head =
                         if step < 0.0 { (first_in_view, 0) } else { (last_in_view, doc.line_len(last_in_view)) };
                 }
+                moved != f32::from(offset.y) || head != self.selection.map(|s| s.head)
             }
             _ => return false,
+        };
+        if changed {
+            // Drawn again before the next tick, or the pane is hidden and the loop ends.
+            self.shown = false;
+            cx.notify();
         }
-        cx.notify();
         true
     }
 
@@ -1252,7 +1296,6 @@ impl PreviewView {
                     .h(px(metrics.row_height))
                     .w_full()
                     .min_w(width)
-                    .px(px(12.))
                     .flex()
                     .items_center()
                     .whitespace_nowrap()
@@ -1260,7 +1303,9 @@ impl PreviewView {
                     .text_size(px(metrics.size))
                     .bg(rgb(theme.tokens.terminal))
                     .text_color(rgb(theme.tokens.text))
+                    .child(pad(px(12.), &interact.hit, 0))
                     .child(code_line(&shown, &spans, &font, right_to_left, false, &theme, &interact))
+                    .child(pad(px(12.), &interact.hit, shown.len()))
                     .into_any_element()
             })
             .collect()
@@ -1386,6 +1431,7 @@ fn plain_card(title: &str) -> HoverCard {
 
 impl Render for PreviewView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.shown = true;
         self.sync_zoom();
         self.sync_md(window, cx);
         self.frame_images.clear();
@@ -1428,7 +1474,8 @@ impl Render for PreviewView {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_, _, _, cx| {
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.press_elsewhere(event.modifiers.shift, cx);
                     cx.emit(PreviewEvent::Focused);
                 }),
             )

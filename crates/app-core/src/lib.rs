@@ -25,6 +25,7 @@ pub mod mouse;
 pub mod palette;
 pub mod paste;
 pub mod preview;
+pub mod preview_zoom;
 pub mod recents;
 pub mod release;
 pub mod replay;

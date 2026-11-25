@@ -143,13 +143,11 @@ fn safe_part(part: &str, fallback: &str) -> String {
     }
 }
 
-/// Where the copy of a remote file for the system viewer goes: one folder per host and file id, so two files with the
-/// same name never overwrite each other, and nothing a host, id or name says can leave that folder.
+/// Where the copy of a remote file for the system viewer goes in the private folder `root` (`preview_dir`): one folder
+/// per host and file id, so two files with the same name never overwrite each other, and nothing a host, id or name
+/// says can leave that folder.
 fn temp_copy_path(root: &Path, host: &str, id: &str, name: &str) -> PathBuf {
-    root.join("gantry-preview")
-        .join(safe_part(host, "-"))
-        .join(safe_part(&id.replace(':', "-"), "-"))
-        .join(safe_part(name, "file"))
+    root.join(safe_part(host, "-")).join(safe_part(&id.replace(':', "-"), "-")).join(safe_part(name, "file"))
 }
 
 /// Whether the file is known to be gone. A local file of a type the pane never reads (`Unsupported`, `Html`) is never
@@ -387,9 +385,12 @@ impl WorkspaceView {
 
     /// Write a remote file's bytes to a temporary copy and open that in the system viewer.
     fn open_copy(key: &FileKey, id: &str, data: &[u8], cx: &mut Context<Self>) {
-        let path = temp_copy_path(&std::env::temp_dir(), key.host.name(), id, &file_name(&key.path));
-        let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, data));
-        match written {
+        let Some(root) = crate::preview_dir::root() else {
+            tracing::warn!("no private folder for the preview copy");
+            return;
+        };
+        let path = temp_copy_path(&root, key.host.name(), id, &file_name(&key.path));
+        match crate::preview_dir::write_private(&root, &path, data) {
             Ok(()) => cx.open_with_system(&path),
             Err(err) => tracing::warn!("writing the preview copy failed: {err}"),
         }
@@ -809,15 +810,15 @@ mod tests {
     fn temp_copy_path_is_per_host_and_file() {
         assert_eq!(
             temp_copy_path(Path::new("/tmp"), "box", "toolu_1:0", "after.png"),
-            PathBuf::from("/tmp/gantry-preview/box/toolu_1-0/after.png")
+            PathBuf::from("/tmp/box/toolu_1-0/after.png")
         );
     }
 
     #[test]
     fn temp_copy_path_cannot_leave_its_folder() {
         let root = Path::new("/tmp");
-        assert_eq!(temp_copy_path(root, "..", "a/b:0", ".."), PathBuf::from("/tmp/gantry-preview/-/a-b-0/-"));
-        assert_eq!(temp_copy_path(root, "x\\y", "i", ""), PathBuf::from("/tmp/gantry-preview/x-y/i/file"));
+        assert_eq!(temp_copy_path(root, "..", "a/b:0", ".."), PathBuf::from("/tmp/-/a-b-0/-"));
+        assert_eq!(temp_copy_path(root, "x\\y", "i", ""), PathBuf::from("/tmp/x-y/i/file"));
     }
 
     #[test]

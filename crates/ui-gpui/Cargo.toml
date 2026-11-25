@@ -23,6 +23,10 @@ notify-rust.workspace = true
 rodio.workspace = true
 ureq = "3.4.2"
 sha2 = "0.10"
+directories.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["process"] }
 
 [dev-dependencies]
 tempfile.workspace = true

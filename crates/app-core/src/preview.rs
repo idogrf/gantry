@@ -166,16 +166,22 @@ impl TextDoc {
     /// One line as drawn: tabs as 4 spaces, cut at `MAX_LINE_CHARS` characters plus `…`.
     pub fn display(&self, line: usize) -> Cow<'_, str> {
         let raw = &self.text[self.lines[line].clone()];
-        if !raw.contains('\t') && raw.chars().nth(MAX_LINE_CHARS).is_none() {
+        // Work is bounded by `MAX_LINE_CHARS`, however long the line is.
+        if raw.len() <= MAX_LINE_CHARS && !raw.contains('\t') {
             return Cow::Borrowed(raw);
         }
         let mut out = String::new();
-        for (count, c) in raw.replace('\t', "    ").chars().enumerate() {
-            if count == MAX_LINE_CHARS {
-                out.push('…');
-                return Cow::Owned(out);
+        let mut count = 0;
+        for c in raw.chars() {
+            let (shown, times) = if c == '\t' { (' ', 4) } else { (c, 1) };
+            for _ in 0..times {
+                if count == MAX_LINE_CHARS {
+                    out.push('…');
+                    return Cow::Owned(out);
+                }
+                out.push(shown);
+                count += 1;
             }
-            out.push(c);
         }
         Cow::Owned(out)
     }
@@ -391,5 +397,18 @@ mod tests {
     fn row_title_names_the_active_file() {
         assert_eq!(row_title(None), "Preview");
         assert_eq!(row_title(Some(&file("a", false))), "Preview · a.md");
+    }
+
+    #[test]
+    fn huge_lines_take_bounded_work() {
+        let start = std::time::Instant::now();
+        let plain = TextDoc::parse("x".repeat(25_000_000).as_bytes()).unwrap();
+        assert_eq!(plain.display(0).chars().count(), MAX_LINE_CHARS + 1);
+        let tabs = TextDoc::parse("\t".repeat(25_000_000).as_bytes()).unwrap();
+        let shown = tabs.display(0);
+        assert_eq!(shown.chars().count(), MAX_LINE_CHARS + 1);
+        assert!(shown.starts_with("    ") && shown.ends_with('…'));
+        assert_eq!(tabs.widest(), MAX_LINE_CHARS + 1);
+        assert!(start.elapsed() < std::time::Duration::from_secs(1), "took {:?}", start.elapsed());
     }
 }

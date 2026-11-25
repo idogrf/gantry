@@ -14,8 +14,8 @@ use app_core::preview::{FileKind, kind_of};
 use app_core::theme_colors::mix;
 use gpui::{
     AnyElement, App, Context, Div, Entity, Font, FontStyle, FontWeight, Hsla, InteractiveText, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, StrikethroughStyle, StyledText, TextLayout, TextRun,
-    TextStyle, UnderlineStyle, div, prelude::*, px, relative, rgb, svg,
+    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString, StrikethroughStyle, StyledText,
+    TextAlign, TextLayout, TextRun, TextStyle, UnderlineStyle, div, prelude::*, px, relative, rgb, svg,
 };
 use preview_doc::highlight::{Span, Token};
 use preview_doc::markdown::{AlertKind, Align, Block, BlockKind, ImageSrc, Inline, LinkTarget, Marker, MdDoc, RowKind};
@@ -100,21 +100,83 @@ fn caret(found: Result<usize, usize>) -> usize {
     }
 }
 
-/// Turn a press or drag on `el` into `hit`, the offset read from `layout` and mapped by `map`.
+/// How far each visual row of a text line is painted from the element's left edge: `align` and the free space of the
+/// row (`box_width` less the row's width). `wraps` are the x positions where the line wraps, `total` its width.
+/// GPUI paints this shift but its `index_for_position` ignores it.
+pub(crate) fn row_shifts(align: TextAlign, box_width: f32, wraps: &[f32], total: f32) -> Vec<f32> {
+    let mut start = 0.0;
+    wraps
+        .iter()
+        .copied()
+        .chain([total])
+        .map(|end| {
+            let free = box_width - (end - start);
+            start = end;
+            match align {
+                _ if total <= 0.0 => 0.0,
+                TextAlign::Left => 0.0,
+                TextAlign::Center => free / 2.0,
+                TextAlign::Right => free,
+            }
+        })
+        .collect()
+}
+
+/// The visual row at `y` below a line's top, for rows `line_height` high; above or below stays on the first or last.
+pub(crate) fn row_at(y: f32, line_height: f32, rows: usize) -> usize {
+    if y <= 0.0 || line_height <= 0.0 { 0 } else { ((y / line_height) as usize).min(rows.saturating_sub(1)) }
+}
+
+/// `position` moved to where GPUI's `index_for_position` expects it: left aligned, undoing the shift `align` painted
+/// the row under it with.
+fn unshifted(layout: &TextLayout, align: TextAlign, mut position: Point<Pixels>) -> Point<Pixels> {
+    if align == TextAlign::Left {
+        return position;
+    }
+    let (bounds, line_height) = (layout.bounds(), layout.line_height());
+    let mut top = bounds.top();
+    for line in layout.line_layouts() {
+        let rows = line.wrap_boundaries.len() + 1;
+        let height = line_height * rows as f32;
+        if position.y <= top + height {
+            let wraps: Vec<f32> = line
+                .wrap_boundaries
+                .iter()
+                .map(|b| f32::from(line.unwrapped_layout.runs[b.run_ix].glyphs[b.glyph_ix].position.x))
+                .collect();
+            let shifts =
+                row_shifts(align, f32::from(bounds.size.width), &wraps, f32::from(line.unwrapped_layout.width));
+            let row = row_at(f32::from(position.y - top), f32::from(line_height), rows);
+            position.x -= px(shifts[row]);
+            return position;
+        }
+        top += height;
+    }
+    position
+}
+
+/// The byte index of the character at `position` in text painted with `align`.
+fn index_at(layout: &TextLayout, align: TextAlign, position: Point<Pixels>) -> Result<usize, usize> {
+    layout.index_for_position(unshifted(layout, align, position))
+}
+
+/// Turn a press or drag on `el` into `hit`, the offset read from `layout` (text painted with `align`) and mapped by
+/// `map`.
 fn layout_pointer<E: InteractiveElement>(
     el: E,
     hit: &Hit,
     layout: TextLayout,
+    align: TextAlign,
     map: impl Fn(usize) -> usize + Clone + 'static,
 ) -> E {
     let (down, drag, down_layout, drag_layout, down_map) =
         (hit.clone(), hit.clone(), layout.clone(), layout, map.clone());
     el.on_mouse_down(MouseButton::Left, move |event, _, app| {
-        down(Gesture::press(event), down_map(caret(down_layout.index_for_position(event.position))), app)
+        down(Gesture::press(event), down_map(caret(index_at(&down_layout, align, event.position))), app)
     })
     .on_mouse_move(move |event: &MouseMoveEvent, _, app| {
         if event.pressed_button == Some(MouseButton::Left) {
-            drag(Gesture::Drag, map(caret(drag_layout.index_for_position(event.position))), app);
+            drag(Gesture::Drag, map(caret(index_at(&drag_layout, align, event.position))), app);
         }
     })
 }
@@ -257,7 +319,8 @@ pub(crate) fn doc_rtl(setting: bool, doc_rtl: bool, flipped: bool) -> bool {
     setting && (doc_rtl != flipped)
 }
 
-/// A table's column fractions and alignments in mirrored order: the columns reversed, `Left` and `Right` swapped.
+/// A table's column fractions and alignments in mirrored order: the columns reversed, `Left` and `Right` swapped. The
+/// two slices are per column; a table with fewer alignments than columns is mirrored as it is.
 pub(crate) fn mirror_table(fractions: &[f32], align: &[Align]) -> (Vec<f32>, Vec<Align>) {
     let swap = |a: &Align| match a {
         Align::Left => Align::Right,
@@ -502,6 +565,7 @@ fn text_block(
     doc: &MdDoc,
     block_ix: usize,
     look: Look,
+    align: TextAlign,
     state: &RowState,
     theme: &Theme,
     cx: &mut Context<PreviewView>,
@@ -513,6 +577,11 @@ fn text_block(
         .font_family(UI_FONT)
         .font_weight(look.weight)
         .text_color(rgb(look.color));
+    let frame = match align {
+        TextAlign::Left => frame,
+        TextAlign::Center => frame.text_center(),
+        TextAlign::Right => frame.text_right(),
+    };
     let Some(block) = doc.blocks.get(block_ix) else { return frame };
     let base = base_style(look, theme);
     let code = pane_font(Some(&state.code_font));
@@ -526,7 +595,7 @@ fn text_block(
     }
     let runs = text_runs(block, doc, &base, &code, theme, selected);
     let styled = StyledText::new(SharedString::from(block.text.clone())).with_runs(runs);
-    let frame = layout_pointer(frame, &hit, styled.layout().clone(), |at| at);
+    let frame = layout_pointer(frame, &hit, styled.layout().clone(), align, |at| at);
     let links: Vec<(Range<usize>, LinkTarget)> = block
         .inlines
         .iter()
@@ -534,6 +603,19 @@ fn text_block(
         .collect();
     if links.is_empty() {
         return frame.child(styled);
+    }
+    if align != TextAlign::Left {
+        // GPUI's link hit-test ignores the alignment shift, so the click is resolved here.
+        let layout = styled.layout().clone();
+        let openers: Vec<_> =
+            links.into_iter().map(|(range, target)| (range, link_opener(cx.entity(), target))).collect();
+        return frame.child(div().id(("md-text", block_ix)).w_full().child(styled).on_click(move |event, _, app| {
+            if let Ok(at) = index_at(&layout, align, event.position())
+                && let Some((_, open)) = openers.iter().find(|(range, _)| range.contains(&at))
+            {
+                open(app);
+            }
+        }));
     }
     let ranges = links.iter().map(|(range, _)| range.clone()).collect();
     let openers: Vec<_> = links.into_iter().map(|(_, target)| link_opener(cx.entity(), target)).collect();
@@ -616,7 +698,7 @@ fn rtl_word(
         }
         let styled = StyledText::new(SharedString::from(text)).with_runs(runs);
         let chars: Rc<[(char, usize)]> = word.chars.clone().into();
-        let el = layout_pointer(el, hit, styled.layout().clone(), move |at| word_offset(&chars, at));
+        let el = layout_pointer(el, hit, styled.layout().clone(), TextAlign::Left, move |at| word_offset(&chars, at));
         return el.child(styled);
     }
     el.children(word.chars.iter().map(|(c, offset)| {
@@ -675,7 +757,7 @@ pub(crate) fn code_line(
     }
     let styled = StyledText::new(SharedString::from(line.to_string())).with_runs(runs);
     let layout = styled.layout().clone();
-    layout_pointer(div().w_full().child(styled), &interact.hit, layout, |at| at).into_any_element()
+    layout_pointer(div().w_full().child(styled), &interact.hit, layout, TextAlign::Left, |at| at).into_any_element()
 }
 
 /// The list item at `ix` of the document's list.
@@ -698,13 +780,15 @@ pub(crate) fn row(
             .when(state.mirror, |d| d.flex_row_reverse())
             .items_start()
             .child(marker_gutter(*marker, color, state.mirror, theme))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .when(state.mirror, |d| d.text_right())
-                    .child(text_block(doc, *block, body, state, theme, cx)),
-            )
+            .child(div().flex_1().min_w_0().child(text_block(
+                doc,
+                *block,
+                body,
+                text_align(state.mirror),
+                state,
+                theme,
+                cx,
+            )))
             .into_any_element(),
         RowKind::Code { block, lines } => code_row(doc, ix, *block, lines, state, theme, cx),
         RowKind::TableRow { table, cells, header } => table_row(doc, ix, *table, cells, *header, state, theme, cx),
@@ -789,7 +873,7 @@ fn image_row(
         }
         ImageSrc::Bad => alt_line(),
     };
-    let el = div().w_full().text_size(theme.ui(BODY)).child(body);
+    let el = div().w_full().text_size(theme.ui(BODY)).when(state.mirror, |d| d.flex().justify_end()).child(body);
     match open {
         Some(target) => {
             let opener = link_opener(cx.entity(), target);
@@ -809,13 +893,18 @@ fn text_row(
     cx: &mut Context<PreviewView>,
 ) -> Div {
     let Some(BlockKind::Heading { level }) = doc.blocks.get(block).map(|b| &b.kind) else {
-        return text_block(doc, block, body, state, theme, cx).when(state.mirror, |d| d.text_right());
+        return text_block(doc, block, body, text_align(state.mirror), state, theme, cx);
     };
     let size = heading_size(*level);
     let color = if *level == 6 { theme.tokens.muted } else { body.color };
     let look = Look { size, line: HEADING_LINE, weight: FontWeight::SEMIBOLD, color };
-    let text = text_block(doc, block, look, state, theme, cx).when(state.mirror, |d| d.text_right());
+    let text = text_block(doc, block, look, text_align(state.mirror), state, theme, cx);
     if *level <= 2 { text.pb(theme.ui(size * 0.3)).border_b_1().border_color(rgb(theme.tokens.line)) } else { text }
+}
+
+/// The alignment of body text: right in a mirrored document.
+fn text_align(mirror: bool) -> TextAlign {
+    if mirror { TextAlign::Right } else { TextAlign::Left }
 }
 
 /// The marker column of a list item.
@@ -974,14 +1063,14 @@ fn table_row(
                 .border_r_1()
                 .when(col == 0, |cell| cell.border_l_1())
                 .border_color(rgb(theme.tokens.line));
-            let cell = match align.get(col) {
-                Some(Align::Center) => cell.text_center(),
-                Some(Align::Right) => cell.text_right(),
-                _ => cell,
+            let text_align = match align.get(col) {
+                Some(Align::Center) => TextAlign::Center,
+                Some(Align::Right) => TextAlign::Right,
+                _ => TextAlign::Left,
             };
             let source = if state.mirror { Some(columns - 1 - col) } else { Some(col) };
             match source.and_then(|source| cells.get(source)) {
-                Some(block) => cell.child(text_block(doc, *block, look, state, theme, cx)),
+                Some(block) => cell.child(text_block(doc, *block, look, text_align, state, theme, cx)),
                 None => cell,
             }
         }))
@@ -1146,6 +1235,29 @@ mod tests {
         assert_eq!(align, [Align::Center, Align::Right]);
         let (_, align) = mirror_table(&[0.5, 0.5], &[Align::Right, Align::Left]);
         assert_eq!(align, [Align::Right, Align::Left]);
+    }
+
+    #[test]
+    fn aligned_rows_shift_by_the_free_space_of_each_row() {
+        use gpui::TextAlign::{Center, Left, Right};
+        // One row of 60 in a box of 100.
+        assert_eq!(row_shifts(Left, 100.0, &[], 60.0), [0.0]);
+        assert_eq!(row_shifts(Right, 100.0, &[], 60.0), [40.0]);
+        assert_eq!(row_shifts(Center, 100.0, &[], 60.0), [20.0]);
+        // Wrapped at x = 90 and x = 150 of a 200 wide line: rows of 90, 60 and 50.
+        assert_eq!(row_shifts(Right, 100.0, &[90.0, 150.0], 200.0), [10.0, 40.0, 50.0]);
+        assert_eq!(row_shifts(Center, 100.0, &[90.0, 150.0], 200.0), [5.0, 20.0, 25.0]);
+        // An empty line is never shifted.
+        assert_eq!(row_shifts(Right, 100.0, &[], 0.0), [0.0]);
+    }
+
+    #[test]
+    fn the_row_under_a_pointer_is_found_by_height() {
+        assert_eq!(row_at(0.0, 20.0, 3), 0);
+        assert_eq!(row_at(39.9, 20.0, 3), 1);
+        assert_eq!(row_at(41.0, 20.0, 3), 2);
+        assert_eq!(row_at(500.0, 20.0, 3), 2, "below the last row stays on it");
+        assert_eq!(row_at(-5.0, 20.0, 3), 0);
     }
 
     #[test]

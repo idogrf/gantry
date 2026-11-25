@@ -544,9 +544,6 @@ impl PreviewView {
     /// Measure the settings markdown rows depend on once per frame; a change remeasures the list, so the heights of
     /// rows out of view do not go stale.
     fn sync_md(&mut self, window: &Window, cx: &App) {
-        if !matches!(self.model.content, Content::Markdown(_)) {
-            return;
-        }
         let Content::Markdown(doc) = &self.model.content else { return };
         let metrics = Self::metrics(window, cx);
         let settings = cx.global::<SettingsStore>().settings();
@@ -1070,7 +1067,7 @@ impl PreviewView {
         let can_flip = matches!(self.model.content, Content::Markdown(_))
             && cx.global::<SettingsStore>().settings().window.right_to_left;
         let flipped = self.flipped;
-        let icon_button = |id: &'static str, path: &'static str| {
+        let icon_button = |id: &'static str, path: &'static str, color: u32| {
             div()
                 .id(id)
                 .flex_none()
@@ -1079,7 +1076,7 @@ impl PreviewView {
                 .items_center()
                 .justify_center()
                 .rounded(px(RADIUS_SMALL))
-                .child(svg().path(path).size(theme.ui(14.)).text_color(rgb(theme.tokens.muted)))
+                .child(svg().path(path).size(theme.ui(14.)).text_color(rgb(color)))
         };
         div()
             .id("preview-header")
@@ -1115,19 +1112,25 @@ impl PreviewView {
             .child(div().flex_1())
             .when(can_flip, |header| {
                 header.child(
-                    icon_button("preview-flip", DIRECTION_ICON)
-                        .when(flipped, |button| button.bg(rgb(theme.tokens.surface)))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(theme.tokens.surface)))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.flipped = !this.flipped;
-                            cx.notify();
-                        }))
-                        .tooltip(hover_card::tooltip(plain_card("Flip text direction"))),
+                    icon_button(
+                        "preview-flip",
+                        DIRECTION_ICON,
+                        if flipped { theme.tokens.accent } else { theme.tokens.muted },
+                    )
+                    .when(flipped, |button| {
+                        button.bg(rgb(theme.tokens.raised)).border_1().border_color(rgb(theme.tokens.accent))
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme.tokens.surface)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.flipped = !this.flipped;
+                        cx.notify();
+                    }))
+                    .tooltip(hover_card::tooltip(plain_card("Flip text direction"))),
                 )
             })
             .child(
-                icon_button("preview-open", OPEN_EXTERNAL_ICON)
+                icon_button("preview-open", OPEN_EXTERNAL_ICON, theme.tokens.muted)
                     .when(!can_open, |button| button.opacity(0.4))
                     .when(can_open, |button| {
                         button
@@ -1138,7 +1141,7 @@ impl PreviewView {
                     .tooltip(hover_card::tooltip(plain_card("Open in system viewer"))),
             )
             .child(
-                icon_button("preview-close", CLOSE_ICON)
+                icon_button("preview-close", CLOSE_ICON, theme.tokens.muted)
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(theme.tokens.surface)))
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(PreviewEvent::Close))),

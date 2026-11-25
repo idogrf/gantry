@@ -324,6 +324,7 @@ impl WorkspaceView {
         self.previews.remove(&leaf);
         self.preview_known.remove(&leaf);
         self.preview_rows.remove(&leaf);
+        self.release_unlisted_previews(cx);
         self.sync_watch(cx);
         self.renames.remove(&leaf);
         if self.unseen.remove(&leaf).is_some() {

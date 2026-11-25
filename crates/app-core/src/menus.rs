@@ -81,8 +81,13 @@ pub enum MenuAction {
     },
     /// Hide every sent file of the session the preview pane follows.
     ClearSentFiles(NodeId),
-    /// Copy the contents of the file the preview pane `leaf` shows.
-    CopyFileContents(NodeId),
+    /// Copy the contents of file `id` of the preview pane `leaf`.
+    CopyFileContents {
+        /// The preview pane.
+        leaf: NodeId,
+        /// The file's id.
+        id: String,
+    },
     /// Close every pane of a tab.
     CloseTab(usize),
     /// Start a new Claude session in a folder with the named config dir (and remember it for the folder).
@@ -554,11 +559,11 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
 }
 
 /// The menu of a preview pane's file tab or body: `file` = the file's id when a tab was clicked, `text` = the shown
-/// file is text that can be copied.
-pub fn preview_menu(leaf: NodeId, file: Option<&str>, text: bool) -> Vec<MenuItem> {
+/// `copy` = the id of the file whose text can be copied (the clicked tab's, else the shown file's), if it is text.
+pub fn preview_menu(leaf: NodeId, file: Option<&str>, copy: Option<&str>) -> Vec<MenuItem> {
     let mut items = Vec::new();
-    if text {
-        items.push(entry("Copy file contents", MenuAction::CopyFileContents(leaf)));
+    if let Some(id) = copy {
+        items.push(entry("Copy file contents", MenuAction::CopyFileContents { leaf, id: id.to_string() }));
         items.push(MenuItem::Separator);
     }
     if let Some(id) = file {
@@ -732,14 +737,19 @@ mod tests {
     #[test]
     fn preview_menu_offers_copy_only_for_text() {
         assert_eq!(
-            labels(&preview_menu(3, Some("f1"), true)),
+            labels(&preview_menu(3, Some("f1"), Some("f1"))),
             ["Copy file contents", "│", "Remove from list", "Clear all files from this session"]
         );
-        assert_eq!(labels(&preview_menu(3, None, false)), ["Clear all files from this session"]);
+        assert_eq!(labels(&preview_menu(3, None, None)), ["Clear all files from this session"]);
         assert_eq!(
-            labels(&preview_menu(3, Some("f1"), false)),
+            labels(&preview_menu(3, Some("f1"), None)),
             ["Remove from list", "Clear all files from this session"]
         );
+        let items = preview_menu(3, Some("f2"), Some("f2"));
+        assert!(matches!(
+            &items[0],
+            MenuItem::Entry(e) if e.action == MenuAction::CopyFileContents { leaf: 3, id: "f2".into() }
+        ));
     }
 
     #[test]

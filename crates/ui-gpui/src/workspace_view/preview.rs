@@ -116,10 +116,42 @@ fn content_for(path: &Path, shown: Option<&Shown>) -> Content {
     }
 }
 
+/// A path component made safe: no separators, and not `.` or `..` (empty becomes `fallback`).
+fn safe_part(part: &str, fallback: &str) -> String {
+    let part = part.replace(['/', '\\'], "-");
+    if part.is_empty() {
+        fallback.to_string()
+    } else if part == "." || part == ".." {
+        "-".to_string()
+    } else {
+        part
+    }
+}
+
 /// Where the copy of a remote file for the system viewer goes: one folder per host and file id, so two files with the
-/// same name never overwrite each other.
+/// same name never overwrite each other, and nothing a host, id or name says can leave that folder.
 fn temp_copy_path(root: &Path, host: &str, id: &str, name: &str) -> PathBuf {
-    root.join("gantry-preview").join(host).join(id.replace(':', "-")).join(name)
+    root.join("gantry-preview")
+        .join(safe_part(host, "-"))
+        .join(safe_part(&id.replace(':', "-"), "-"))
+        .join(safe_part(name, "file"))
+}
+
+/// Whether Open in system viewer works for the shown file. A local file always opens (unless gone); a remote one needs
+/// its host and is read once for it, which the daemon refuses above its cap (`TooLarge(Some)`); an image over the
+/// pixel cap (`TooLarge(None)`) is small enough to send and the viewer is the way to see it.
+fn can_open(local: bool, connected: bool, content: &Content) -> bool {
+    !matches!(content, Content::Missing) && (local || (connected && !matches!(content, Content::TooLarge(Some(_)))))
+}
+
+/// Free what GPUI holds for the images of replaced or dropped contents (their decoded bitmaps stay in its asset
+/// cache until removed).
+fn release_images(contents: Vec<Content>, cx: &mut App) {
+    for content in contents {
+        if let Content::Image { image, .. } = content {
+            gpui::ImageSource::Image(image).remove_asset(cx);
+        }
+    }
 }
 
 impl WorkspaceView {
@@ -225,12 +257,10 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let changed = self.reads.apply(host, request, body);
+        let mut old = Vec::new();
         if let Some(key) = &changed {
             let content = content_for(&key.path, self.reads.shown(key));
-            self.decoded.insert(key.clone(), content);
-            // Bytes the cache evicted are not kept decoded either.
-            let reads = &self.reads;
-            self.decoded.retain(|key, _| reads.shown(key).is_some());
+            old.extend(self.decoded.insert(key.clone(), content));
         }
         // A wish whose request is over is answered (or dropped when the file could not be read).
         let waiting: Vec<FileKey> =
@@ -245,6 +275,37 @@ impl WorkspaceView {
             self.push_preview_models(cx);
             cx.notify();
         }
+        // After the views have the new content, so a replaced image is not drawn (and decoded) again.
+        old.extend(self.prune_decoded(cx));
+        release_images(old, cx);
+    }
+
+    /// Drop the decoded content of files no preview lists any more or whose bytes the cache no longer holds; returns it.
+    fn prune_decoded(&mut self, cx: &App) -> Vec<Content> {
+        let sessions = self.sidebar.read(cx).sessions();
+        let mut listed: HashSet<FileKey> = HashSet::new();
+        for leaf in self.previews.keys() {
+            let Some(entry) = self.workspace.leaves.get(leaf) else { continue };
+            for file in self.workspace.preview_files(*leaf, sessions) {
+                listed.insert(FileKey { host: entry.host.clone(), path: file.path.clone() });
+            }
+        }
+        let reads = &self.reads;
+        let gone: Vec<FileKey> =
+            self.decoded.keys().filter(|key| !listed.contains(*key) || reads.shown(key).is_none()).cloned().collect();
+        gone.iter().filter_map(|key| self.decoded.remove(key)).collect()
+    }
+
+    /// Drop and release the decoded content nothing lists any more.
+    pub(super) fn release_unlisted_previews(&mut self, cx: &mut Context<Self>) {
+        let old = self.prune_decoded(cx);
+        release_images(old, cx);
+    }
+
+    /// Forget a host's reads and the Open in system viewer wishes waiting on them.
+    pub(super) fn forget_host_reads(&mut self, host: &HostId) {
+        self.reads.forget_host(host);
+        self.open_after_read.retain(|key, _| &key.host != host);
     }
 
     /// Write a remote file's bytes to a temporary copy and open that in the system viewer.
@@ -271,7 +332,10 @@ impl WorkspaceView {
             cx.open_with_system(&key.path);
             return;
         }
-        if let Some(Shown::Bytes { data, .. }) = self.reads.shown(&key) {
+        // A type the pane never reads has no live copy: every open asks again (an unchanged file is one tiny reply).
+        if is_read(kind_of(&key.path))
+            && let Some(Shown::Bytes { data, .. }) = self.reads.shown(&key)
+        {
             Self::open_copy(&key, &id, data, cx);
             return;
         }
@@ -306,10 +370,20 @@ impl WorkspaceView {
         self.push_preview_models(cx);
     }
 
-    /// Put the active text file's contents on the clipboard.
-    pub(super) fn copy_file_contents(&mut self, leaf: NodeId, cx: &mut Context<Self>) {
-        let Some(slot) = self.previews.get(&leaf) else { return };
-        if let Content::Text(doc) = &slot.view.read(cx).model().content {
+    /// The parsed text of file `id` of preview `leaf`, when it is decoded as text.
+    fn text_of(&self, leaf: NodeId, id: &str, cx: &App) -> Option<Arc<TextDoc>> {
+        let host = self.workspace.leaves.get(&leaf)?.host.clone();
+        let file =
+            self.workspace.preview_files(leaf, self.sidebar.read(cx).sessions()).into_iter().find(|f| f.id == id)?;
+        match self.decoded.get(&FileKey { host, path: file.path.clone() })? {
+            Content::Text(doc) => Some(doc.clone()),
+            _ => None,
+        }
+    }
+
+    /// Put the text of file `id` on the clipboard.
+    pub(super) fn copy_file_contents(&mut self, leaf: NodeId, id: &str, cx: &mut Context<Self>) {
+        if let Some(doc) = self.text_of(leaf, id, cx) {
             cx.write_to_clipboard(ClipboardItem::new_string(doc.text().to_string()));
         }
     }
@@ -406,9 +480,7 @@ impl WorkspaceView {
             _ => Content::NoFiles,
         };
         let can_open = match (&host, file) {
-            (Some(host), Some(_)) if !matches!(content, Content::Missing) => {
-                host.is_local() || (self.client(host).is_some() && !matches!(content, Content::TooLarge(_)))
-            }
+            (Some(host), Some(_)) => can_open(host.is_local(), self.client(host).is_some(), &content),
             _ => false,
         };
         PreviewModel {
@@ -451,6 +523,7 @@ impl WorkspaceView {
             }
         }
         let rows_changed = self.push_preview_models(cx);
+        self.release_unlisted_previews(cx);
         self.sync_watch(cx);
         if saved {
             self.save(cx); // also refreshes the sidebar entries
@@ -508,11 +581,10 @@ impl WorkspaceView {
             PreviewEvent::Activate(id) => self.activate_file(leaf, id, window, cx),
             PreviewEvent::Remove(id) => self.remove_file(leaf, id, window, cx),
             PreviewEvent::Menu { position, file } => {
-                let text = self
-                    .previews
-                    .get(&leaf)
-                    .is_some_and(|slot| matches!(slot.view.read(cx).model().content, Content::Text(_)));
-                self.open_preview_menu(preview_menu(leaf, file.as_deref(), text), *position, window, cx);
+                let active = self.active_file(leaf, cx).map(|(_, id)| id);
+                let target = file.clone().or(active);
+                let copy = target.filter(|id| self.text_of(leaf, id, cx).is_some());
+                self.open_preview_menu(preview_menu(leaf, file.as_deref(), copy.as_deref()), *position, window, cx);
             }
             PreviewEvent::Hidden { position } => {
                 let Some(slot) = self.previews.get(&leaf) else { return };
@@ -653,6 +725,26 @@ mod tests {
             temp_copy_path(Path::new("/tmp"), "box", "toolu_1:0", "after.png"),
             PathBuf::from("/tmp/gantry-preview/box/toolu_1-0/after.png")
         );
+    }
+
+    #[test]
+    fn temp_copy_path_cannot_leave_its_folder() {
+        let root = Path::new("/tmp");
+        assert_eq!(temp_copy_path(root, "..", "a/b:0", ".."), PathBuf::from("/tmp/gantry-preview/-/a-b-0/-"));
+        assert_eq!(temp_copy_path(root, "x\\y", "i", ""), PathBuf::from("/tmp/gantry-preview/x-y/i/file"));
+    }
+
+    #[test]
+    fn open_in_system_viewer_is_blocked_only_where_it_cannot_work() {
+        let text = Content::NoFiles;
+        assert!(can_open(true, false, &text));
+        assert!(!can_open(true, false, &Content::Missing));
+        assert!(can_open(true, false, &Content::TooLarge(Some(9))));
+        assert!(!can_open(false, false, &text));
+        assert!(can_open(false, true, &text));
+        assert!(!can_open(false, true, &Content::TooLarge(Some(9))));
+        assert!(can_open(false, true, &Content::TooLarge(None)));
+        assert!(!can_open(false, true, &Content::Missing));
     }
 
     #[test]

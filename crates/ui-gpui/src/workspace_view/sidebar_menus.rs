@@ -138,7 +138,7 @@ impl WorkspaceView {
             MenuAction::ActivateSentFile { leaf, id } => self.activate_file(leaf, &id, window, cx),
             MenuAction::RemoveSentFile { leaf, id } => self.remove_file(leaf, &id, window, cx),
             MenuAction::ClearSentFiles(leaf) => self.clear_files(leaf, window, cx),
-            MenuAction::CopyFileContents(leaf) => self.copy_file_contents(leaf, cx),
+            MenuAction::CopyFileContents { leaf, id } => self.copy_file_contents(leaf, &id, cx),
             MenuAction::CloseTab(index) => self.close_tab_at(index, window, cx),
             MenuAction::NewHere { dir, claude, host } if host.is_local() => {
                 self.open_new(claude, dir, None, None, host, None, None)

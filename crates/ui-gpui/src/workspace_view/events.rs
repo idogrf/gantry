@@ -221,7 +221,7 @@ impl WorkspaceView {
                     if let Some(conn) = self.hosts.get_mut(host) {
                         conn.connected = false;
                     }
-                    self.reads.forget_host(host);
+                    self.forget_host_reads(host);
                     let leaves: Vec<NodeId> = self
                         .workspace
                         .leaves

@@ -23,28 +23,35 @@ pub struct Word {
 /// A paragraph cut into words in the order a flex-wrap container takes them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisualText {
-    /// The paragraph's first strong letter is right-to-left.
+    /// The paragraph's first strong letter is right-to-left: the direction of the container that draws the words
+    /// (`flex_row_reverse` when true).
     pub rtl: bool,
-    /// Left to right for `rtl == false`, right to left (for `flex_row_reverse`) for `rtl == true`, so the first
-    /// logical words land on the first line either way. A hard break (`\n`) is its own word.
+    /// The first logical word of every line comes first, so lines wrap in reading order. A line whose own base
+    /// direction (its first strong letter) is right to left comes back reversed from display order, one whose base is
+    /// left to right in display order; in a container of the other direction such a line wraps in reading order but
+    /// is drawn with its words in the container's direction. A hard break (`\n`, with a `\r` before it dropped) is
+    /// its own word.
     pub words: Vec<Word>,
 }
 
 /// Cut `text` into words in display order (see [`VisualText`]); offsets stay logical.
+///
+/// The work is unbounded in the paragraph's length: run it off the UI thread, once per file version.
 pub fn visual_words(text: &str) -> VisualText {
-    let rtl = text.chars().find(|c| c.is_alphabetic()).is_some_and(bidi::is_rtl_letter);
+    let rtl = bidi::first_strong_rtl(text).unwrap_or(false);
     let mut words = Vec::new();
     let mut base = 0;
-    for (n, line) in text.split('\n').enumerate() {
+    for (n, segment) in text.split('\n').enumerate() {
         if n > 0 {
             words.push(Word { chars: vec![('\n', base - 1)], split: false });
         }
+        let line = segment.strip_suffix('\r').unwrap_or(segment);
         let mut line_words = line_words(line, base);
-        if rtl {
+        if bidi::first_strong_rtl(line).unwrap_or(false) {
             line_words.reverse();
         }
         words.extend(line_words);
-        base += line.len() + 1;
+        base += segment.len() + 1;
     }
     VisualText { rtl, words }
 }
@@ -117,9 +124,10 @@ mod tests {
         let v = visual_words("שלום עולם");
         assert!(v.rtl);
         assert_eq!(v.words.len(), 2);
-        let mut offsets: Vec<usize> = v.words[0].chars.iter().map(|(_, o)| *o).filter(|o| *o < 8).collect();
+        // The word's letters and its trailing space (offset 8), which the word before it owns.
+        let mut offsets: Vec<usize> = v.words[0].chars.iter().map(|(_, o)| *o).collect();
         offsets.sort();
-        assert_eq!(offsets, [0, 2, 4, 6]);
+        assert_eq!(offsets, [0, 2, 4, 6, 8]);
         assert!(v.words[0].split);
         // The first logical word shows its letters in display order: the last letter leftmost.
         assert_eq!(v.words[0].chars.last().unwrap().0, 'ש');
@@ -160,5 +168,38 @@ mod tests {
         assert_eq!(words, ["ab", "\n", "cd"]);
         assert_eq!(v.words[1].chars, [('\n', 2)]);
         assert_eq!(v.words[2].chars, [('c', 3), ('d', 4)]);
+    }
+
+    #[test]
+    fn each_line_follows_its_own_direction() {
+        let text = "hello\nשלום עולם";
+        let v = visual_words(text);
+        assert!(!v.rtl);
+        let first_offsets: Vec<usize> =
+            v.words.iter().map(|w| w.chars.iter().map(|(_, o)| *o).min().unwrap()).collect();
+        // hello, break, then the Hebrew line's first logical word (offset 6) before its second (15).
+        assert_eq!(first_offsets, [0, 5, 6, 15]);
+
+        let v = visual_words("שלום\nhello world");
+        assert!(v.rtl);
+        let words: Vec<String> = v.words.iter().map(text_of).collect();
+        assert_eq!(words[1..], ["\n", "hello ", "world"]);
+    }
+
+    #[test]
+    fn digits_and_latin_inside_rtl_keep_their_order() {
+        let v = visual_words("גרסה 2.5");
+        assert!(v.rtl);
+        let num = v.words.iter().find(|w| text_of(w) == "2.5").unwrap();
+        assert!(num.chars.windows(2).all(|p| p[0].1 < p[1].1));
+    }
+
+    #[test]
+    fn crlf_is_a_break() {
+        let v = visual_words("ab\r\ncd");
+        let words: Vec<String> = v.words.iter().map(text_of).collect();
+        assert_eq!(words, ["ab", "\n", "cd"]);
+        assert_eq!(v.words[1].chars, [('\n', 3)]);
+        assert_eq!(v.words[2].chars, [('c', 4), ('d', 5)]);
     }
 }

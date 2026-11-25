@@ -5,12 +5,15 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use protocol::host::{HostId, PaneKey};
-use protocol::message::{PaneId, PaneInfo, SessionInfo, SessionState, SessionStatus, SpawnRequest, claude_session};
+use protocol::message::{
+    PaneId, PaneInfo, SentFile, SessionInfo, SessionState, SessionStatus, SpawnRequest, claude_session,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::attention::most_urgent;
 use crate::gantry_project::{self, ProjectError};
 use crate::launcher::HostFolder;
+use crate::preview;
 use crate::sessions::SessionStore;
 use crate::settings::{Settings, ShellSettings, expand_home};
 use crate::sidebar_order::SidebarOrder;
@@ -152,6 +155,19 @@ impl PaneLaunch {
             cwd,
             container: None,
             claude: true,
+            claude_dir: None,
+            env: Vec::new(),
+        }
+    }
+
+    /// The launch of a preview pane: it runs nothing, `cwd` is the followed Claude leaf's folder.
+    pub fn preview(cwd: PathBuf) -> PaneLaunch {
+        PaneLaunch {
+            program: String::new(),
+            args: Vec::new(),
+            cwd,
+            container: None,
+            claude: false,
             claude_dir: None,
             env: Vec::new(),
         }
@@ -413,6 +429,38 @@ pub struct Leaf {
     /// The Gantry project the user put the pane in (its display name); `None` = the pane's folder project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// Set on a preview pane: which Claude leaf it follows and what it shows. `None` for every other leaf.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<PreviewLeaf>,
+}
+
+/// What a preview pane follows and shows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewLeaf {
+    /// The Claude leaf it follows.
+    pub follows: NodeId,
+    /// The session it shows: the followed leaf's, kept after that leaf closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// The active tab's file id; `None` = the newest file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
+}
+
+/// Where `Workspace::open_preview` put the preview pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewPlace {
+    /// The Claude leaf already had one; it was focused.
+    Existing(NodeId),
+    /// A new pane split beside the Claude leaf.
+    Split {
+        /// The new preview leaf.
+        leaf: NodeId,
+        /// The Claude leaf it sits beside.
+        beside: NodeId,
+    },
+    /// The Claude leaf's tab was full: a new tab.
+    NewTab(NodeId),
 }
 
 /// Reads a saved pane color, treating anything unreadable as none.
@@ -434,6 +482,7 @@ impl Leaf {
             color: None,
             unread: false,
             project: None,
+            preview: None,
         }
     }
 
@@ -655,6 +704,12 @@ pub struct Workspace {
     /// The Gantry project (display name) each session was put in, kept for closed sessions and never pruned.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub session_projects: BTreeMap<String, String>,
+    /// The sent file ids each session's preview has shown, never pruned.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sent_seen: BTreeMap<String, BTreeSet<String>>,
+    /// The sent file ids the user removed from each session's preview, never pruned.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sent_removed: BTreeMap<String, BTreeSet<String>>,
     /// The tabs shown so far, for Back / Forward; never saved.
     #[serde(skip)]
     history: TabHistory,
@@ -1369,7 +1424,8 @@ impl Workspace {
     /// Leaves without a running pane (they show Continue / Restart), tab by tab in screen order.
     pub fn finished_leaves(&self) -> Vec<NodeId> {
         let tabs = self.tabs.iter().flat_map(|tab| tab.root.leaves());
-        tabs.filter(|id| self.leaves.get(id).is_some_and(|leaf| leaf.pane.is_none())).collect()
+        tabs.filter(|id| self.leaves.get(id).is_some_and(|leaf| leaf.pane.is_none() && leaf.preview.is_none()))
+            .collect()
     }
 
     /// `leaf`'s process started as `pane` in `cwd`.
@@ -1397,7 +1453,138 @@ impl Workspace {
         if let Some(project) = leaf.project.clone() {
             self.session_projects.insert(session.into(), project);
         }
+        let followed = self.leaf_for_pane(key).expect("the leaf was found above");
+        for view in self.leaves.values_mut().filter_map(|leaf| leaf.preview.as_mut()).filter(|v| v.follows == followed)
+        {
+            view.session = Some(session.into());
+            view.active = None;
+        }
         true
+    }
+
+    /// Whether `leaf` is a preview pane.
+    pub fn is_preview(&self, leaf: NodeId) -> bool {
+        self.leaves.get(&leaf).is_some_and(|leaf| leaf.preview.is_some())
+    }
+
+    /// The preview pane in the layout that follows Claude leaf `claude`.
+    pub fn preview_of(&self, claude: NodeId) -> Option<NodeId> {
+        self.leaves
+            .iter()
+            .find(|(id, leaf)| {
+                leaf.preview.as_ref().is_some_and(|view| view.follows == claude) && self.tab_of(**id).is_some()
+            })
+            .map(|(id, _)| *id)
+    }
+
+    /// Open the preview of Claude leaf `claude`: focus its existing one, else split a new one to its right (a new tab
+    /// when its tab is full). `None` unless `claude` is a Claude leaf in a tab and not a preview.
+    pub fn open_preview(&mut self, claude: NodeId) -> Option<PreviewPlace> {
+        let leaf = self.leaves.get(&claude).filter(|leaf| leaf.preview.is_none() && leaf.launch.is_claude())?;
+        let (cwd, host, session, project) =
+            (leaf.launch.cwd.clone(), leaf.host.clone(), leaf.session.clone(), leaf.project.clone());
+        if let Some(existing) = self.preview_of(claude) {
+            self.focus(existing);
+            return Some(PreviewPlace::Existing(existing));
+        }
+        if !self.focus(claude) {
+            return None;
+        }
+        let place = if self.can_split() {
+            let leaf = self.split_on(Axis::Horizontal, PaneLaunch::preview(cwd), host)?;
+            PreviewPlace::Split { leaf, beside: claude }
+        } else {
+            let leaf = self.new_tab_on(PaneLaunch::preview(cwd), host);
+            if let Some(project) = project {
+                self.set_leaf_project(leaf, Some(&project));
+            }
+            PreviewPlace::NewTab(leaf)
+        };
+        let (PreviewPlace::Split { leaf, .. } | PreviewPlace::NewTab(leaf) | PreviewPlace::Existing(leaf)) = place;
+        self.leaves.get_mut(&leaf).expect("the leaf was just created").preview =
+            Some(PreviewLeaf { follows: claude, session, active: None });
+        Some(place)
+    }
+
+    /// The host and session a preview pane shows.
+    pub fn preview_session(&self, leaf: NodeId) -> Option<(&HostId, &str)> {
+        let leaf = self.leaves.get(&leaf)?;
+        Some((&leaf.host, leaf.preview.as_ref()?.session.as_deref()?))
+    }
+
+    /// The files a preview pane lists as tabs: oldest first, the removed ones left out.
+    pub fn preview_files<'s>(&self, leaf: NodeId, sessions: &'s SessionStore) -> Vec<&'s SentFile> {
+        let Some((host, session)) = self.preview_session(leaf) else { return Vec::new() };
+        let Some(info) = sessions.get(host, session) else { return Vec::new() };
+        preview::listed(&info.sent_files, self.sent_removed.get(session))
+    }
+
+    /// The file a preview pane shows: its saved tab while listed, else the newest.
+    pub fn preview_active<'s>(&self, leaf: NodeId, sessions: &'s SessionStore) -> Option<&'s SentFile> {
+        let files = self.preview_files(leaf, sessions);
+        let saved = self.leaves.get(&leaf)?.preview.as_ref()?.active.as_deref();
+        let id = preview::active_id(&files, saved)?;
+        files.into_iter().find(|file| file.id == id)
+    }
+
+    /// Make `id` the active tab of a preview pane. True when that changed something.
+    pub fn set_preview_active(&mut self, leaf: NodeId, id: &str) -> bool {
+        let Some(view) = self.leaves.get_mut(&leaf).and_then(|leaf| leaf.preview.as_mut()) else { return false };
+        if view.active.as_deref() == Some(id) {
+            return false;
+        }
+        view.active = Some(id.into());
+        true
+    }
+
+    /// Hide file `id` from a preview pane's session; when it was the active tab the newest other file becomes active.
+    /// True when it was not hidden before.
+    pub fn remove_sent(&mut self, leaf: NodeId, id: &str, sessions: &SessionStore) -> bool {
+        let Some((_, session)) = self.preview_session(leaf) else { return false };
+        let session = session.to_string();
+        let files = self.preview_files(leaf, sessions);
+        let was_active = self.preview_active(leaf, sessions).is_some_and(|file| file.id == id);
+        let next = preview::after_remove(&files, id);
+        if !self.sent_removed.entry(session).or_default().insert(id.into()) {
+            return false;
+        }
+        if was_active && let Some(view) = self.leaves.get_mut(&leaf).and_then(|leaf| leaf.preview.as_mut()) {
+            view.active = next;
+        }
+        true
+    }
+
+    /// Hide every file a preview pane lists. True when there was any.
+    pub fn clear_sent(&mut self, leaf: NodeId, sessions: &SessionStore) -> bool {
+        let Some((_, session)) = self.preview_session(leaf) else { return false };
+        let session = session.to_string();
+        let ids: Vec<String> = self.preview_files(leaf, sessions).into_iter().map(|file| file.id.clone()).collect();
+        self.sent_removed.entry(session).or_default().extend(ids.iter().cloned());
+        if let Some(view) = self.leaves.get_mut(&leaf).and_then(|leaf| leaf.preview.as_mut()) {
+            view.active = None;
+        }
+        !ids.is_empty()
+    }
+
+    /// Record that `session`'s file `id` has been shown. True when it was new.
+    pub fn mark_seen(&mut self, session: &str, id: &str) -> bool {
+        self.sent_seen.entry(session.into()).or_default().insert(id.into())
+    }
+
+    /// Whether `session`'s file `id` has been shown.
+    pub fn is_seen(&self, session: &str, id: &str) -> bool {
+        self.sent_seen.get(session).is_some_and(|ids| ids.contains(id))
+    }
+
+    /// The sessions the preview panes show, per host, sorted and without repeats.
+    pub fn watched_sessions(&self) -> BTreeMap<HostId, Vec<String>> {
+        let mut by_host: BTreeMap<HostId, BTreeSet<&str>> = BTreeMap::new();
+        for leaf in self.leaves.values() {
+            if let Some(session) = leaf.preview.as_ref().and_then(|view| view.session.as_deref()) {
+                by_host.entry(leaf.host.clone()).or_default().insert(session);
+            }
+        }
+        by_host.into_iter().map(|(host, ids)| (host, ids.into_iter().map(String::from).collect())).collect()
     }
 
     /// Whether every tab's leaves exist, each tab's focus is one of its leaves, ids are unique and
@@ -1540,10 +1727,22 @@ pub fn restore(
         let dead: Vec<NodeId> = workspace
             .leaves
             .iter()
-            .filter(|(id, leaf)| leaf.pane.is_none() && !keep.contains(id) && connected.contains(&leaf.host))
+            .filter(|(id, leaf)| {
+                leaf.pane.is_none() && leaf.preview.is_none() && !keep.contains(id) && connected.contains(&leaf.host)
+            })
             .map(|(id, _)| *id)
             .collect();
         for leaf in dead {
+            workspace.close(leaf);
+        }
+        // A preview stays exactly when the Claude leaf it follows does.
+        let orphans: Vec<NodeId> = workspace
+            .leaves
+            .iter()
+            .filter(|(_, leaf)| leaf.preview.as_ref().is_some_and(|view| !workspace.leaves.contains_key(&view.follows)))
+            .map(|(id, _)| *id)
+            .collect();
+        for leaf in orphans {
             workspace.close(leaf);
         }
     }
@@ -2543,6 +2742,7 @@ mod tests {
             name: None,
             unread: false,
             project: None,
+            preview: None,
         }
     }
 
@@ -3992,5 +4192,228 @@ mod tests {
         assert_eq!(ws.leaves[&leaf].project.as_deref(), Some("Billing"));
         assert_eq!(ws.session_projects["old"], "Billing", "the old one stays labeled for Recents");
         assert_eq!(ws.session_projects["new"], "Billing");
+    }
+
+    fn sent(id: &str, sent_ms: u64) -> SentFile {
+        SentFile { id: id.into(), path: format!("/r/{id}.md").into(), sent_ms, caption: None, backlog: false }
+    }
+
+    fn store_with(session: &str, ids: &[&str]) -> SessionStore {
+        let files = ids.iter().zip(1u64..).map(|(id, ms)| sent(id, ms)).collect();
+        let mut store = SessionStore::default();
+        store.replace(
+            &HostId::local(),
+            vec![SessionInfo { sent_files: files, ..session_info(session, SessionState::Closed) }],
+        );
+        store
+    }
+
+    /// A Claude leaf running session `session` as pane `pane`, in a new tab.
+    fn claude_with(ws: &mut Workspace, pane: PaneId, session: &str) -> NodeId {
+        let leaf = ws.new_tab(PaneLaunch::claude("/r".into()));
+        ws.pane_started(leaf, pane, "/r".into());
+        ws.session_seen(&PaneKey::local(pane), session);
+        leaf
+    }
+
+    #[test]
+    fn open_preview_splits_right_of_the_claude_leaf_and_copies_its_project() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        ws.set_leaf_project(claude, Some("Billing"));
+        let other = ws.new_tab(shell("/b"));
+        assert_eq!(ws.focused(), Some(other));
+        let Some(PreviewPlace::Split { leaf, beside }) = ws.open_preview(claude) else { panic!("expected a split") };
+        assert_eq!(beside, claude);
+        assert_eq!(ws.tab_of(leaf), ws.tab_of(claude));
+        assert_eq!(ws.active, ws.tab_of(claude).unwrap());
+        assert_eq!(ws.focused(), Some(leaf));
+        let Node::Split { axis, first, second, .. } = &ws.tabs[ws.active].root else { panic!("expected a split tab") };
+        assert_eq!(*axis, Axis::Horizontal);
+        assert_eq!((first.leaves(), second.leaves()), (vec![claude], vec![leaf]));
+        let preview = &ws.leaves[&leaf];
+        assert_eq!(preview.project.as_deref(), Some("Billing"));
+        assert_eq!(preview.pane, None);
+        assert_eq!(preview.session, None);
+        assert_eq!(preview.launch, PaneLaunch::preview("/r".into()));
+        assert_eq!(preview.preview, Some(PreviewLeaf { follows: claude, session: Some("s1".into()), active: None }));
+        assert!(ws.is_preview(leaf) && !ws.is_preview(claude));
+        assert_eq!(ws.preview_of(claude), Some(leaf));
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn open_preview_again_focuses_the_same_pane() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        let Some(PreviewPlace::Split { leaf, .. }) = ws.open_preview(claude) else { panic!() };
+        ws.focus(claude);
+        assert_eq!(ws.open_preview(claude), Some(PreviewPlace::Existing(leaf)));
+        assert_eq!(ws.focused(), Some(leaf));
+        assert_eq!(ws.leaves.len(), 2);
+    }
+
+    #[test]
+    fn open_preview_in_a_full_tab_opens_a_new_tab() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        ws.set_leaf_project(claude, Some("Billing"));
+        while ws.can_split() {
+            ws.split(Axis::Vertical, shell("/x")).unwrap();
+        }
+        let tabs = ws.tabs.len();
+        let Some(PreviewPlace::NewTab(leaf)) = ws.open_preview(claude) else { panic!("expected a new tab") };
+        assert_eq!(ws.tabs.len(), tabs + 1);
+        assert_eq!(ws.focused(), Some(leaf));
+        assert_eq!(ws.leaves[&leaf].project.as_deref(), Some("Billing"));
+        assert_eq!(ws.leaves[&leaf].preview.as_ref().unwrap().follows, claude);
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn open_preview_refuses_shells_and_previews() {
+        let mut ws = Workspace::default();
+        let shell_leaf = ws.new_tab(shell("/a"));
+        assert_eq!(ws.open_preview(shell_leaf), None);
+        let claude = claude_with(&mut ws, 1, "s1");
+        let Some(PreviewPlace::Split { leaf, .. }) = ws.open_preview(claude) else { panic!() };
+        assert_eq!(ws.open_preview(leaf), None);
+        assert_eq!(ws.open_preview(999), None);
+    }
+
+    #[test]
+    fn a_new_session_in_the_followed_leaf_empties_the_tabs() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        let Some(PreviewPlace::Split { leaf, .. }) = ws.open_preview(claude) else { panic!() };
+        let store = store_with("s1", &["a", "b"]);
+        assert!(ws.set_preview_active(leaf, "a"));
+        assert_eq!(ws.preview_files(leaf, &store).len(), 2);
+        assert!(ws.session_seen(&PaneKey::local(1), "s2"));
+        let view = ws.leaves[&leaf].preview.clone().unwrap();
+        assert_eq!((view.session.as_deref(), view.active), (Some("s2"), None));
+        assert!(ws.preview_files(leaf, &store).is_empty());
+        assert!(ws.preview_active(leaf, &store).is_none());
+        // A resume that keeps the id changes nothing.
+        ws.set_preview_active(leaf, "x");
+        assert!(!ws.session_seen(&PaneKey::local(1), "s2"));
+        assert_eq!(ws.leaves[&leaf].preview.as_ref().unwrap().active.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn closing_the_claude_leaf_keeps_the_last_session() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        let Some(PreviewPlace::Split { leaf, .. }) = ws.open_preview(claude) else { panic!() };
+        let store = store_with("s1", &["a", "b"]);
+        ws.close(claude);
+        assert_eq!(ws.preview_session(leaf), Some((&HostId::local(), "s1")));
+        let ids: Vec<&str> = ws.preview_files(leaf, &store).iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn remove_hides_the_file_and_moves_the_active_tab() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        let Some(PreviewPlace::Split { leaf, .. }) = ws.open_preview(claude) else { panic!() };
+        let store = store_with("s1", &["a", "b", "c"]);
+        let ids = |ws: &Workspace, store: &SessionStore| -> Vec<String> {
+            ws.preview_files(leaf, store).iter().map(|f| f.id.clone()).collect()
+        };
+        assert_eq!(ws.preview_active(leaf, &store).unwrap().id, "c");
+        assert!(ws.remove_sent(leaf, "c", &store));
+        assert_eq!(ids(&ws, &store), ["a", "b"]);
+        assert_eq!(ws.preview_active(leaf, &store).unwrap().id, "b");
+        assert!(!ws.remove_sent(leaf, "c", &store), "already hidden");
+        // A resend under a new id lists again.
+        let again = store_with("s1", &["a", "b", "c", "d"]);
+        assert_eq!(ids(&ws, &again), ["a", "b", "d"]);
+        // Removing a tab that is not the active one leaves the active one alone.
+        assert!(ws.set_preview_active(leaf, "d"));
+        assert!(ws.remove_sent(leaf, "a", &again));
+        assert_eq!(ws.preview_active(leaf, &again).unwrap().id, "d");
+    }
+
+    #[test]
+    fn clear_removes_every_listed_file() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        let Some(PreviewPlace::Split { leaf, .. }) = ws.open_preview(claude) else { panic!() };
+        let store = store_with("s1", &["a", "b"]);
+        ws.set_preview_active(leaf, "a");
+        assert!(ws.clear_sent(leaf, &store));
+        assert!(ws.preview_files(leaf, &store).is_empty());
+        assert_eq!(ws.leaves[&leaf].preview.as_ref().unwrap().active, None);
+        assert_eq!(ws.sent_removed["s1"], BTreeSet::from(["a".to_string(), "b".to_string()]));
+        assert!(!ws.clear_sent(leaf, &store), "nothing left to clear");
+    }
+
+    #[test]
+    fn seen_ids_are_per_session() {
+        let mut ws = Workspace::default();
+        assert!(ws.mark_seen("s1", "a"));
+        assert!(!ws.mark_seen("s1", "a"));
+        assert!(ws.is_seen("s1", "a"));
+        assert!(!ws.is_seen("s2", "a"));
+        assert!(!ws.is_seen("s1", "b"));
+    }
+
+    #[test]
+    fn watched_sessions_groups_preview_sessions_by_host() {
+        let mut ws = Workspace::default();
+        let one = claude_with(&mut ws, 1, "s2");
+        let two = claude_with(&mut ws, 2, "s1");
+        let remote = claude_with(&mut ws, 3, "r1");
+        on_host(&mut ws, remote, "devbox");
+        for claude in [one, two, remote] {
+            ws.open_preview(claude).unwrap();
+        }
+        // A second preview of the same session on this machine adds nothing.
+        let twin = ws.new_tab(PaneLaunch::preview("/r".into()));
+        ws.leaves.get_mut(&twin).unwrap().preview =
+            Some(PreviewLeaf { follows: one, session: Some("s2".into()), active: None });
+        let watched = ws.watched_sessions();
+        assert_eq!(watched[&HostId::local()], ["s1", "s2"]);
+        assert_eq!(watched[&HostId::named("devbox")], ["r1"]);
+        assert_eq!(watched.len(), 2);
+        assert!(Workspace::default().watched_sessions().is_empty());
+    }
+
+    #[test]
+    fn previews_never_count_as_finished() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        let Some(PreviewPlace::Split { leaf, .. }) = ws.open_preview(claude) else { panic!() };
+        assert_eq!(ws.finished_leaves(), Vec::<NodeId>::new());
+        ws.pane_exited(&PaneKey::local(1));
+        assert_eq!(ws.finished_leaves(), vec![claude]);
+        assert!(!ws.finished_leaves().contains(&leaf));
+    }
+
+    #[test]
+    fn running_only_keeps_a_preview_exactly_when_its_claude_leaf_stays() {
+        let mut saved = workspace_on("i1");
+        let live = claude_with(&mut saved, 1, "s1");
+        let Some(PreviewPlace::Split { leaf: live_preview, .. }) = saved.open_preview(live) else { panic!() };
+        let dead = claude_with(&mut saved, 2, "s2");
+        let Some(PreviewPlace::Split { leaf: dead_preview, .. }) = saved.open_preview(dead) else { panic!() };
+        let restored = restore_local(Some(saved), "i1", &[info(1, "claude", 5)], &launch(), false, &HashSet::new());
+        let ws = restored.workspace;
+        assert_eq!(ws.leaves.keys().copied().collect::<Vec<_>>(), vec![live, live_preview]);
+        assert!(!ws.leaves.contains_key(&dead_preview));
+        assert!(ws.is_consistent());
+        assert_eq!(ws.tabs.len(), 1);
+    }
+
+    #[test]
+    fn leaf_for_session_never_finds_a_preview() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        ws.open_preview(claude).unwrap();
+        assert_eq!(ws.leaf_for_session(&HostId::local(), "s1"), Some(claude));
+        ws.close(claude);
+        assert_eq!(ws.leaf_for_session(&HostId::local(), "s1"), None);
     }
 }

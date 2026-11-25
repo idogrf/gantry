@@ -7,7 +7,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Whether `name` is one plain path component (`[A-Za-z0-9._-]+`, not `.` or `..`), so joining it stays inside its base.
+/// Whether `name` is one plain path component (`[A-Za-z0-9._-]+`, not `.` or `..`), so joining it stays inside its
+/// base.
 fn plain_name(name: &str) -> bool {
     name != "."
         && name != ".."
@@ -16,8 +17,8 @@ fn plain_name(name: &str) -> bool {
 }
 
 /// Where the copies of `profile` go: `<runtime dir>/gantry-preview/<profile>` when the runtime dir is set, else
-/// `<cache dir>/preview/<profile>` (the platform's per-user cache folder of Gantry); `None` when neither is known or the profile
-/// name is not a plain name.
+/// `<cache dir>/preview/<profile>` (the platform's per-user cache folder of Gantry); `None` when neither is known or
+/// the profile name is not a plain name.
 fn choose(runtime: Option<&Path>, cache: Option<&Path>, profile: &str) -> Option<PathBuf> {
     if !plain_name(profile) {
         return None;

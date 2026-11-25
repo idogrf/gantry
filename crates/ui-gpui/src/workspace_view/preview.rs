@@ -249,9 +249,10 @@ fn needs_refill(decoded: bool, parsing: bool, shown: Option<&Shown>) -> bool {
 }
 
 /// The decoded files to drop: those no preview lists (and no document shows as an `in_view` image), those whose bytes
-/// the cache no longer holds, and the images that are neither the active file of some preview nor in view in a
-/// document (GPUI keeps a full bitmap and an atlas tile for each decoded image; one is decoded again from the cached
-/// bytes when its tab is shown or it scrolls back).
+/// the cache no longer holds, and the images, parsed text and parsed markdown that are neither the active file of some
+/// preview nor in view in a document (GPUI keeps a full bitmap and an atlas tile for each decoded image, a parse is
+/// about three times its file; one is decoded again from the cached bytes when its tab is shown or it scrolls back).
+/// An in-view image is never dropped for being inactive: only the view's next report ends that.
 fn stale_decoded(
     decoded: &HashMap<FileKey, Content>,
     listed: &HashSet<FileKey>,
@@ -265,10 +266,40 @@ fn stale_decoded(
             let shown = in_view.contains(*key);
             !(listed.contains(*key) || shown)
                 || !cached(key)
-                || (matches!(content, Content::Image { .. }) && !active.contains(*key) && !shown)
+                || (matches!(content, Content::Image { .. } | Content::Text { .. } | Content::Markdown(_))
+                    && !active.contains(*key)
+                    && !shown)
         })
         .map(|(key, _)| key.clone())
         .collect()
+}
+
+/// Whether the result of a parse made for generation `done` is still wanted: `current` is the generation recorded for
+/// the file, `None` once the parse was cancelled and a newer number once another one replaced it.
+fn parse_is_wanted(current: Option<u64>, done: u64) -> bool {
+    current == Some(done)
+}
+
+/// Split `pending` images into the ones to release and the ones some view's model still draws (`referenced`), which
+/// wait for the next flush.
+fn releasable(
+    pending: Vec<Arc<gpui::Image>>,
+    referenced: &[Arc<gpui::Image>],
+) -> (Vec<Arc<gpui::Image>>, Vec<Arc<gpui::Image>>) {
+    pending.into_iter().partition(|image| !referenced.iter().any(|used| Arc::ptr_eq(used, image)))
+}
+
+/// The images a model draws: the file's own and its document's in-view images.
+fn model_images(model: &PreviewModel) -> Vec<Arc<gpui::Image>> {
+    let own = match &model.content {
+        Content::Image { image, .. } => Some(image.clone()),
+        _ => None,
+    };
+    let doc = model.images.values().filter_map(|content| match content {
+        Content::Image { image, .. } => Some(image.clone()),
+        _ => None,
+    });
+    own.into_iter().chain(doc).collect()
 }
 
 /// The files to read for a document's in-view image paths: the ones whose type is an image, at most
@@ -357,10 +388,8 @@ impl WorkspaceView {
         for leaf in tab.root.leaves() {
             let Some(slot) = self.previews.get(&leaf) else { continue };
             let Some(host) = self.workspace.leaves.get(&leaf).map(|entry| entry.host.clone()) else { continue };
-            let view = slot.view.read(cx);
-            if matches!(view.model().content, Content::Markdown(_)) {
-                out.extend(doc_image_keys(&host, view.images_in_view()));
-            }
+            // Whatever the view reported stays until it reports again (see `keeps_images`).
+            out.extend(doc_image_keys(&host, slot.view.read(cx).images_in_view()));
         }
         out
     }
@@ -456,13 +485,23 @@ impl WorkspaceView {
         // After the views have the new content, so a replaced image is not drawn (and decoded) again.
         old.extend(self.prune_decoded(cx));
         self.pending_release.extend(images_of(old));
+        // An in-view image whose bytes are cached but whose decoded entry is gone (an Unchanged reply does not
+        // decode) is made again and shown.
+        if self.refill_decoded(cx) {
+            self.push_preview_models(cx);
+        }
         self.flush_releases(window, cx);
     }
 
     /// Free what GPUI holds for the images that were replaced or dropped: the atlas tile of each (it is keyed by a new
     /// id per version) and its decoded bitmap.
+    /// An image some view's model still draws waits for the next flush.
     pub(super) fn flush_releases(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for image in std::mem::take(&mut self.pending_release) {
+        let referenced: Vec<Arc<gpui::Image>> =
+            self.previews.values().flat_map(|slot| model_images(slot.view.read(cx).model())).collect();
+        let (release, keep) = releasable(std::mem::take(&mut self.pending_release), &referenced);
+        self.pending_release = keep;
+        for image in release {
             if let Some(render) = image.clone().get_render_image(window, cx) {
                 cx.drop_image(render, Some(window));
             }
@@ -471,8 +510,8 @@ impl WorkspaceView {
     }
 
     /// Decode each shown file the cache holds but `decoded` lost (it was unlisted for a while, and the daemon answers
-    /// `Unchanged` for it), once: a file whose parse is running is left to it.
-    fn refill_decoded(&mut self, cx: &mut Context<Self>) {
+    /// `Unchanged` for it), once: a file whose parse is running is left to it. Whether it started any.
+    fn refill_decoded(&mut self, cx: &mut Context<Self>) -> bool {
         let wanted: Vec<FileKey> = self
             .previews
             .keys()
@@ -484,14 +523,17 @@ impl WorkspaceView {
                 needs_refill(self.decoded.contains_key(key), self.parsing.contains_key(key), self.reads.shown(key))
             })
             .collect();
+        let any = !wanted.is_empty();
         for key in wanted {
             let old = self.start_decode(key, cx);
             self.pending_release.extend(images_of(old.into_iter().collect()));
         }
+        any
     }
 
     /// The one way into `decoded`: content that needs no parse goes in at once, a text or markdown file is parsed on
-    /// the background executor (one parse per file at a time, the newest job waits). While it runs the old content stays
+    /// the background executor (one parse per file at a time, the newest job waits; only a preview's active file is
+    /// parsed, the others are made again from the cached bytes when shown). While it runs the old content stays
     /// shown. Returns the content a direct insert replaced.
     fn start_decode(&mut self, key: FileKey, cx: &mut Context<Self>) -> Option<Content> {
         match decode_now(&key.path, self.reads.shown(&key)) {
@@ -499,6 +541,7 @@ impl WorkspaceView {
                 self.parse_queued.remove(&key);
                 self.decoded.insert(key, content)
             }
+            Decode::Parse(_) if !self.active_keys(cx).contains(&key) => None,
             Decode::Parse(job) => {
                 if let Some(job) = route_job(self.parsing.contains_key(&key), &mut self.parse_queued, key.clone(), job)
                 {
@@ -512,19 +555,27 @@ impl WorkspaceView {
     fn spawn_parse(&mut self, key: FileKey, job: ParseJob, cx: &mut Context<Self>) {
         let mtime_ms = job.mtime_ms;
         let done_key = key.clone();
+        self.parse_counter += 1;
+        let generation = self.parse_counter;
+        self.parse_gen.insert(key.clone(), generation);
         let task = cx.spawn(async move |this, cx| {
             let content = cx.background_executor().spawn(async move { run_parse(&job) }).await;
-            this.update(cx, |view, cx| view.parse_done(done_key, mtime_ms, content, cx)).ok();
+            this.update(cx, |view, cx| view.parse_done(done_key, generation, mtime_ms, content, cx)).ok();
         });
         self.parsing.insert(key, task);
     }
 
-    /// A parse finished: keep its content (see `after_parse`), then start the queued job.
-    fn parse_done(&mut self, key: FileKey, mtime_ms: u64, content: Content, cx: &mut Context<Self>) {
+    /// A parse finished: keep its content when it is still wanted (see `parse_is_wanted`, `after_parse`), then start
+    /// the queued job. The task stays in `parsing` until now, so no second parse of the file ran beside it.
+    fn parse_done(&mut self, key: FileKey, generation: u64, mtime_ms: u64, content: Content, cx: &mut Context<Self>) {
         self.parsing.remove(&key);
+        let wanted = parse_is_wanted(self.parse_gen.get(&key).copied(), generation);
+        if wanted {
+            self.parse_gen.remove(&key);
+        }
         let queued = self.parse_queued.get(&key).map(|job| job.mtime_ms);
         let (keep, run_queued) = after_parse(self.reads.shown(&key), mtime_ms, queued);
-        if keep {
+        if keep && wanted {
             let old = self.decoded.insert(key.clone(), content);
             self.pending_release.extend(images_of(old.into_iter().collect()));
             self.push_preview_models(cx);
@@ -534,7 +585,15 @@ impl WorkspaceView {
             && run_queued
         {
             self.spawn_parse(key, job, cx);
+        } else if !wanted {
+            // A cancelled parse held back a refill of the file, which may be shown again by now.
+            self.push_preview_models(cx);
         }
+    }
+
+    /// The file of each preview pane's active tab.
+    fn active_keys(&self, cx: &App) -> HashSet<FileKey> {
+        self.previews.keys().filter_map(|leaf| self.active_file(*leaf, cx)).map(|(key, _)| key).collect()
     }
 
     /// Drop the decoded content that is no longer needed (see `stale_decoded`); returns it.
@@ -547,11 +606,11 @@ impl WorkspaceView {
                 listed.insert(FileKey { host: entry.host.clone(), path: file.path.clone() });
             }
         }
-        let active: HashSet<FileKey> =
-            self.previews.keys().filter_map(|leaf| self.active_file(*leaf, cx)).map(|(key, _)| key).collect();
-        // A parse of a file nothing lists any more (or whose bytes left the cache) is cancelled by dropping its task.
-        let wanted = |key: &FileKey| listed.contains(key) && self.reads.shown(key).is_some();
-        self.parsing.retain(|key, _| wanted(key));
+        let active = self.active_keys(cx);
+        // A parse of a file that is not shown any more (or whose bytes left the cache) is cancelled: its result will
+        // be dropped. Its task stays until the work ends, so a new parse of the file waits for it.
+        let wanted = |key: &FileKey| active.contains(key) && self.reads.shown(key).is_some();
+        self.parse_gen.retain(|key, _| wanted(key));
         self.parse_queued.retain(|key, _| wanted(key));
         let in_view: HashSet<FileKey> = self.doc_images(cx).into_iter().collect();
         let gone = stale_decoded(&self.decoded, &listed, &active, &in_view, |key| self.reads.shown(key).is_some());
@@ -567,7 +626,7 @@ impl WorkspaceView {
     /// Forget a host's reads and the Open in system viewer wishes waiting on them.
     pub(super) fn forget_host_reads(&mut self, host: &HostId) {
         self.reads.forget_host(host);
-        self.parsing.retain(|key, _| &key.host != host);
+        self.parse_gen.retain(|key, _| &key.host != host);
         self.parse_queued.retain(|key, _| &key.host != host);
         self.open_after_read.retain(|key, _| &key.host != host);
     }
@@ -640,21 +699,29 @@ impl WorkspaceView {
         cx.defer_in(window, |this, window, cx| this.flush_releases(window, cx));
     }
 
-    /// The decoded text or markdown of file `id` of preview `leaf`.
-    fn source_of(&self, leaf: NodeId, id: &str, cx: &App) -> Option<Content> {
+    /// The text of file `id` of preview `leaf` when it is text or markdown: from its decoded content, or, for a file
+    /// that is not the active one and so not decoded, from the cached bytes.
+    fn source_of(&self, leaf: NodeId, id: &str, cx: &App) -> Option<String> {
         let host = self.workspace.leaves.get(&leaf)?.host.clone();
         let file =
             self.workspace.preview_files(leaf, self.sidebar.read(cx).sessions()).into_iter().find(|f| f.id == id)?;
-        let content = self.decoded.get(&FileKey { host, path: file.path.clone() })?;
-        source_text(content).map(|_| content.clone())
+        let key = FileKey { host, path: file.path.clone() };
+        if let Some(text) = self.decoded.get(&key).and_then(source_text) {
+            return Some(text.to_string());
+        }
+        match (kind_of(&key.path), self.reads.shown(&key)?) {
+            (FileKind::Text | FileKind::Markdown, Shown::Bytes { data, .. }) => {
+                let text = std::str::from_utf8(data).ok()?;
+                Some(text.strip_prefix('\u{feff}').unwrap_or(text).to_string())
+            }
+            _ => None,
+        }
     }
 
     /// Put the text of file `id` on the clipboard.
     pub(super) fn copy_file_contents(&mut self, leaf: NodeId, id: &str, cx: &mut Context<Self>) {
-        if let Some(content) = self.source_of(leaf, id, cx)
-            && let Some(text) = source_text(&content)
-        {
-            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+        if let Some(text) = self.source_of(leaf, id, cx) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
 
@@ -1288,6 +1355,72 @@ mod tests {
         gone.sort_by(|a, b| a.path.cmp(&b.path));
         // Listed by no tab, yet kept while in view; the one out of view and the one whose bytes left the cache go.
         assert_eq!(gone, [key("/gone.png"), key("/out.png")]);
+    }
+
+    #[test]
+    fn parsed_text_of_an_inactive_file_is_dropped_and_refilled_on_activation() {
+        let decoded: HashMap<FileKey, Content> = [
+            (key("/active.md"), parsed("/active.md", &bytes(b"# a".to_vec()))),
+            (key("/other.md"), parsed("/other.md", &bytes(b"# b".to_vec()))),
+            (key("/other.txt"), parsed("/other.txt", &bytes(b"b".to_vec()))),
+            (key("/missing"), Content::Missing),
+        ]
+        .into();
+        let listed: HashSet<FileKey> =
+            ["/active.md", "/other.md", "/other.txt", "/missing"].into_iter().map(key).collect();
+        let active: HashSet<FileKey> = [key("/active.md")].into();
+        let mut gone = stale_decoded(&decoded, &listed, &active, &HashSet::new(), |_| true);
+        gone.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(gone, [key("/other.md"), key("/other.txt")]);
+        // Activated later: nothing is decoded, the bytes are cached, so it is made again.
+        assert!(needs_refill(false, false, Some(&bytes(b"# b".to_vec()))));
+    }
+
+    #[test]
+    fn an_in_view_image_with_cached_bytes_is_refilled_never_pruned() {
+        let held = bytes(png(1, 1));
+        // Pruned from `decoded` (say after the view briefly reported nothing) while its bytes stay cached: the next
+        // pass must decode it again.
+        assert!(needs_refill(false, false, Some(&held)));
+        // While the view reports it, no prune takes it, cached or not listed.
+        let decoded: HashMap<FileKey, Content> = [(key("/in.png"), image())].into();
+        let in_view: HashSet<FileKey> = [key("/in.png")].into();
+        assert!(stale_decoded(&decoded, &HashSet::new(), &HashSet::new(), &in_view, |_| true).is_empty());
+        // The view keeps its list across a transient Loading, and drops it for content that has no images.
+        assert!(crate::preview_view::keeps_images(&Content::Loading));
+        assert!(crate::preview_view::keeps_images(&parsed("/a.md", &bytes(b"# a".to_vec()))));
+        assert!(!crate::preview_view::keeps_images(&Content::Missing));
+        assert!(!crate::preview_view::keeps_images(&parsed("/a.txt", &bytes(b"a".to_vec()))));
+    }
+
+    #[test]
+    fn an_image_a_model_still_draws_is_not_released() {
+        let (a, b, c) = (image(), image(), image());
+        let (Content::Image { image: a, .. }, Content::Image { image: b, .. }, Content::Image { image: c, .. }) =
+            (a, b, c)
+        else {
+            panic!("images")
+        };
+        let referenced = [b.clone()];
+        let (release, keep) = releasable(vec![a.clone(), b.clone(), c.clone()], &referenced);
+        assert_eq!(release.len(), 2);
+        assert!(release.iter().any(|i| Arc::ptr_eq(i, &a)) && release.iter().any(|i| Arc::ptr_eq(i, &c)));
+        assert_eq!(keep.len(), 1);
+        assert!(Arc::ptr_eq(&keep[0], &b));
+    }
+
+    #[test]
+    fn a_cancelled_parse_is_not_kept_and_a_new_job_waits_for_it() {
+        // The running parse has generation 3. A prune forgets the generation; its result must be dropped.
+        assert!(parse_is_wanted(Some(3), 3));
+        assert!(!parse_is_wanted(None, 3));
+        // A newer parse of the same file replaced it.
+        assert!(!parse_is_wanted(Some(4), 3));
+        // A job for a key whose parse still runs (cancelled or not) is queued, never started beside it.
+        let mut queue = HashMap::new();
+        let job = ParseJob { kind: ParseKind::Markdown, path: "/a.md".into(), data: Vec::new().into(), mtime_ms: 1 };
+        assert!(route_job(true, &mut queue, key("/a.md"), job).is_none());
+        assert_eq!(queue.len(), 1);
     }
 
     #[test]

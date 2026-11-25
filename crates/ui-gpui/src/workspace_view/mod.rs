@@ -348,8 +348,13 @@ pub struct WorkspaceView {
     reads: app_core::preview_reads::Reads,
     /// Each shown file's decoded content (an image decoded, a text parsed), made once per reply that changed it.
     decoded: HashMap<app_core::preview_reads::FileKey, crate::preview_view::Content>,
-    /// The running parse of each file (dropping the task cancels it).
+    /// The running parse of each file. A task is kept until its work ends, so a second parse of the file never runs
+    /// beside it; a cancelled one only loses its generation in `parse_gen` and its result is dropped.
     parsing: HashMap<app_core::preview_reads::FileKey, Task<()>>,
+    /// The generation of the parse of each file whose result is still wanted.
+    parse_gen: HashMap<app_core::preview_reads::FileKey, u64>,
+    /// The last generation handed out.
+    parse_counter: u64,
     /// The newest job of a file whose parse is still running; it starts when that one is done.
     parse_queued: HashMap<app_core::preview_reads::FileKey, preview::ParseJob>,
     /// Images that were replaced or dropped, whose GPUI bitmap and atlas tile are freed at the next chance with a window.
@@ -673,6 +678,8 @@ impl WorkspaceView {
             reads: Default::default(),
             decoded: HashMap::new(),
             parsing: HashMap::new(),
+            parse_gen: HashMap::new(),
+            parse_counter: 0,
             parse_queued: HashMap::new(),
             pending_release: Vec::new(),
             open_after_read: HashMap::new(),

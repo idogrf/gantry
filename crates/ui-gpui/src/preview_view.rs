@@ -92,6 +92,13 @@ pub(crate) enum Content {
     Failed(String),
 }
 
+/// Whether the images a pane reported in view stay reported while it shows `content`: a document, and the moment it
+/// is loading again, keep them (the workspace keeps those images decoded until the view reports again); anything else
+/// has no images.
+pub(crate) fn keeps_images(content: &Content) -> bool {
+    matches!(content, Content::Markdown(_) | Content::Loading)
+}
+
 /// Whether two contents draw the same thing: the same parsed text or decoded image (a reload makes a new one), or
 /// equal payloads.
 pub(crate) fn same_content(a: &Content, b: &Content) -> bool {
@@ -453,7 +460,7 @@ impl PreviewView {
             self.md_doc = None;
             self.copied = None;
         }
-        if !same_file || !matches!(model.content, Content::Markdown(_)) {
+        if !same_file || !keeps_images(&model.content) {
             self.images_in_view.clear();
         }
         // Rows whose image arrived or changed have another height now.

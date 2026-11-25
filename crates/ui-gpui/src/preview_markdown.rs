@@ -210,8 +210,8 @@ pub(crate) fn word_bounds(text: &str, at: usize) -> Range<usize> {
     pivot_at - before..pivot_at + after
 }
 
-/// The selection a press makes: a caret, a word (two clicks), the whole block (three), or, with Shift in the same block,
-/// the old selection stretched to the new place.
+/// The selection a press makes: a caret, a word (two clicks), the whole block (three), or, with Shift in the same
+/// block, the old selection stretched to the new place.
 pub(crate) fn press_selection(
     previous: Option<BlockSelection>,
     block: usize,
@@ -792,8 +792,8 @@ fn same_look(a: &TextRun, b: &TextRun) -> bool {
 }
 
 /// A line of code as an element: wrapped styled text with its token colors, or, for a line with right-to-left letters,
-/// characters one element each (display order with the display on, logical order off) colored by their logical offsets. `interact` gets presses and drags
-/// (as byte offsets of `line`) and says what to paint selected.
+/// characters one element each (display order with the display on, logical order off) colored by their logical
+/// offsets. `interact` gets presses and drags (as byte offsets of `line`) and says what to paint selected.
 pub(crate) fn code_line(
     line: &str,
     spans: &[(Range<usize>, Token)],
@@ -1411,7 +1411,8 @@ mod tests {
 
     #[test]
     fn every_block_kind_with_a_hebrew_letter_is_routed_per_character() {
-        let doc = parse("# שלום\n\nשלום עולם\n\n| ת |\n|--|\n| ש |\n\n```\nשלום\n```\n\nplain", Path::new("/"));
+        let source = "# שלום\n\nשלום עולם\n\n| ת |\n|--|\n| ש |\n\n```\nשלום\n```\n\nplain";
+        let doc = parse(source, Path::new("/"));
         for setting in [true, false] {
             let routes: Vec<Route> = doc
                 .blocks

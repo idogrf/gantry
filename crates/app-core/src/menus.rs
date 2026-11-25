@@ -498,9 +498,12 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
             if let (Tone::Idle | Tone::Done | Tone::Unread, Some(leaf)) = (tone, leaf) {
                 items.push(read_mark_item(*leaf, *tone != Tone::Idle));
             }
-            if let (Some(leaf), None, false) =
-                (leaf, &session.container, matches!(session.state, SessionState::External { .. }))
-            {
+            // Only a live Gantry Claude pane on this machine: never Closed, External or a dev container row.
+            if let (Some(leaf), None, true) = (
+                leaf,
+                &session.container,
+                matches!(session.state, SessionState::Managed { .. }) && *tone != Tone::Closed,
+            ) {
                 items.push(entry("Open preview", MenuAction::OpenPreview(*leaf)));
             }
             items.extend(pane_color_menu(context));
@@ -703,6 +706,8 @@ mod tests {
         assert_eq!(labels_all[mark + 1], "Open preview");
         assert!(!offers(&session_row(SessionState::External { pid: Some(9) }, Tone::Elsewhere, Some(4))));
         assert!(!offers(&session_row(running, Tone::Idle, None)));
+        assert!(!offers(&session_row(SessionState::Closed, Tone::Closed, Some(4))), "an exited row");
+        assert!(!offers(&session_row(running, Tone::Closed, Some(4))), "a Closed tone");
         let Row { kind: RowKind::Session { mut session, tone, note, leaf }, .. } =
             session_row(running, Tone::Idle, Some(4))
         else {
@@ -988,7 +993,6 @@ mod tests {
             [
                 "Resume conversation",
                 "│",
-                "Open preview",
                 "Copy session id",
                 "Copy folder path",
                 "Open folder",

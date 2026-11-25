@@ -1,7 +1,7 @@
 use super::layout::content_width_beside;
 use super::{
-    DialogAction, FindSession, OpenPreview, OpenRecents, OpenSettings, SIDEBAR_EDGE, SidebarAnim, TakeOverTarget,
-    ToggleSidebar, WorkspaceView,
+    DialogAction, FindSession, OpenRecents, OpenSettings, SIDEBAR_EDGE, SidebarAnim, TakeOverTarget, ToggleSidebar,
+    WorkspaceView,
 };
 
 use app_core::attention::AlertKind;
@@ -135,7 +135,7 @@ impl WorkspaceView {
             }
             MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
             // Task 8 wires the preview pane in, Task 9 the file actions.
-            MenuAction::OpenPreview(_) => self.open_preview_action(&OpenPreview, window, cx),
+            MenuAction::OpenPreview(leaf) => self.open_preview_for(leaf, window, cx),
             MenuAction::ActivateSentFile { .. }
             | MenuAction::RemoveSentFile { .. }
             | MenuAction::ClearSentFiles(_)

@@ -600,16 +600,19 @@ impl<'n> Builder<'_, 'n> {
 
     fn item(&mut self, node: Node<'n>, marker: Marker, gap: f32, ctx: Ctx) {
         let mut pending = Some((marker, gap));
+        // What follows the marker line sits in the text column, one step in from the marker.
+        let text_column = Ctx { indent: ctx.indent.saturating_add(1), ..ctx };
         for child in node.children() {
             let is_paragraph = matches!(child.data().value, NodeValue::Paragraph);
             if is_paragraph {
-                self.paragraph(child, ctx, pending.take());
+                let at = if pending.is_some() { ctx } else { text_column };
+                self.paragraph(child, at, pending.take());
                 continue;
             }
             if let Some((marker, gap)) = pending.take() {
                 self.empty_item(marker, gap, ctx);
             }
-            self.block(child, ctx);
+            self.block(child, text_column);
         }
         if let Some((marker, gap)) = pending {
             self.empty_item(marker, gap, ctx);
@@ -899,6 +902,26 @@ mod tests {
             .collect();
         assert_eq!(items, [(Marker::Bullet, 0), (Marker::Bullet, 1), (Marker::Number(1), 0), (Marker::Task(true), 0)]);
         assert_eq!(d.blocks[block_of(&d.rows[3])].text, "d");
+    }
+
+    #[test]
+    fn item_continuations_sit_in_the_text_column() {
+        let d = doc("1. Install:\n\n   ```sh\n   make\n   ```\n\n   More.\n\n- ```\n  code\n  ```\n- - nested");
+        let rows: Vec<(&str, u8)> = d
+            .rows
+            .iter()
+            .map(|r| match r.kind {
+                RowKind::Item { .. } => ("item", r.indent),
+                RowKind::Code { .. } => ("code", r.indent),
+                RowKind::Text { .. } => ("text", r.indent),
+                _ => ("other", r.indent),
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [("item", 0), ("code", 1), ("text", 1), ("item", 0), ("code", 1), ("item", 0), ("item", 1)],
+            "{rows:?}"
+        );
     }
 
     #[test]

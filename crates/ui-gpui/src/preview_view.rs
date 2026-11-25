@@ -26,7 +26,7 @@ use crate::assets::{CLOSE_ICON, EYE_ICON, FILE_ICON, OPEN_EXTERNAL_ICON};
 use crate::git_diff_view::{display_chars, size_text};
 use crate::hover_card::{self, HoverCard};
 use crate::pane_drag::DraggedPane;
-use crate::preview_markdown::{self, RowState, VisualCache, code_line, display_spans};
+use crate::preview_markdown::{self, LineCache, RowState, VisualCache, code_line, display_spans};
 use crate::settings_store::SettingsStore;
 use crate::terminal_view::{host_card_element, installed_families, installed_family, pane_font};
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, theme};
@@ -216,6 +216,20 @@ pub(crate) struct PreviewView {
     copied: Option<(usize, Task<()>)>,
     /// The words of the document's right-to-left paragraphs, filled as they are first drawn.
     md_words: VisualCache,
+    /// The line starts of the document's code blocks, filled as they are first drawn.
+    md_lines: LineCache,
+    /// What the rows were last measured with; a change remeasures the list.
+    md_look: Option<MdLook>,
+}
+
+/// The settings a markdown row's height depends on besides the width.
+#[derive(Clone, Default, PartialEq)]
+struct MdLook {
+    family: SharedString,
+    size: f32,
+    line_height: f32,
+    ui_scale: f32,
+    rtl: bool,
 }
 
 impl EventEmitter<PreviewEvent> for PreviewView {}
@@ -251,6 +265,8 @@ impl PreviewView {
             md_doc: None,
             copied: None,
             md_words: Rc::new(RefCell::new(HashMap::new())),
+            md_lines: Rc::new(RefCell::new(HashMap::new())),
+            md_look: None,
         }
     }
 
@@ -278,6 +294,7 @@ impl PreviewView {
                 self.md_list.scroll_to(ListOffset { item_ix, ..top });
             }
             self.md_words.borrow_mut().clear();
+            self.md_lines.borrow_mut().clear();
             self.copied = None;
             self.md_doc = Some(doc.clone());
         }
@@ -322,18 +339,41 @@ impl PreviewView {
         cx.notify();
     }
 
+    /// Measure the settings markdown rows depend on once per frame; a change remeasures the list, so the heights of
+    /// rows out of view do not go stale.
+    fn sync_md(&mut self, window: &Window, cx: &App) {
+        if !matches!(self.model.content, Content::Markdown(_)) {
+            return;
+        }
+        let metrics = Self::metrics(window, cx);
+        let settings = cx.global::<SettingsStore>().settings();
+        let look = MdLook {
+            family: metrics.family,
+            size: metrics.size,
+            line_height: metrics.row_height,
+            ui_scale: theme(cx).ui_scale,
+            rtl: settings.window.right_to_left,
+        };
+        if self.md_look.as_ref() != Some(&look) {
+            if self.md_look.is_some() {
+                self.md_list.remeasure();
+            }
+            self.md_look = Some(look);
+        }
+    }
+
     /// One row of the markdown document's list.
-    fn md_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn md_row(&mut self, ix: usize, theme: &Theme, look: &MdLook, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Content::Markdown(doc) = &self.model.content else { return div().into_any_element() };
         let doc = doc.clone();
-        let theme = theme(cx).clone();
         let state = RowState {
-            code_font: Self::metrics(window, cx).family,
-            rtl: cx.global::<SettingsStore>().settings().window.right_to_left,
+            code_font: look.family.clone(),
+            rtl: look.rtl,
             copied: self.copied.as_ref().map(|(block, _)| *block),
             visual: self.md_words.clone(),
+            lines: self.md_lines.clone(),
         };
-        preview_markdown::row(&doc, ix, &state, &theme, cx)
+        preview_markdown::row(&doc, ix, &state, theme, cx)
     }
 
     /// What the pane shows now.
@@ -859,7 +899,7 @@ impl PreviewView {
                             } else {
                                 display_spans(&doc.copy(index..index + 1), highlights.line(index))
                             };
-                            div().child(code_line(&shown, &spans, &font, right_to_left, &theme))
+                            div().child(code_line(&shown, &spans, &font, right_to_left, false, &theme))
                         }
                         None => line_text(&doc.display(index), right_to_left),
                     })
@@ -919,8 +959,10 @@ impl PreviewView {
             Content::Loading => div().size_full().into_any_element(),
             Content::Markdown(_) => {
                 let view = cx.entity();
-                list(self.md_list.clone(), move |ix, window, cx| {
-                    view.update(cx, |this, cx| this.md_row(ix, window, cx))
+                let theme = theme.clone();
+                let look = self.md_look.clone().unwrap_or_default();
+                list(self.md_list.clone(), move |ix, _, cx| {
+                    view.update(cx, |this, cx| this.md_row(ix, &theme, &look, cx))
                 })
                 .size_full()
                 .into_any_element()
@@ -1006,8 +1048,9 @@ fn plain_card(title: &str) -> HoverCard {
 }
 
 impl Render for PreviewView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_zoom();
+        self.sync_md(window, cx);
         let theme = theme(cx).clone();
         let active = self.model.active.clone();
         let host_card = self.model.host_card.clone();

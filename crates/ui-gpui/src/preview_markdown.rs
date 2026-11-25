@@ -27,6 +27,10 @@ use crate::theme::{RADIUS_SMALL, Theme, UI_FONT, ansi_color, token_color};
 /// The per-block words of right-to-left paragraphs, filled while a block is first drawn and dropped with the document.
 pub(crate) type VisualCache = Rc<RefCell<HashMap<usize, Arc<VisualText>>>>;
 
+/// The byte offset where each line of a code block starts, filled when the block is first drawn and dropped with the
+/// document, so a row of a long block costs its own lines only.
+pub(crate) type LineCache = Rc<RefCell<HashMap<usize, Arc<Vec<usize>>>>>;
+
 /// What a row needs besides the document and the theme.
 pub(crate) struct RowState {
     /// The terminal font family code is drawn in.
@@ -37,6 +41,8 @@ pub(crate) struct RowState {
     pub copied: Option<usize>,
     /// The words of right-to-left paragraphs.
     pub visual: VisualCache,
+    /// The line starts of code blocks.
+    pub lines: LineCache,
 }
 
 /// Body text size in base px.
@@ -192,19 +198,15 @@ pub(crate) fn token_at(spans: &[(Range<usize>, Token)], at: usize) -> Token {
     spans.iter().find(|(range, _)| range.contains(&at)).map_or(Token::Plain, |(_, token)| *token)
 }
 
-/// The byte range of lines `lines` of a code text.
-fn code_range(text: &str, lines: &Range<usize>) -> Range<usize> {
-    let (mut at, mut start, mut end) = (0, text.len(), text.len());
-    for (n, line) in text.split('\n').enumerate() {
-        if n == lines.start {
-            start = at;
-        }
-        if n >= lines.end {
-            break;
-        }
-        end = at + line.len();
-        at += line.len() + 1;
-    }
+/// The byte offset of each line's start in a code text.
+fn line_starts(text: &str) -> Vec<usize> {
+    std::iter::once(0).chain(text.match_indices('\n').map(|(at, _)| at + 1)).collect()
+}
+
+/// The byte range of lines `lines` of a code text of `len` bytes whose lines start at `starts`.
+fn code_range(len: usize, starts: &[usize], lines: &Range<usize>) -> Range<usize> {
+    let start = starts.get(lines.start).copied().unwrap_or(len);
+    let end = starts.get(lines.end).map_or(len, |next| next - 1);
     start..end.max(start)
 }
 
@@ -270,7 +272,6 @@ fn link_opener(view: Entity<PreviewView>, target: LinkTarget) -> impl Fn(&mut gp
 fn text_block(
     doc: &MdDoc,
     block_ix: usize,
-    id: usize,
     look: Look,
     state: &RowState,
     theme: &Theme,
@@ -289,7 +290,7 @@ fn text_block(
     if state.rtl && block.text.chars().any(is_rtl_letter) {
         let words =
             state.visual.borrow_mut().entry(block_ix).or_insert_with(|| Arc::new(visual_words(&block.text))).clone();
-        return frame.child(rtl_text(doc, block, &words, &base, &code, theme, cx));
+        return frame.child(rtl_text(doc, block_ix, &words, &base, &code, theme, cx));
     }
     let runs = text_runs(block, doc, &base, &code, theme, None);
     let styled = StyledText::new(SharedString::from(block.text.clone())).with_runs(runs);
@@ -303,7 +304,7 @@ fn text_block(
     }
     let ranges = links.iter().map(|(range, _)| range.clone()).collect();
     let openers: Vec<_> = links.into_iter().map(|(_, target)| link_opener(cx.entity(), target)).collect();
-    frame.child(InteractiveText::new(("md-text", id), styled).on_click(ranges, move |which, _, app| {
+    frame.child(InteractiveText::new(("md-text", block_ix), styled).on_click(ranges, move |which, _, app| {
         if let Some(open) = openers.get(which) {
             open(app);
         }
@@ -314,13 +315,14 @@ fn text_block(
 /// word with a non-ASCII letter, or a link, is drawn a character at a time: the shaper never gets the text.
 fn rtl_text(
     doc: &MdDoc,
-    block: &Block,
+    block_ix: usize,
     words: &VisualText,
     base: &TextStyle,
     code: &Font,
     theme: &Theme,
     cx: &mut Context<PreviewView>,
 ) -> Div {
+    let Some(block) = doc.blocks.get(block_ix) else { return div() };
     let run_at = |offset: usize, len: usize| -> (TextRun, Option<usize>) {
         let inline = block.inlines.iter().find(|inline| inline.range.contains(&offset));
         match inline {
@@ -343,7 +345,7 @@ fn rtl_text(
             continue;
         }
         let linked = word.chars.iter().any(|(_, offset)| run_at(*offset, 1).1.is_some());
-        flow = flow.child(rtl_word(doc, word, linked, &run_at, &mut counter, cx));
+        flow = flow.child(rtl_word(doc, word, linked, &run_at, (block_ix, &mut counter), cx));
     }
     flow
 }
@@ -354,7 +356,7 @@ fn rtl_word(
     word: &Word,
     per_char: bool,
     run_at: &dyn Fn(usize, usize) -> (TextRun, Option<usize>),
-    counter: &mut usize,
+    (block_ix, counter): (usize, &mut usize),
     cx: &mut Context<PreviewView>,
 ) -> Div {
     let el = div().flex().flex_none();
@@ -378,7 +380,7 @@ fn rtl_word(
                 *counter += 1;
                 let open = link_opener(cx.entity(), target.clone());
                 div()
-                    .id(("md-link", *counter))
+                    .id(("md-link", (block_ix << 20) | *counter))
                     .cursor_pointer()
                     .on_click(move |_, _, app| open(app))
                     .child(text)
@@ -401,13 +403,14 @@ pub(crate) fn code_line(
     spans: &[(Range<usize>, Token)],
     font: &Font,
     rtl: bool,
+    wrap: bool,
     theme: &Theme,
 ) -> AnyElement {
     if rtl && let Some(order) = display_line(line) {
         let offsets: Vec<usize> = line.char_indices().map(|(at, _)| at).collect();
         return div()
             .flex()
-            .flex_wrap()
+            .when(wrap, |d| d.flex_wrap())
             .children(order.into_iter().map(|(logical, ch)| {
                 let color = token_color(token_at(spans, offsets[logical]), theme);
                 div().text_color(rgb(color)).child(ch.to_string())
@@ -431,23 +434,29 @@ pub(crate) fn row(
     let color = if quoted { theme.tokens.muted } else { theme.tokens.text };
     let body = Look { size: BODY, line: BODY_LINE, weight: FontWeight::NORMAL, color };
     let content: AnyElement = match &row.kind {
-        RowKind::Text { block } => text_row(doc, *block, ix, body, state, theme, cx).into_any_element(),
+        RowKind::Text { block } => text_row(doc, *block, body, state, theme, cx).into_any_element(),
         RowKind::Item { block, marker } => div()
             .w_full()
             .flex()
             .items_start()
             .child(marker_gutter(*marker, color, theme))
-            .child(div().flex_1().min_w_0().child(text_block(doc, *block, ix, body, state, theme, cx)))
+            .child(div().flex_1().min_w_0().child(text_block(doc, *block, body, state, theme, cx)))
             .into_any_element(),
         RowKind::Code { block, lines } => code_row(doc, ix, *block, lines, state, theme, cx),
         RowKind::TableRow { table, cells, header } => table_row(doc, ix, *table, cells, *header, state, theme, cx),
         RowKind::Image { image } => {
             let alt = doc.images.get(*image).map(|i| i.alt.as_str()).filter(|alt| !alt.is_empty()).unwrap_or("Image");
-            div()
-                .text_size(theme.ui(BODY))
-                .text_color(rgb(theme.tokens.muted))
-                .child(format!("[{alt}]"))
-                .into_any_element()
+            let label = format!("[{alt}]");
+            // Right-to-left text is never handed to the shaper as one run.
+            let text = match state.rtl.then(|| display_line(&label)).flatten() {
+                Some(order) => div()
+                    .flex()
+                    .flex_wrap()
+                    .children(order.into_iter().map(|(_, ch)| div().child(ch.to_string())))
+                    .into_any_element(),
+                None => div().child(label).into_any_element(),
+            };
+            div().text_size(theme.ui(BODY)).text_color(rgb(theme.tokens.muted)).child(text).into_any_element()
         }
         RowKind::Rule => div().w_full().h(theme.ui(4.)).bg(rgb(theme.tokens.line)).into_any_element(),
         RowKind::AlertTitle(kind) => div()
@@ -464,19 +473,18 @@ pub(crate) fn row(
 fn text_row(
     doc: &MdDoc,
     block: usize,
-    id: usize,
     body: Look,
     state: &RowState,
     theme: &Theme,
     cx: &mut Context<PreviewView>,
 ) -> Div {
     let Some(BlockKind::Heading { level }) = doc.blocks.get(block).map(|b| &b.kind) else {
-        return text_block(doc, block, id, body, state, theme, cx);
+        return text_block(doc, block, body, state, theme, cx);
     };
     let size = heading_size(*level);
     let color = if *level == 6 { theme.tokens.muted } else { body.color };
     let look = Look { size, line: HEADING_LINE, weight: FontWeight::SEMIBOLD, color };
-    let text = text_block(doc, block, id, look, state, theme, cx);
+    let text = text_block(doc, block, look, state, theme, cx);
     if *level <= 2 { text.pb(theme.ui(size * 0.3)).border_b_1().border_color(rgb(theme.tokens.line)) } else { text }
 }
 
@@ -501,7 +509,7 @@ fn marker_gutter(marker: Marker, color: u32, theme: &Theme) -> Div {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(3.))
+                .rounded(px(RADIUS_SMALL))
                 .border_1()
                 .border_color(rgb(if done { theme.tokens.accent } else { theme.tokens.line }))
                 .when(done, |box_| box_.bg(rgb(theme.tokens.accent)).text_color(rgb(theme.tokens.on_accent)))
@@ -529,7 +537,8 @@ fn code_row(
     );
     let font = pane_font(Some(&state.code_font));
     let radius = px(RADIUS_SMALL);
-    let range = code_range(&block.text, lines);
+    let starts = state.lines.borrow_mut().entry(block_ix).or_insert_with(|| Arc::new(line_starts(&block.text))).clone();
+    let range = code_range(block.text.len(), &starts, lines);
     let text = &block.text[range];
     let line_height = theme.ui(CODE * 1.45);
     let highlights = match &block.kind {
@@ -540,7 +549,7 @@ fn code_row(
         let spans: Vec<(Range<usize>, Token)> = highlights
             .map(|h| h.line(lines.start + n).iter().map(|s| (s.range.clone(), s.token)).collect())
             .unwrap_or_default();
-        div().w_full().min_h(line_height).child(code_line(line, &spans, &font, state.rtl, theme))
+        div().w_full().min_h(line_height).child(code_line(line, &spans, &font, state.rtl, true, theme))
     });
     let copied = state.copied == Some(block_ix);
     div()
@@ -628,7 +637,7 @@ fn table_row(
                 _ => cell,
             };
             match cells.get(col) {
-                Some(block) => cell.child(text_block(doc, *block, ix * 64 + col, look, state, theme, cx)),
+                Some(block) => cell.child(text_block(doc, *block, look, state, theme, cx)),
                 None => cell,
             }
         }))
@@ -779,10 +788,13 @@ mod tests {
     #[test]
     fn code_rows_cut_the_text_by_lines() {
         let text = "a\nbb\nccc\ndddd";
-        assert_eq!(&text[code_range(text, &(1..3))], "bb\nccc");
-        assert_eq!(&text[code_range(text, &(0..1))], "a");
-        assert_eq!(&text[code_range(text, &(3..9))], "dddd");
-        assert!(text[code_range(text, &(9..12))].is_empty());
+        let starts = line_starts(text);
+        assert_eq!(starts, [0, 2, 5, 9]);
+        let cut = |lines: Range<usize>| &text[code_range(text.len(), &starts, &lines)];
+        assert_eq!(cut(1..3), "bb\nccc");
+        assert_eq!(cut(0..1), "a");
+        assert_eq!(cut(3..9), "dddd");
+        assert!(cut(9..12).is_empty());
     }
 
     #[test]

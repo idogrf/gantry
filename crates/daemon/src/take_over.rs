@@ -101,6 +101,7 @@ mod tests {
 
     fn info(id: &str, state: SessionState) -> SessionInfo {
         SessionInfo {
+            sent_files: Vec::new(),
             id: id.into(),
             cwd: "/r".into(),
             title: String::new(),

@@ -70,6 +70,7 @@ fn wait_for(conn: &Connection, id: &str, check: impl Fn(&SessionInfo) -> bool) -
 /// Spawn `program args` in `cwd`; returns the pane and the output seen until `needle`.
 fn spawn(conn: &Connection, program: &str, args: &[&str], cwd: &Path, needle: &str) -> (PaneId, String) {
     let spec = SpawnRequest {
+        preview: false,
         program: program.into(),
         args: args.iter().map(|a| a.to_string()).collect(),
         cwd: cwd.into(),
@@ -298,6 +299,7 @@ fn removing_a_dir_removes_its_sessions() {
 fn spawn_env_reaches_child() {
     let s = start(|_, _| {});
     let spec = SpawnRequest {
+        preview: false,
         program: "sh".into(),
         args: vec!["-c".into(), "echo GOT:$FOO; sleep 5".into()],
         cwd: s.work.clone(),

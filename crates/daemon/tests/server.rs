@@ -110,6 +110,7 @@ impl TestClient {
 
 fn sh(script: &str, cwd_from: Option<PaneId>) -> SpawnRequest {
     SpawnRequest {
+        preview: false,
         program: "sh".into(),
         args: vec!["-c".into(), script.into()],
         cwd: std::env::temp_dir(),

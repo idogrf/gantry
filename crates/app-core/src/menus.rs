@@ -594,6 +594,7 @@ mod tests {
 
     fn session(state: SessionState) -> SessionInfo {
         SessionInfo {
+            sent_files: Vec::new(),
             id: "s1".into(),
             cwd: "/r/app".into(),
             title: "t".into(),

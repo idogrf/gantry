@@ -365,6 +365,7 @@ impl PaneLaunch {
             claude: self.is_claude(),
             env: self.env.clone(),
             scrollback: Some(scrollback),
+            preview: false,
         }
     }
 }
@@ -2581,6 +2582,7 @@ mod tests {
 
     fn session_info(id: &str, state: protocol::message::SessionState) -> protocol::message::SessionInfo {
         protocol::message::SessionInfo {
+            sent_files: Vec::new(),
             id: id.into(),
             cwd: "/r".into(),
             title: String::new(),

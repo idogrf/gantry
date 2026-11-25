@@ -119,6 +119,7 @@ pub fn resolve(
                 container: placed.map(|(place, _)| place),
                 claude_dir: r.claude_dir.clone(),
                 last_prompt: r.last_prompt.clone(),
+                sent_files: Vec::new(),
                 host: protocol::host::HostId::local(),
             }
         })

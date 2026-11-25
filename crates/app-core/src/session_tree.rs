@@ -1322,6 +1322,7 @@ mod tests {
 
     fn session(id: &str, cwd: &str, state: SessionState, last_active_ms: u64) -> SessionInfo {
         SessionInfo {
+            sent_files: Vec::new(),
             id: id.into(),
             cwd: cwd.into(),
             title: format!("title {id}"),

@@ -754,6 +754,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
         }
         ClientMessage::ListDir { request, path } => list_dir_request(shared, request, path),
         ClientMessage::SavePasteImage { pane, format, data } => paste_image_request(shared, pane, format, data),
+        ClientMessage::WatchSentFiles { .. } | ClientMessage::ReadFile { .. } => {}
         ClientMessage::GitStatus { request, folder, known_head } => {
             git_status_request(shared, request, folder, known_head)
         }
@@ -1265,6 +1266,7 @@ mod tests {
             paste_dir: None,
         });
         let spec = || SpawnRequest {
+            preview: false,
             program: "sleep".into(),
             args: vec!["30".into()],
             cwd: "/".into(),
@@ -1306,6 +1308,7 @@ mod tests {
             paste_dir: None,
         });
         let spec = SpawnRequest {
+            preview: false,
             program: "sh".into(),
             args: vec!["-c".into(), "seq 1 500; sleep 5".into()],
             cwd: "/".into(),
@@ -1355,6 +1358,7 @@ mod tests {
             paste_dir: None,
         });
         let spec = SpawnRequest {
+            preview: false,
             program: "sh".into(),
             args: Vec::new(),
             cwd: "/".into(),

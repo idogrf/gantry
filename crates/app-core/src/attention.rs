@@ -208,6 +208,7 @@ mod tests {
 
     fn at(id: &str, state: SessionState, status: Option<SessionStatus>, since: u64) -> SessionInfo {
         SessionInfo {
+            sent_files: Vec::new(),
             id: id.into(),
             cwd: "/r".into(),
             title: String::new(),

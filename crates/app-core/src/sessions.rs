@@ -60,6 +60,7 @@ mod tests {
 
     fn info(id: &str, title: &str) -> SessionInfo {
         SessionInfo {
+            sent_files: Vec::new(),
             id: id.into(),
             cwd: "/".into(),
             title: title.into(),

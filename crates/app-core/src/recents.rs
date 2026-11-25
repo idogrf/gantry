@@ -632,6 +632,7 @@ mod tests {
 
     fn closed(id: &str, cwd: &str, ago_hours: u64) -> SessionInfo {
         SessionInfo {
+            sent_files: Vec::new(),
             id: id.into(),
             cwd: cwd.into(),
             title: format!("title {id}"),

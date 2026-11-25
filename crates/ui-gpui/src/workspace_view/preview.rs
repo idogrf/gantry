@@ -2,6 +2,7 @@
 //! changes, titles for its rows, and telling each daemon which sessions to watch for sent files.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 
 use app_core::preview::{file_name, newly_sent, row_title};
 use app_core::session_tree::session_title;
@@ -16,22 +17,37 @@ use super::{PreviewSlot, WorkspaceView};
 use crate::preview_view::{Content, PreviewEvent, PreviewModel, PreviewTab, PreviewView};
 
 /// What to send each host's daemon with `WatchSentFiles`: the hosts (among `connected`) whose wanted session list
-/// differs from the one `sent` last, with the new list (empty when the host lost its last preview).
+/// differs from the one `sent` last, with the new list (empty when the host lost its last preview). A `fresh` host
+/// (its session list just arrived, so possibly a daemon that still watches old sessions) always gets its list.
 fn watch_changes(
     want: &BTreeMap<HostId, Vec<String>>,
     sent: &HashMap<HostId, Vec<String>>,
+    fresh: &HashSet<HostId>,
     connected: &[HostId],
 ) -> Vec<(HostId, Vec<String>)> {
-    let hosts: BTreeSet<&HostId> = want.keys().chain(sent.keys()).collect();
+    let hosts: BTreeSet<&HostId> = want.keys().chain(sent.keys()).chain(fresh.iter()).collect();
     hosts
         .into_iter()
         .filter(|host| connected.contains(host))
         .filter_map(|host| {
             let wanted = want.get(host).cloned().unwrap_or_default();
             let before = sent.get(host).map_or(&[][..], Vec::as_slice);
-            (wanted != before).then(|| (host.clone(), wanted))
+            (fresh.contains(host) || wanted != before).then(|| (host.clone(), wanted))
         })
         .collect()
+}
+
+/// Whether two models draw the same thing, so the view need not be given the new one.
+fn same_model(a: &PreviewModel, b: &PreviewModel) -> bool {
+    a.title == b.title
+        && a.active == b.active
+        && a.host_card == b.host_card
+        && a.can_open == b.can_open
+        && std::mem::discriminant(&a.content) == std::mem::discriminant(&b.content)
+        && a.tabs.len() == b.tabs.len()
+        && a.tabs.iter().zip(&b.tabs).all(|(x, y)| {
+            (&x.id, &x.name, &x.path, &x.caption, x.unseen) == (&y.id, &y.name, &y.path, &y.caption, y.unseen)
+        })
 }
 
 impl WorkspaceView {
@@ -119,8 +135,19 @@ impl WorkspaceView {
         }
     }
 
+    /// The project directory a preview's sidebar entry sits in: the shown session's, else the pane's.
+    pub(super) fn preview_cwd(&self, leaf: NodeId, cx: &App) -> PathBuf {
+        let sessions = self.sidebar.read(cx).sessions();
+        self.workspace
+            .preview_session(leaf)
+            .and_then(|(host, session)| sessions.get(host, session))
+            .map(|info| info.cwd.clone())
+            .or_else(|| self.workspace.leaves.get(&leaf).map(|entry| entry.launch.cwd.clone()))
+            .unwrap_or_default()
+    }
+
     /// The session list or a host's state changed: jump each preview to a file sent since it last looked, push the
-    /// models and tell the daemons what to watch.
+    /// models that changed, refresh the sidebar entries whose row changed and tell the daemons what to watch.
     pub(super) fn update_previews(&mut self, cx: &mut Context<Self>) {
         let leaves: Vec<NodeId> = self.previews.keys().copied().collect();
         let mut saved = false;
@@ -137,15 +164,22 @@ impl WorkspaceView {
                 self.preview_known.insert(*leaf, files.iter().map(|file| file.id.clone()).collect::<HashSet<_>>());
             }
         }
+        let mut rows_changed = false;
         for leaf in &leaves {
             let model = self.preview_model(*leaf, cx);
-            if let Some(slot) = self.previews.get(leaf) {
+            if let Some(slot) = self.previews.get(leaf)
+                && !same_model(slot.view.read(cx).model(), &model)
+            {
                 slot.view.update(cx, |view, cx| view.set_model(model, cx));
             }
+            let row = (self.leaf_title(*leaf, cx), self.preview_cwd(*leaf, cx));
+            rows_changed |= self.preview_rows.insert(*leaf, row.clone()) != Some(row);
         }
         self.sync_watch(cx);
         if saved {
-            self.save(cx);
+            self.save(cx); // also refreshes the sidebar entries
+        } else if rows_changed {
+            self.sync_panes(cx);
         }
     }
 
@@ -153,7 +187,10 @@ impl WorkspaceView {
     pub(super) fn sync_watch(&mut self, _cx: &mut Context<Self>) {
         let connected: Vec<HostId> =
             self.hosts.iter().filter(|(_, conn)| conn.connected).map(|(host, _)| host.clone()).collect();
-        for (host, sessions) in watch_changes(&self.workspace.watched_sessions(), &self.watch_sent, &connected) {
+        let changes =
+            watch_changes(&self.workspace.watched_sessions(), &self.watch_sent, &self.watch_fresh, &connected);
+        for (host, sessions) in changes {
+            self.watch_fresh.remove(&host);
             if let Some(client) = self.client(&host) {
                 client.watch_sent_files(&sessions);
             }
@@ -204,21 +241,73 @@ mod tests {
     #[test]
     fn watch_is_sent_only_on_change_and_to_connected_hosts() {
         let connected = [HostId::local(), host("box")];
+        let none = HashSet::new();
         // Unchanged: nothing.
         let same = want(&[("box", &["a", "b"])]);
-        assert!(watch_changes(&same, &sent(&[("box", &["a", "b"])]), &connected).is_empty());
+        assert!(watch_changes(&same, &sent(&[("box", &["a", "b"])]), &none, &connected).is_empty());
         // Nothing wanted, nothing sent: nothing.
-        assert!(watch_changes(&BTreeMap::new(), &HashMap::new(), &connected).is_empty());
+        assert!(watch_changes(&BTreeMap::new(), &HashMap::new(), &none, &connected).is_empty());
         // A new session list is sent.
         assert_eq!(
-            watch_changes(&same, &sent(&[("box", &["a"])]), &connected),
+            watch_changes(&same, &sent(&[("box", &["a"])]), &none, &connected),
             vec![(host("box"), vec!["a".to_string(), "b".to_string()])]
         );
         // A host that lost its last preview is told to watch nothing.
-        assert_eq!(watch_changes(&BTreeMap::new(), &sent(&[("box", &["a"])]), &connected), vec![(host("box"), vec![])]);
+        assert_eq!(
+            watch_changes(&BTreeMap::new(), &sent(&[("box", &["a"])]), &none, &connected),
+            vec![(host("box"), vec![])]
+        );
         // A host that is not connected is skipped, in both directions.
         let away = want(&[("away", &["x"])]);
-        assert!(watch_changes(&away, &HashMap::new(), &connected).is_empty());
-        assert!(watch_changes(&BTreeMap::new(), &sent(&[("away", &["x"])]), &connected).is_empty());
+        assert!(watch_changes(&away, &HashMap::new(), &none, &connected).is_empty());
+        assert!(watch_changes(&BTreeMap::new(), &sent(&[("away", &["x"])]), &none, &connected).is_empty());
+    }
+
+    #[test]
+    fn a_fresh_host_gets_its_list_once_even_when_empty_or_unchanged() {
+        let connected = [host("box")];
+        let fresh: HashSet<HostId> = [host("box")].into();
+        assert_eq!(watch_changes(&BTreeMap::new(), &HashMap::new(), &fresh, &connected), vec![(host("box"), vec![])]);
+        let same = want(&[("box", &["a"])]);
+        assert_eq!(
+            watch_changes(&same, &sent(&[("box", &["a"])]), &fresh, &connected),
+            vec![(host("box"), vec!["a".to_string()])]
+        );
+        // Not connected yet: it waits.
+        assert!(watch_changes(&BTreeMap::new(), &HashMap::new(), &fresh, &[]).is_empty());
+    }
+
+    fn model() -> PreviewModel {
+        PreviewModel {
+            title: "Preview".into(),
+            tabs: vec![PreviewTab {
+                id: "a".into(),
+                name: "a.md".into(),
+                path: "/r/a.md".into(),
+                caption: None,
+                unseen: true,
+            }],
+            active: Some("a".into()),
+            content: Content::Loading,
+            host_card: None,
+            can_open: false,
+        }
+    }
+
+    #[test]
+    fn a_model_is_pushed_only_when_something_it_draws_changed() {
+        assert!(same_model(&model(), &model()));
+        let mut changed = model();
+        changed.tabs[0].unseen = false;
+        assert!(!same_model(&model(), &changed));
+        let mut changed = model();
+        changed.title = "Preview · x".into();
+        assert!(!same_model(&model(), &changed));
+        let mut changed = model();
+        changed.content = Content::NoFiles;
+        assert!(!same_model(&model(), &changed));
+        let mut changed = model();
+        changed.tabs.clear();
+        assert!(!same_model(&model(), &changed));
     }
 }

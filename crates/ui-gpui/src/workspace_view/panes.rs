@@ -299,6 +299,10 @@ impl WorkspaceView {
     }
 
     pub(super) fn close_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
+        // A session has to be open to see its files: closing a Claude pane closes the preview that follows it.
+        if let Some(follower) = self.workspace.preview_of(leaf) {
+            self.close_leaf(follower, window, cx);
+        }
         let from = self.drawn_rects();
         // A pane of the visible tab that keeps other panes: the survivors grow into its space.
         let swipe = from.len() > 1 && from.iter().any(|(drawn, _)| *drawn == leaf);
@@ -319,6 +323,7 @@ impl WorkspaceView {
         self.slots.remove(&leaf);
         self.previews.remove(&leaf);
         self.preview_known.remove(&leaf);
+        self.preview_rows.remove(&leaf);
         self.sync_watch(cx);
         self.renames.remove(&leaf);
         if self.unseen.remove(&leaf).is_some() {
@@ -444,15 +449,7 @@ impl WorkspaceView {
                 let view = self.slots.get(id).map(|slot| slot.view.read(cx));
                 let is_preview = leaf.preview.is_some();
                 // A preview sits in the project of the session it shows.
-                let cwd = if is_preview {
-                    let sessions = self.sidebar.read(cx).sessions();
-                    self.workspace
-                        .preview_session(*id)
-                        .and_then(|(host, session)| sessions.get(host, session))
-                        .map_or_else(|| leaf.launch.cwd.clone(), |info| info.cwd.clone())
-                } else {
-                    leaf.launch.cwd.clone()
-                };
+                let cwd = if is_preview { self.preview_cwd(*id, cx) } else { leaf.launch.cwd.clone() };
                 PaneEntry {
                     leaf: *id,
                     host: leaf.host.clone(),

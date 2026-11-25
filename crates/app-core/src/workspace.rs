@@ -1478,9 +1478,14 @@ impl Workspace {
     }
 
     /// Open the preview of Claude leaf `claude`: focus its existing one, else split a new one to its right (a new tab
-    /// when its tab is full). `None` unless `claude` is a Claude leaf in a tab and not a preview.
+    /// when its tab is full). `None` unless `claude` is a live Claude pane on the host (not ended, not in a dev
+    /// container) in a tab, and not a preview.
     pub fn open_preview(&mut self, claude: NodeId) -> Option<PreviewPlace> {
-        let leaf = self.leaves.get(&claude).filter(|leaf| leaf.preview.is_none() && leaf.launch.is_claude())?;
+        let leaf = self
+            .leaves
+            .get(&claude)
+            .filter(|leaf| leaf.preview.is_none() && leaf.launch.is_claude())
+            .filter(|leaf| leaf.pane.is_some() && leaf.launch.container.is_none())?;
         let (cwd, host, session, project) =
             (leaf.launch.cwd.clone(), leaf.host.clone(), leaf.session.clone(), leaf.project.clone());
         if let Some(existing) = self.preview_of(claude) {
@@ -4268,6 +4273,18 @@ mod tests {
         assert_eq!(ws.leaves[&leaf].project.as_deref(), Some("Billing"));
         assert_eq!(ws.leaves[&leaf].preview.as_ref().unwrap().follows, claude);
         assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn open_preview_refuses_ended_and_dev_container_claude_panes() {
+        let mut ws = Workspace::default();
+        let ended = claude_with(&mut ws, 1, "s1");
+        ws.pane_exited(&PaneKey::local(1));
+        assert_eq!(ws.open_preview(ended), None);
+        let container = ws.new_tab(PaneLaunch::claude("/r".into()).in_container(Some("/r".into())));
+        ws.pane_started(container, 2, "/r".into());
+        assert_eq!(ws.open_preview(container), None);
+        assert!(ws.leaves.values().all(|leaf| leaf.preview.is_none()));
     }
 
     #[test]

@@ -95,6 +95,7 @@ impl WorkspaceView {
                     self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, sessions, cx));
                     // A fresh connection (a new daemon): what to watch is sent again.
                     self.watch_sent.remove(host);
+                    self.watch_fresh.insert(host.clone());
                     self.update_previews(cx);
                     self.remember_folders(host, cx);
                     self.push_recents(cx);

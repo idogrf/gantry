@@ -58,6 +58,7 @@ impl WorkspaceView {
         self.retries.remove(host);
         // A later connection is a new daemon: it is told what to watch again.
         self.watch_sent.remove(host);
+        self.watch_fresh.remove(host);
         if let Some((_, handle)) = self.attempts.remove(host) {
             handle.cancel();
         }
@@ -141,6 +142,7 @@ impl WorkspaceView {
             self.slots.remove(&leaf);
             self.previews.remove(&leaf);
             self.preview_known.remove(&leaf);
+            self.preview_rows.remove(&leaf);
             self.unseen.remove(&leaf);
             self.pending.retain(|_, waiting| *waiting != leaf);
         }

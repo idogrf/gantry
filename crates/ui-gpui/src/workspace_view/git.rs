@@ -42,10 +42,6 @@ impl WorkspaceView {
             .leaves()
             .into_iter()
             .filter_map(|id| {
-                // A preview shows files, not a session: its folder is polled for the Claude pane beside it.
-                if self.workspace.is_preview(id) {
-                    return None;
-                }
                 let (host, folder) = self.leaf_repo(id)?;
                 self.client(&host)?;
                 let busy = matches!(self.workspace.leaf_status(id, sessions), Some(SessionStatus::Busy));

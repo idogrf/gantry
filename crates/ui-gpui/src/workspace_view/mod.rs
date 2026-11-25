@@ -342,6 +342,10 @@ pub struct WorkspaceView {
     preview_known: HashMap<NodeId, HashSet<String>>,
     /// The sessions last sent to each host's daemon with `WatchSentFiles`.
     watch_sent: HashMap<HostId, Vec<String>>,
+    /// Hosts whose session list just arrived: their daemon is told what to watch again, even an empty list.
+    watch_fresh: HashSet<HostId>,
+    /// What each preview's sidebar entry last got (title, directory), to refresh it when it changes.
+    preview_rows: HashMap<NodeId, (String, PathBuf)>,
     /// Spawn request id → leaf waiting for it.
     pending: HashMap<u64, NodeId>,
     next_request: u64,
@@ -650,6 +654,8 @@ impl WorkspaceView {
             previews: HashMap::new(),
             preview_known: HashMap::new(),
             watch_sent: HashMap::new(),
+            watch_fresh: HashSet::new(),
+            preview_rows: HashMap::new(),
             pending: HashMap::new(),
             next_request: 0,
             search_answers: HashMap::new(),

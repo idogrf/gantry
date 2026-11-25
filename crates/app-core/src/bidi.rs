@@ -125,7 +125,8 @@ fn order_segment(row: &[CellView], cols: Range<usize>, to_logical: &mut [usize],
     }
 }
 
-fn is_rtl_letter(ch: char) -> bool {
+/// Whether `ch` is a letter written right to left (Hebrew, Arabic and the like).
+pub fn is_rtl_letter(ch: char) -> bool {
     matches!(bidi_class(ch), BidiClass::R | BidiClass::AL)
 }
 

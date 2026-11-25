@@ -164,6 +164,26 @@ fn needs_refill(decoded: bool, shown: Option<&Shown>) -> bool {
     !decoded && shown.is_some()
 }
 
+/// The decoded files to drop: those no preview lists, those whose bytes the cache no longer holds, and the images that
+/// are not the active file of some preview (GPUI keeps a full bitmap and an atlas tile for each decoded image; one is
+/// decoded again from the cached bytes when its tab is shown).
+fn stale_decoded(
+    decoded: &HashMap<FileKey, Content>,
+    listed: &HashSet<FileKey>,
+    active: &HashSet<FileKey>,
+    cached: impl Fn(&FileKey) -> bool,
+) -> Vec<FileKey> {
+    decoded
+        .iter()
+        .filter(|(key, content)| {
+            !listed.contains(*key)
+                || !cached(key)
+                || (matches!(content, Content::Image { .. }) && !active.contains(*key))
+        })
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
 /// The images among `contents`, which GPUI holds a decoded bitmap and an atlas tile for until released.
 fn images_of(contents: Vec<Content>) -> Vec<Arc<gpui::Image>> {
     contents
@@ -331,7 +351,7 @@ impl WorkspaceView {
         }
     }
 
-    /// Drop the decoded content of files no preview lists any more or whose bytes the cache no longer holds; returns it.
+    /// Drop the decoded content that is no longer needed (see `stale_decoded`); returns it.
     fn prune_decoded(&mut self, cx: &App) -> Vec<Content> {
         let sessions = self.sidebar.read(cx).sessions();
         let mut listed: HashSet<FileKey> = HashSet::new();
@@ -341,9 +361,9 @@ impl WorkspaceView {
                 listed.insert(FileKey { host: entry.host.clone(), path: file.path.clone() });
             }
         }
-        let reads = &self.reads;
-        let gone: Vec<FileKey> =
-            self.decoded.keys().filter(|key| !listed.contains(*key) || reads.shown(key).is_none()).cloned().collect();
+        let active: HashSet<FileKey> =
+            self.previews.keys().filter_map(|leaf| self.active_file(*leaf, cx)).map(|(key, _)| key).collect();
+        let gone = stale_decoded(&self.decoded, &listed, &active, |key| self.reads.shown(key).is_some());
         gone.iter().filter_map(|key| self.decoded.remove(key)).collect()
     }
 
@@ -535,7 +555,7 @@ impl WorkspaceView {
             _ => false,
         };
         PreviewModel {
-            title: info.map(session_title).unwrap_or_default(),
+            title: info.map(|info| session_title(info).to_string()).unwrap_or_default(),
             tabs,
             active,
             content,
@@ -598,6 +618,8 @@ impl WorkspaceView {
             let row = (self.leaf_title(*leaf, cx), self.preview_cwd(*leaf, cx));
             rows_changed |= self.preview_rows.insert(*leaf, row.clone()) != Some(row);
         }
+        // After the views have their models, so a replaced or switched-away image is no longer drawn.
+        self.release_unlisted_previews(cx);
         rows_changed
     }
 
@@ -797,6 +819,33 @@ mod tests {
         assert!(!can_open(false, true, &Content::TooLarge(Some(9))));
         assert!(can_open(false, true, &Content::TooLarge(None)));
         assert!(!can_open(false, true, &Content::Missing));
+    }
+
+    fn key(path: &str) -> FileKey {
+        FileKey { host: HostId::local(), path: PathBuf::from(path) }
+    }
+
+    fn image() -> Content {
+        content_for(Path::new("/a.png"), Some(&bytes(png(1, 1))))
+    }
+
+    #[test]
+    fn only_the_active_file_keeps_its_decoded_image() {
+        let decoded: HashMap<FileKey, Content> = [
+            (key("/shown.png"), image()),
+            (key("/other.png"), image()),
+            (key("/other.md"), Content::NoFiles),
+            (key("/unlisted.png"), image()),
+            (key("/evicted.png"), image()),
+        ]
+        .into();
+        let listed: HashSet<FileKey> =
+            ["/shown.png", "/other.png", "/other.md", "/evicted.png"].into_iter().map(key).collect();
+        let active: HashSet<FileKey> = [key("/shown.png"), key("/evicted.png")].into();
+        let mut gone = stale_decoded(&decoded, &listed, &active, |key| key != &self::key("/evicted.png"));
+        gone.sort_by(|a, b| a.path.cmp(&b.path));
+        // The inactive image, the unlisted one and the one whose bytes left the cache; the text stays.
+        assert_eq!(gone, [key("/evicted.png"), key("/other.png"), key("/unlisted.png")]);
     }
 
     #[test]

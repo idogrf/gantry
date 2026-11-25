@@ -628,7 +628,7 @@ impl PreviewView {
                 .absolute()
                 .size_full(),
             )
-            .children(tabs.map(|(index, tab)| {
+            .children(tabs.map(|(_, tab)| {
                 let active = self.model.active.as_deref() == Some(tab.id.as_str());
                 let group = SharedString::from(format!("preview-tab-{}", tab.id));
                 let (activate, remove, menu) = (tab.id.clone(), tab.id.clone(), tab.id.clone());

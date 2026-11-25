@@ -31,7 +31,7 @@ use gpui::{
 use protocol::host::{HostId, split_project_key};
 use protocol::message::SessionInfo;
 
-use crate::assets::{CHEVRON_DOWN_ICON, CHEVRON_RIGHT_ICON, CLOSE_ICON, FOLDER_ICON, LAYERS_ICON};
+use crate::assets::{CHEVRON_DOWN_ICON, CHEVRON_RIGHT_ICON, CLOSE_ICON, EYE_ICON, FOLDER_ICON, LAYERS_ICON};
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::git_scrollbar::Extent;
@@ -1921,7 +1921,21 @@ impl SidebarView {
                         .text_color(rgb(if *tone == Tone::Closed { theme.tokens.muted } else { theme.tokens.text }))
                         .child(
                             line_content(faded)
-                                .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(">_"))
+                                .child(if entry.preview {
+                                    svg()
+                                        .path(EYE_ICON)
+                                        .flex_none()
+                                        .size(theme.ui(14.))
+                                        .text_color(rgb(theme.tokens.muted))
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .flex_none()
+                                        .text_xs()
+                                        .text_color(rgb(theme.tokens.muted))
+                                        .child(">_")
+                                        .into_any_element()
+                                })
                                 .child(
                                     self.rename_field(RenameTarget::Pane(entry.leaf), &theme, cx)
                                         .unwrap_or_else(|| title(entry.title.clone())),
@@ -1931,7 +1945,17 @@ impl SidebarView {
                                 .children(close),
                         )
                         .when(amount > 0.0, |pill| {
-                            pill.child(tile_glyph(">_".into_any_element(), amount, &theme)).child(corner_marks(
+                            let glyph = if entry.preview {
+                                svg()
+                                    .path(EYE_ICON)
+                                    .flex_none()
+                                    .size(theme.ui(16.))
+                                    .text_color(rgb(theme.tokens.muted))
+                                    .into_any_element()
+                            } else {
+                                ">_".into_any_element()
+                            };
+                            pill.child(tile_glyph(glyph, amount, &theme)).child(corner_marks(
                                 None,
                                 false,
                                 !entry.host.is_local(),

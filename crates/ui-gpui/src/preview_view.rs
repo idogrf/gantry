@@ -46,6 +46,9 @@ pub(crate) struct PreviewTab {
 }
 
 /// What the body shows for the active file.
+// Most variants are set by the file reads of the next change (Task 9).
+#[allow(dead_code)]
+#[derive(Clone)]
 pub(crate) enum Content {
     /// The session has sent no files.
     NoFiles,
@@ -91,6 +94,8 @@ pub(crate) struct PreviewModel {
     pub can_open: bool,
 }
 
+// The payloads of the tab, menu and hidden-tabs events are read by the next change (Task 9).
+#[allow(dead_code)]
 /// What the user did in the pane.
 pub(crate) enum PreviewEvent {
     /// A mouse press in the pane.
@@ -243,6 +248,11 @@ impl PreviewView {
             });
         }
         cx.notify();
+    }
+
+    /// What the pane shows now.
+    pub(crate) fn model(&self) -> &PreviewModel {
+        &self.model
     }
 
     /// The selected lines as text, `None` with no selection.
@@ -749,11 +759,12 @@ impl PreviewView {
                         }),
                     )
                     .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                        if this.dragging && event.pressed_button == Some(MouseButton::Left) {
-                            if let Some((_, head)) = this.selection.as_mut().filter(|(_, head)| *head != index) {
-                                *head = index;
-                                cx.notify();
-                            }
+                        if this.dragging
+                            && event.pressed_button == Some(MouseButton::Left)
+                            && let Some((_, head)) = this.selection.as_mut().filter(|(_, head)| *head != index)
+                        {
+                            *head = index;
+                            cx.notify();
                         }
                     }))
                     .into_any_element()
@@ -897,11 +908,12 @@ impl Render for PreviewView {
                         cx.emit(PreviewEvent::Remove(id));
                         cx.stop_propagation();
                     }
-                } else if key.key == "c" && key.modifiers == Modifiers::secondary_key() {
-                    if let Some(text) = this.copy_selection() {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                        cx.stop_propagation();
-                    }
+                } else if key.key == "c"
+                    && key.modifiers == Modifiers::secondary_key()
+                    && let Some(text) = this.copy_selection()
+                {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    cx.stop_propagation();
                 }
             }))
             .on_mouse_down(

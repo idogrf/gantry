@@ -39,6 +39,7 @@ use crate::git_scrollbar::{self};
 use crate::git_state::GitRepos;
 use crate::launcher_view::LauncherView;
 use crate::pane_drag::PaneDrop;
+use crate::preview_view::PreviewView;
 use crate::recents_view::RecentsView;
 use crate::release_check::CheckRow;
 use crate::self_update::UpdateRow;
@@ -96,6 +97,7 @@ mod hosts;
 mod layout;
 mod overlays;
 mod panes;
+mod preview;
 mod render;
 mod resume;
 mod sidebar_menus;
@@ -107,6 +109,12 @@ pub(crate) use actions::all_bindings;
 
 struct Slot {
     view: Entity<TerminalView>,
+    _subscription: Subscription,
+}
+
+/// One preview pane's view and the subscription that routes its events.
+struct PreviewSlot {
+    view: Entity<PreviewView>,
     _subscription: Subscription,
 }
 
@@ -328,6 +336,12 @@ pub struct WorkspaceView {
     /// its list may miss the sessions of dirs it has not scanned, and resuming one of those would start it afresh.
     local_dirs_indexed: bool,
     slots: HashMap<NodeId, Slot>,
+    /// The preview panes' views (a preview leaf has no `Slot`: it runs nothing).
+    previews: HashMap<NodeId, PreviewSlot>,
+    /// The file ids each preview pane has seen listed, to tell a newly sent file from the first list.
+    preview_known: HashMap<NodeId, HashSet<String>>,
+    /// The sessions last sent to each host's daemon with `WatchSentFiles`.
+    watch_sent: HashMap<HostId, Vec<String>>,
     /// Spawn request id → leaf waiting for it.
     pending: HashMap<u64, NodeId>,
     next_request: u64,
@@ -633,6 +647,9 @@ impl WorkspaceView {
             to_resume: Vec::new(),
             local_dirs_indexed: false,
             slots: HashMap::new(),
+            previews: HashMap::new(),
+            preview_known: HashMap::new(),
+            watch_sent: HashMap::new(),
             pending: HashMap::new(),
             next_request: 0,
             search_answers: HashMap::new(),
@@ -746,7 +763,11 @@ impl WorkspaceView {
         this.git_task = Some(Self::start_git_timer(window, cx));
         let leaves: Vec<NodeId> = this.workspace.leaves.keys().copied().collect();
         for leaf in leaves {
-            this.add_slot(leaf, window, cx);
+            if this.workspace.is_preview(leaf) {
+                this.add_preview(leaf, window, cx);
+            } else {
+                this.add_slot(leaf, window, cx);
+            }
         }
         // A mark made by hand (`Leaf.unread`) outlives a restart, and so does the alert it stands on.
         this.unseen = this.workspace.unread_leaves().map(|leaf| (leaf, AlertKind::Finished)).collect();
@@ -757,7 +778,11 @@ impl WorkspaceView {
             this.hosts[&key.host].client.attach(key.pane);
         }
         for (leaf, slot) in &this.slots {
-            if this.workspace.leaves[leaf].pane.is_none() && !restored.spawn.contains(leaf) {
+            // A preview leaf has no pane by design and no slot: it never gets the ended terminal's bar.
+            if this.workspace.leaves[leaf].pane.is_none()
+                && !this.workspace.is_preview(*leaf)
+                && !restored.spawn.contains(leaf)
+            {
                 slot.view.update(cx, |view, cx| view.exited(None, cx));
             }
         }
@@ -778,6 +803,7 @@ impl WorkspaceView {
             this.host_states.entry(host.clone()).or_insert(HostState::NotConnected);
             this.refresh_host_cards(&host, cx);
         }
+        this.update_previews(cx);
         this.focus_current(window, cx);
         // A tab of a host that is not connected has no sidebar row: start on another one.
         this.leave_off_screen_tab(window, cx);

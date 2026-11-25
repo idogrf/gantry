@@ -4,7 +4,7 @@ use super::{
     SplitDownShell, SplitRightClaude, SplitRightShell, ToggleGitPanel, ToggleSidebar, WorkspaceView,
 };
 
-use app_core::split_tree::{Axis, Direction, NodeId};
+use app_core::split_tree::{Axis, Direction};
 use gpui::{Context, Window};
 
 use app_core::settings::Settings;
@@ -52,9 +52,6 @@ impl WorkspaceView {
             self.open_preview_for(leaf, window, cx);
         }
     }
-
-    /// Open (or show) the preview pane that follows the Claude pane `claude` (Task 8 fills this in).
-    pub(super) fn open_preview_for(&mut self, _claude: NodeId, _window: &mut Window, _cx: &mut Context<Self>) {}
 
     fn focus_dir(&mut self, direction: Direction, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace.focus_direction(direction).is_some() {

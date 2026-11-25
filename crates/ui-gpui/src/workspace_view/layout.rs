@@ -91,12 +91,15 @@ impl WorkspaceView {
             let zone = drop_zone(area, f32::from(position.x), f32::from(position.y));
             let check = self.workspace.drop_check(src, leaf, zone);
             let same_tab = self.workspace.tab_of(src) == Some(self.workspace.active);
-            let title = self
-                .workspace
-                .leaf_name(leaf)
-                .map(String::from)
-                .or_else(|| self.slots.get(&leaf).map(|slot| slot.view.read(cx).title()))
-                .unwrap_or_default();
+            let title = if self.workspace.is_preview(leaf) {
+                self.leaf_title(leaf, cx)
+            } else {
+                self.workspace
+                    .leaf_name(leaf)
+                    .map(String::from)
+                    .or_else(|| self.slots.get(&leaf).map(|slot| slot.view.read(cx).title()))
+                    .unwrap_or_default()
+            };
             PaneDrop { target: leaf, zone, check, label: preview_label(zone, check, same_tab, &title) }
         });
         match next {

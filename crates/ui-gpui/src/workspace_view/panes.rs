@@ -317,6 +317,9 @@ impl WorkspaceView {
             }
         }
         self.slots.remove(&leaf);
+        self.previews.remove(&leaf);
+        self.preview_known.remove(&leaf);
+        self.sync_watch(cx);
         self.renames.remove(&leaf);
         if self.unseen.remove(&leaf).is_some() {
             self.sync_unseen(cx);
@@ -380,7 +383,13 @@ impl WorkspaceView {
             self.clear_seen(window, cx);
             return;
         }
+        let preview = self.workspace.focused().and_then(|leaf| self.previews.get(&leaf));
         match self.workspace.focused().and_then(|leaf| self.slots.get(&leaf).map(|slot| (leaf, slot))) {
+            _ if preview.is_some() => {
+                if let Some(slot) = preview {
+                    slot.view.focus_handle(cx).focus(window, cx);
+                }
+            }
             Some((leaf, slot)) => {
                 slot.view.focus_handle(cx).focus(window, cx);
                 if let Some(key) = self.workspace.leaves[&leaf].key()
@@ -412,6 +421,9 @@ impl WorkspaceView {
         if tab.settings {
             return "Settings".to_string();
         }
+        if self.workspace.is_preview(tab.focused) {
+            return self.leaf_title(tab.focused, cx);
+        }
         let title = self.slots.get(&tab.focused).map_or_else(String::new, |slot| slot.view.read(cx).title());
         if self.workspace.tab_status(index, self.sidebar.read(cx).sessions()).is_some() {
             without_claude_glyph(&title).to_string()
@@ -430,16 +442,30 @@ impl WorkspaceView {
             .filter(|(id, _)| !unlisted.contains(id))
             .map(|(id, leaf)| {
                 let view = self.slots.get(id).map(|slot| slot.view.read(cx));
+                let is_preview = leaf.preview.is_some();
+                // A preview sits in the project of the session it shows.
+                let cwd = if is_preview {
+                    let sessions = self.sidebar.read(cx).sessions();
+                    self.workspace
+                        .preview_session(*id)
+                        .and_then(|(host, session)| sessions.get(host, session))
+                        .map_or_else(|| leaf.launch.cwd.clone(), |info| info.cwd.clone())
+                } else {
+                    leaf.launch.cwd.clone()
+                };
                 PaneEntry {
                     leaf: *id,
                     host: leaf.host.clone(),
-                    cwd: leaf.launch.cwd.clone(),
-                    title: leaf
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| view.map_or_else(|| leaf.launch.label(), |view| view.title())),
-                    session: leaf.session.clone(),
-                    claude: leaf.launch.is_claude(),
+                    cwd,
+                    title: if is_preview {
+                        self.leaf_title(*id, cx)
+                    } else {
+                        leaf.name
+                            .clone()
+                            .unwrap_or_else(|| view.map_or_else(|| leaf.launch.label(), |view| view.title()))
+                    },
+                    session: if is_preview { None } else { leaf.session.clone() },
+                    claude: !is_preview && leaf.launch.is_claude(),
                     ended: view.is_some_and(|view| view.has_ended()),
                     offline: self.leaf_offline(*id),
                     alone: self

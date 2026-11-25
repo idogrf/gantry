@@ -357,9 +357,17 @@ impl WorkspaceView {
                 canvas(resized, |_, _, _, _| {}).absolute().size_full()
             })
             .children(layout.into_iter().zip(drawn).enumerate().filter_map(|(index, ((leaf, end), (_, rect)))| {
-                let view = self.slots.get(&leaf)?.view.clone();
+                // A preview leaf draws its own view; every other leaf its terminal.
+                let preview = self.previews.get(&leaf).map(|slot| slot.view.clone());
+                let view = match &preview {
+                    Some(_) => None,
+                    None => Some(self.slots.get(&leaf)?.view.clone()),
+                };
                 let focused = leaf == tab.focused;
-                let title = self.workspace.leaf_name(leaf).map_or_else(|| view.read(cx).title(), String::from);
+                let title = self
+                    .workspace
+                    .leaf_name(leaf)
+                    .map_or_else(|| view.as_ref().map_or_else(String::new, |view| view.read(cx).title()), String::from);
                 let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
                 let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
                 let unseen = self.unseen_of(leaf);
@@ -376,7 +384,7 @@ impl WorkspaceView {
                     .get(&leaf)
                     .map(|entry| display_path(&entry.launch.cwd, std::env::home_dir().as_deref()));
                 let last_prompt_settings = cx.global::<SettingsStore>().settings().last_prompt;
-                let last_prompt = if last_prompt_settings.enabled {
+                let last_prompt = if last_prompt_settings.enabled && preview.is_none() {
                     self.workspace.leaf_last_prompt(leaf, self.sidebar.read(cx).sessions()).map(str::to_string)
                 } else {
                     None
@@ -433,7 +441,7 @@ impl WorkspaceView {
                                         content.size_full()
                                     };
                                     content
-                                        .when(multiple, |pane| {
+                                        .when(multiple && preview.is_none(), |pane| {
                                             pane.child(pane_header(
                                                 index, leaf, title, status, unseen, offline, animate, container, host,
                                                 dir, folder, project, marker, git_chip, &theme,
@@ -448,14 +456,15 @@ impl WorkspaceView {
                                                 &theme,
                                             ))
                                         })
-                                        .child(
-                                            div()
+                                        .child(match (preview, view) {
+                                            (Some(preview), _) => div().relative().flex_1().min_h_0().child(preview),
+                                            (None, view) => div()
                                                 .relative()
                                                 .flex_1()
                                                 .min_h_0()
-                                                .child(view)
+                                                .children(view)
                                                 .child(self.split_buttons(leaf, index, focused, &theme, cx)),
-                                        )
+                                        })
                                 }),
                         )
                         .children(overlay),

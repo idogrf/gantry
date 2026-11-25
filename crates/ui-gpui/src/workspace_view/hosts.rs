@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use app_core::dialogs;
 use app_core::host_install::check;
-use app_core::host_state::{DisconnectPlan, FailKind, HostDot, HostEvent, HostState, reconnect_delay};
+use app_core::host_state::{DisconnectPlan, FailKind, HostCard, HostDot, HostEvent, HostState, reconnect_delay};
 use app_core::host_update::{Click, click_plan, needs_update};
 use app_core::split_tree::NodeId;
 use app_core::theme_colors::terminal_palette;
@@ -56,6 +56,8 @@ impl WorkspaceView {
     /// connected.
     pub(super) fn forget_host(&mut self, host: &HostId, cx: &mut Context<Self>) {
         self.retries.remove(host);
+        // A later connection is a new daemon: it is told what to watch again.
+        self.watch_sent.remove(host);
         if let Some((_, handle)) = self.attempts.remove(host) {
             handle.cancel();
         }
@@ -137,6 +139,8 @@ impl WorkspaceView {
         self.workspace.remove_host(host);
         for leaf in leaves {
             self.slots.remove(&leaf);
+            self.previews.remove(&leaf);
+            self.preview_known.remove(&leaf);
             self.unseen.remove(&leaf);
             self.pending.retain(|_, waiting| *waiting != leaf);
         }
@@ -255,8 +259,8 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Put the card of `host`'s state on every pane of the host (or take it off when connected).
-    pub(super) fn refresh_host_cards(&mut self, host: &HostId, cx: &mut Context<Self>) {
+    /// The card `host`'s state puts on its panes, `None` while the host is usable.
+    pub(super) fn host_card(&self, host: &HostId) -> Option<HostCard> {
         let mut card = self.host_state(host).card(host.name());
         // A host that is not in `sshHosts` cannot be connected: its card has no button (and a host that was never
         // connected says it is not listed).
@@ -269,6 +273,12 @@ impl WorkspaceView {
             }
             card.button = None;
         }
+        card
+    }
+
+    /// Put the card of `host`'s state on every pane of the host (or take it off when connected).
+    pub(super) fn refresh_host_cards(&mut self, host: &HostId, cx: &mut Context<Self>) {
+        let card = self.host_card(host);
         for (id, leaf) in &self.workspace.leaves {
             if &leaf.host == host
                 && let Some(slot) = self.slots.get(id)
@@ -276,6 +286,7 @@ impl WorkspaceView {
                 slot.view.update(cx, |view, cx| view.set_host_card(card.clone(), cx));
             }
         }
+        self.update_previews(cx);
     }
 
     /// Start an attempt to connect `host`: interactive when the user asked (sign-in dialogs may open), else a
@@ -468,6 +479,7 @@ impl WorkspaceView {
         for leaf in &leaves {
             if self.workspace.leaves[leaf].pane.is_none()
                 && !waiting.contains(leaf)
+                && !self.workspace.is_preview(*leaf)
                 && let Some(slot) = self.slots.get(leaf)
             {
                 slot.view.update(cx, |view, cx| view.exited(None, cx));

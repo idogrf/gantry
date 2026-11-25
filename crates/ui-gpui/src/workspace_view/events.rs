@@ -93,6 +93,9 @@ impl WorkspaceView {
                     self.attention.reset(host, sessions);
                     let sessions = sessions.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, sessions, cx));
+                    // A fresh connection (a new daemon): what to watch is sent again.
+                    self.watch_sent.remove(host);
+                    self.update_previews(cx);
                     self.remember_folders(host, cx);
                     self.push_recents(cx);
                     self.resume_finished(window, cx);
@@ -109,6 +112,7 @@ impl WorkspaceView {
                     let alerts = self.attention.update(host, upserted, removed);
                     let upserted = upserted.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.apply(host, upserted, removed, cx));
+                    self.update_previews(cx);
                     self.remember_folders(host, cx);
                     self.restart_drained(host, window, cx);
                     for alert in alerts {

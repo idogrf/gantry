@@ -10,8 +10,22 @@ pub const STEP: f32 = 1.25;
 pub const WHEEL_STEP_PX: f32 = 50.0;
 
 /// The scale that shows the whole image, never above 100%.
+/// An empty image or viewport has nothing to fit, so it gives 1.
 pub fn fit_scale(natural: (f32, f32), viewport: (f32, f32)) -> f32 {
+    if empty(natural) || empty(viewport) {
+        return 1.0;
+    }
     (viewport.0 / natural.0).min(viewport.1 / natural.1).min(1.0)
+}
+
+/// Whether a size has a side that is not a positive finite number.
+fn empty(size: (f32, f32)) -> bool {
+    !(size.0.is_finite() && size.0 > 0.0 && size.1.is_finite() && size.1 > 0.0)
+}
+
+/// A side of a size, with anything that is not a positive finite number read as 0.
+fn side(v: f32) -> f32 {
+    if v.is_finite() && v > 0.0 { v } else { 0.0 }
 }
 
 /// The zoom factor of a wheel movement of `delta_y_px` pixels (negative zooms in).
@@ -41,7 +55,10 @@ impl Zoom {
         let scale = fit_scale(natural, viewport);
         Zoom {
             scale,
-            origin: ((viewport.0 - natural.0 * scale) / 2.0, (viewport.1 - natural.1 * scale) / 2.0),
+            origin: (
+                (side(viewport.0) - side(natural.0) * scale) / 2.0,
+                (side(viewport.1) - side(natural.1) * scale) / 2.0,
+            ),
             fit: true,
         }
     }
@@ -50,13 +67,17 @@ impl Zoom {
     pub fn relayout(&mut self, natural: (f32, f32), viewport: (f32, f32)) {
         if self.fit {
             *self = Zoom::fit(natural, viewport);
-        } else {
+        } else if self.usable(natural, viewport) {
             self.clamp(natural, viewport);
         }
     }
 
     /// Multiplies the scale by `factor`, keeping the image point under `pointer` still.
     pub fn zoom_at(&mut self, factor: f32, pointer: (f32, f32), natural: (f32, f32), viewport: (f32, f32)) {
+        let pointer_ok = pointer.0.is_finite() && pointer.1.is_finite();
+        if !(pointer_ok && factor.is_finite() && factor > 0.0 && self.usable(natural, viewport)) {
+            return;
+        }
         let min = fit_scale(natural, viewport).min(MIN_SCALE);
         let scale = (self.scale * factor).clamp(min, MAX_SCALE);
         let point = ((pointer.0 - self.origin.0) / self.scale, (pointer.1 - self.origin.1) / self.scale);
@@ -68,12 +89,18 @@ impl Zoom {
 
     /// Moves the image by `delta` viewport pixels, stopping at the edges.
     pub fn pan(&mut self, delta: (f32, f32), natural: (f32, f32), viewport: (f32, f32)) {
+        if !(delta.0.is_finite() && delta.1.is_finite() && self.usable(natural, viewport)) {
+            return;
+        }
         self.origin = (self.origin.0 + delta.0, self.origin.1 + delta.1);
         self.clamp(natural, viewport);
     }
 
     /// Fit or any zoom other than 100% goes to 100% around `pointer`; 100% goes back to Fit.
     pub fn toggle(&mut self, pointer: (f32, f32), natural: (f32, f32), viewport: (f32, f32)) {
+        if !self.usable(natural, viewport) {
+            return;
+        }
         if self.fit || (self.scale - 1.0).abs() > 1e-3 {
             self.zoom_at(1.0 / self.scale, pointer, natural, viewport);
         } else {
@@ -88,6 +115,9 @@ impl Zoom {
 
     /// The visible part as `[x, y, w, h]` fractions of the image; `None` while all of it is visible.
     pub fn minimap(&self, natural: (f32, f32), viewport: (f32, f32)) -> Option<[f32; 4]> {
+        if !self.usable(natural, viewport) {
+            return None;
+        }
         let axis = |origin: f32, size: f32, view: f32| {
             let scaled = size * self.scale;
             if scaled <= view + 1e-3 {
@@ -99,6 +129,16 @@ impl Zoom {
         let (x, w) = axis(self.origin.0, natural.0, viewport.0);
         let (y, h) = axis(self.origin.1, natural.1, viewport.1);
         (w < 1.0 || h < 1.0).then_some([x, y, w, h])
+    }
+
+    /// Whether the sizes and the state are all finite and positive, so the math cannot break.
+    fn usable(&self, natural: (f32, f32), viewport: (f32, f32)) -> bool {
+        !empty(natural)
+            && !empty(viewport)
+            && self.scale.is_finite()
+            && self.scale > 0.0
+            && self.origin.0.is_finite()
+            && self.origin.1.is_finite()
     }
 
     fn clamp(&mut self, natural: (f32, f32), viewport: (f32, f32)) {
@@ -223,5 +263,71 @@ mod tests {
     fn wheel_factor_one_line_is_one_step() {
         assert_eq!(wheel_factor(-50.0), 1.25);
         assert!((wheel_factor(50.0) - 0.8).abs() < 1e-6);
+    }
+
+    fn sane(z: &Zoom) {
+        assert!(z.scale.is_finite() && z.scale > 0.0, "{z:?}");
+        assert!(z.origin.0.is_finite() && z.origin.1.is_finite(), "{z:?}");
+    }
+
+    #[test]
+    fn an_empty_viewport_never_breaks_the_state() {
+        let nat = (2000.0, 1000.0);
+        for empty in [(0.0, 0.0), (0.0, 500.0), (500.0, 0.0), (-5.0, -5.0)] {
+            let mut z = Zoom::fit(nat, empty);
+            sane(&z);
+            z.toggle((10.0, 10.0), nat, empty);
+            sane(&z);
+            z.zoom_at(2.0, (10.0, 10.0), nat, empty);
+            sane(&z);
+            z.pan((-30.0, 40.0), nat, empty);
+            sane(&z);
+            z.relayout(nat, empty);
+            sane(&z);
+            z.relayout(nat, VP);
+            sane(&z);
+            z.pan((-30.0, 40.0), nat, VP);
+            sane(&z);
+            assert_eq!(z.minimap(nat, empty), None);
+        }
+    }
+
+    #[test]
+    fn a_zoom_made_at_an_empty_size_recovers_at_a_real_size() {
+        let nat = (2000.0, 1000.0);
+        let mut z = Zoom::fit(nat, (0.0, 0.0));
+        z.toggle((0.0, 0.0), nat, (0.0, 0.0));
+        z.relayout(nat, VP);
+        sane(&z);
+        z.pan((-1e6, 0.0), nat, VP);
+        sane(&z);
+        z.zoom_at(2.0, (500.0, 500.0), nat, VP);
+        sane(&z);
+    }
+
+    #[test]
+    fn an_empty_image_never_breaks_the_state() {
+        for nat in [(0.0, 0.0), (0.0, 50.0), (-3.0, -3.0)] {
+            let mut z = Zoom::fit(nat, VP);
+            sane(&z);
+            z.toggle((10.0, 10.0), nat, VP);
+            z.zoom_at(2.0, (10.0, 10.0), nat, VP);
+            z.pan((5.0, 5.0), nat, VP);
+            z.relayout(nat, VP);
+            sane(&z);
+            assert_eq!(z.minimap(nat, VP), None);
+        }
+        assert!(fit_scale((0.0, 0.0), (0.0, 0.0)) > 0.0);
+    }
+
+    #[test]
+    fn non_finite_inputs_are_ignored() {
+        let nat = (2000.0, 1000.0);
+        let mut z = Zoom::fit(nat, VP);
+        z.zoom_at(f32::NAN, (1.0, 1.0), nat, VP);
+        z.zoom_at(f32::INFINITY, (1.0, 1.0), nat, VP);
+        z.pan((f32::NAN, f32::INFINITY), nat, VP);
+        z.zoom_at(2.0, (f32::NAN, 1.0), nat, VP);
+        sane(&z);
     }
 }

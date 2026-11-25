@@ -132,6 +132,18 @@ fn copy_lines(doc: &TextDoc, lines: Range<usize>) -> String {
 /// Pixels one wheel line pans an image.
 const PAN_LINE_PX: f32 = 20.0;
 
+/// The longest side of the small map, in UI px.
+const MAP_SIZE: f32 = 120.0;
+
+/// The size of the small map: the image's shape fitted inside a `limit` x `limit` box.
+fn map_box(natural: (f32, f32), limit: f32) -> (f32, f32) {
+    let longest = natural.0.max(natural.1);
+    if !(longest.is_finite() && longest > 0.0 && natural.0.min(natural.1) > 0.0) {
+        return (limit, limit);
+    }
+    (limit * natural.0 / longest, limit * natural.1 / longest)
+}
+
 /// The label of the zoom bar: the scale as a rounded percent.
 fn zoom_label(zoom: &Zoom) -> String {
     format!("{}%", zoom.percent())
@@ -278,6 +290,9 @@ impl PreviewView {
     /// Places the image for the current content: first Fit, then adapted to the body's size.
     fn sync_zoom(&mut self) {
         let (Some(natural), viewport) = (self.natural(), self.viewport_size()) else { return };
+        if viewport.0 <= 0.0 || viewport.1 <= 0.0 {
+            return;
+        }
         match self.zoom.as_mut() {
             Some(zoom) => zoom.relayout(natural, viewport),
             None => self.zoom = Some(Zoom::fit(natural, viewport)),
@@ -321,9 +336,9 @@ impl PreviewView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let zoom = self.zoom.unwrap_or_else(|| Zoom::fit(natural, self.viewport_size()));
+        let zoom = self.zoom;
         let view = cx.entity();
-        let minimap = zoom.minimap(natural, self.viewport_size());
+        let minimap = zoom.and_then(|zoom| zoom.minimap(natural, self.viewport_size()));
         let bar = div().absolute().left_0().right_0().bottom(theme.ui(12.)).flex().justify_center().child(
             div()
                 .flex()
@@ -338,7 +353,13 @@ impl PreviewView {
                 .font_family(UI_FONT)
                 .text_color(rgb(theme.tokens.text))
                 .child(self.zoom_button("zoom-out", "−", theme, cx, |this, cx| this.zoom_center(1.0 / STEP, cx)))
-                .child(div().min_w(theme.ui(40.)).flex().justify_center().child(zoom_label(&zoom)))
+                .child(
+                    div()
+                        .min_w(theme.ui(40.))
+                        .flex()
+                        .justify_center()
+                        .child(zoom.map(|zoom| zoom_label(&zoom)).unwrap_or_default()),
+                )
                 .child(self.zoom_button("zoom-in", "+", theme, cx, |this, cx| this.zoom_center(STEP, cx)))
                 .child(self.zoom_button("zoom-fit", "Fit", theme, cx, |this, cx| {
                     this.change_zoom(cx, |zoom, natural, viewport| *zoom = Zoom::fit(natural, viewport));
@@ -349,8 +370,8 @@ impl PreviewView {
                 })),
         );
         let map = minimap.map(|[x, y, w, h]| {
-            let width = theme.ui(120.);
-            let height = width * (natural.1 / natural.0);
+            let (box_width, box_height) = map_box(natural, f32::from(theme.ui(MAP_SIZE)));
+            let (width, height) = (px(box_width), px(box_height));
             div()
                 .absolute()
                 .right(theme.ui(12.))
@@ -360,7 +381,13 @@ impl PreviewView {
                 .bg(rgb(theme.tokens.raised))
                 .border_1()
                 .border_color(rgb(theme.tokens.line))
-                .on_mouse_down(MouseButton::Left, cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                        cx.emit(PreviewEvent::Focused);
+                        cx.stop_propagation();
+                    }),
+                )
                 .child(img(image.clone()).absolute().size_full().object_fit(ObjectFit::Contain))
                 .child(
                     div()
@@ -395,15 +422,15 @@ impl PreviewView {
                 .absolute()
                 .size_full(),
             )
-            .child(
+            .children(zoom.map(|zoom| {
                 img(image.clone())
                     .object_fit(ObjectFit::Fill)
                     .absolute()
                     .left(px(zoom.origin.0))
                     .top(px(zoom.origin.1))
                     .w(px(natural.0 * zoom.scale))
-                    .h(px(natural.1 * zoom.scale)),
-            )
+                    .h(px(natural.1 * zoom.scale))
+            }))
             .child(bar)
             .children(map)
             .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
@@ -912,6 +939,13 @@ mod tests {
     fn copy_selection_copies_whole_lines() {
         let doc = TextDoc::parse(b"a\nb\nc").unwrap();
         assert_eq!(copy_lines(&doc, 1..3), "b\nc");
+    }
+
+    #[test]
+    fn the_map_fits_a_square_box() {
+        assert_eq!(map_box((1000.0, 20000.0), 120.0), (6.0, 120.0));
+        assert_eq!(map_box((2000.0, 1000.0), 120.0), (120.0, 60.0));
+        assert_eq!(map_box((50.0, 50.0), 120.0), (120.0, 120.0));
     }
 
     #[test]

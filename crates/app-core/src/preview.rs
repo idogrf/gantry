@@ -38,6 +38,8 @@ pub enum FileKind {
     Image(ImageType),
     /// Text with a known extension.
     Text,
+    /// A markdown file (`md`, `markdown`, `mdown`, `mkd`).
+    Markdown,
     /// An HTML file: a card that opens the browser, never read.
     Html,
     /// A type the pane never reads.
@@ -47,9 +49,9 @@ pub enum FileKind {
 }
 
 const TEXT_EXTENSIONS: &[&str] = &[
-    "md", "markdown", "txt", "log", "json", "jsonl", "yaml", "yml", "toml", "ini", "cfg", "conf", "xml", "rs", "py",
-    "js", "mjs", "ts", "tsx", "jsx", "go", "java", "kt", "c", "h", "cc", "cpp", "hpp", "cs", "rb", "php", "sh", "bash",
-    "zsh", "fish", "sql", "css", "scss", "lua", "swift", "diff", "patch", "env",
+    "txt", "log", "json", "jsonl", "yaml", "yml", "toml", "ini", "cfg", "conf", "xml", "rs", "py", "js", "mjs", "ts",
+    "tsx", "jsx", "go", "java", "kt", "c", "h", "cc", "cpp", "hpp", "cs", "rb", "php", "sh", "bash", "zsh", "fish",
+    "sql", "css", "scss", "lua", "swift", "diff", "patch", "env",
 ];
 
 const NOT_PREVIEWED_EXTENSIONS: &[&str] = &[
@@ -71,6 +73,7 @@ pub fn kind_of(path: &Path) -> FileKind {
         "gif" => FileKind::Image(ImageType::Gif),
         "webp" => FileKind::Image(ImageType::Webp),
         "svg" => FileKind::Image(ImageType::Svg),
+        "md" | "markdown" | "mdown" | "mkd" => FileKind::Markdown,
         "html" | "htm" => FileKind::Html,
         e if TEXT_EXTENSIONS.contains(&e) => FileKind::Text,
         e if NOT_PREVIEWED_EXTENSIONS.contains(&e) => FileKind::NotPreviewed,
@@ -336,6 +339,19 @@ impl TextDoc {
     }
 }
 
+/// Most tabs opened from links a preview pane keeps; the oldest drops past it.
+pub const MAX_LINKED: usize = 20;
+
+/// The tab id of a file opened from a link: `"link:"` and its path.
+pub fn link_id(path: &Path) -> String {
+    format!("link:{}", path.display())
+}
+
+/// Whether tab id `id` belongs to a file opened from a link.
+pub fn is_link(id: &str) -> bool {
+    id.starts_with("link:")
+}
+
 /// The files shown as tabs: oldest first, the removed ids left out.
 pub fn listed<'a>(files: &'a [SentFile], removed: Option<&BTreeSet<String>>) -> Vec<&'a SentFile> {
     let mut out: Vec<&SentFile> = files.iter().filter(|f| removed.is_none_or(|r| !r.contains(&f.id))).collect();
@@ -418,11 +434,28 @@ mod tests {
     }
 
     #[test]
+    fn markdown_has_its_own_kind() {
+        assert_eq!(kind_of(Path::new("a.md")), FileKind::Markdown);
+        assert_eq!(kind_of(Path::new("B.MARKDOWN")), FileKind::Markdown);
+        assert_eq!(kind_of(Path::new("c.mdown")), FileKind::Markdown);
+        assert_eq!(kind_of(Path::new("d.mkd")), FileKind::Markdown);
+        assert!(is_read(FileKind::Markdown));
+        assert_eq!(kind_of(Path::new("a.txt")), FileKind::Text);
+    }
+
+    #[test]
+    fn link_ids_are_marked() {
+        assert_eq!(link_id(Path::new("/r/a.md")), "link:/r/a.md");
+        assert!(is_link("link:/r/a.md"));
+        assert!(!is_link("t:0"));
+    }
+
+    #[test]
     fn kinds_follow_the_extension() {
         assert_eq!(kind_of(Path::new("a.PNG")), FileKind::Image(ImageType::Png));
         assert_eq!(kind_of(Path::new("x.jpeg")), FileKind::Image(ImageType::Jpeg));
         assert_eq!(kind_of(Path::new("d.svg")), FileKind::Image(ImageType::Svg));
-        assert_eq!(kind_of(Path::new("n.md")), FileKind::Text);
+        assert_eq!(kind_of(Path::new("n.md")), FileKind::Markdown);
         assert_eq!(kind_of(Path::new("Makefile")), FileKind::Text);
         assert_eq!(kind_of(Path::new("p.html")), FileKind::Html);
         assert_eq!(kind_of(Path::new("r.pdf")), FileKind::NotPreviewed);

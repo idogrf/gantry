@@ -446,6 +446,10 @@ pub struct PreviewLeaf {
     /// The active tab's file id; `None` = the newest file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<String>,
+    /// Tabs opened from links in a file: `backlog`, no caption, `sent_ms` = when opened; at most
+    /// `preview::MAX_LINKED`, cleared with the session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked: Vec<SentFile>,
 }
 
 /// Where `Workspace::open_preview` put the preview pane.
@@ -1459,6 +1463,7 @@ impl Workspace {
         {
             view.session = Some(session.into());
             view.active = None;
+            view.linked.clear();
         }
         true
     }
@@ -1508,7 +1513,7 @@ impl Workspace {
         };
         let (PreviewPlace::Split { leaf, .. } | PreviewPlace::NewTab(leaf) | PreviewPlace::Existing(leaf)) = place;
         self.leaves.get_mut(&leaf).expect("the leaf was just created").preview =
-            Some(PreviewLeaf { follows: claude, session, active: None });
+            Some(PreviewLeaf { follows: claude, session, active: None, linked: Vec::new() });
         Some(place)
     }
 
@@ -1518,15 +1523,24 @@ impl Workspace {
         Some((&leaf.host, leaf.preview.as_ref()?.session.as_deref()?))
     }
 
-    /// The files a preview pane lists as tabs: oldest first, the removed ones left out.
-    pub fn preview_files<'s>(&self, leaf: NodeId, sessions: &'s SessionStore) -> Vec<&'s SentFile> {
-        let Some((host, session)) = self.preview_session(leaf) else { return Vec::new() };
-        let Some(info) = sessions.get(host, session) else { return Vec::new() };
-        preview::listed(&info.sent_files, self.sent_removed.get(session))
+    /// The files a preview pane lists as tabs: the session's (the removed ones left out) and the linked ones, oldest
+    /// first; on equal times the session's first.
+    pub fn preview_files<'a>(&'a self, leaf: NodeId, sessions: &'a SessionStore) -> Vec<&'a SentFile> {
+        let Some(view) = self.leaves.get(&leaf).and_then(|leaf| leaf.preview.as_ref()) else { return Vec::new() };
+        let mut files = match self.preview_session(leaf) {
+            Some((host, session)) => sessions
+                .get(host, session)
+                .map(|info| preview::listed(&info.sent_files, self.sent_removed.get(session)))
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        files.extend(&view.linked);
+        files.sort_by_key(|file| file.sent_ms);
+        files
     }
 
     /// The file a preview pane shows: its saved tab while listed, else the newest.
-    pub fn preview_active<'s>(&self, leaf: NodeId, sessions: &'s SessionStore) -> Option<&'s SentFile> {
+    pub fn preview_active<'a>(&'a self, leaf: NodeId, sessions: &'a SessionStore) -> Option<&'a SentFile> {
         let files = self.preview_files(leaf, sessions);
         let saved = self.leaves.get(&leaf)?.preview.as_ref()?.active.as_deref();
         let id = preview::active_id(&files, saved)?;
@@ -1543,16 +1557,24 @@ impl Workspace {
         true
     }
 
-    /// Hide file `id` from a preview pane's session; when it was the active tab the newest other file becomes active.
-    /// True when it was not hidden before.
+    /// Hide file `id` from a preview pane; a linked tab is dropped, a sent file is hidden in its session. When it was
+    /// the active tab the newest other file becomes active. True when it was listed.
     pub fn remove_sent(&mut self, leaf: NodeId, id: &str, sessions: &SessionStore) -> bool {
-        let Some((_, session)) = self.preview_session(leaf) else { return false };
-        let session = session.to_string();
+        if !self.is_preview(leaf) {
+            return false;
+        }
         let files = self.preview_files(leaf, sessions);
         let was_active = self.preview_active(leaf, sessions).is_some_and(|file| file.id == id);
         let next = preview::after_remove(&files, id);
-        if !self.sent_removed.entry(session).or_default().insert(id.into()) {
-            return false;
+        if preview::is_link(id) {
+            let view = self.leaves.get_mut(&leaf).and_then(|leaf| leaf.preview.as_mut()).expect("checked above");
+            let Some(at) = view.linked.iter().position(|file| file.id == id) else { return false };
+            view.linked.remove(at);
+        } else {
+            let Some((_, session)) = self.preview_session(leaf) else { return false };
+            if !self.sent_removed.entry(session.to_string()).or_default().insert(id.into()) {
+                return false;
+            }
         }
         if was_active && let Some(view) = self.leaves.get_mut(&leaf).and_then(|leaf| leaf.preview.as_mut()) {
             view.active = next;
@@ -1560,16 +1582,47 @@ impl Workspace {
         true
     }
 
-    /// Hide every file a preview pane lists. True when there was any.
+    /// Hide every file a preview pane lists and drop its linked tabs. True when there was any.
     pub fn clear_sent(&mut self, leaf: NodeId, sessions: &SessionStore) -> bool {
-        let Some((_, session)) = self.preview_session(leaf) else { return false };
-        let session = session.to_string();
-        let ids: Vec<String> = self.preview_files(leaf, sessions).into_iter().map(|file| file.id.clone()).collect();
-        self.sent_removed.entry(session).or_default().extend(ids.iter().cloned());
+        if !self.is_preview(leaf) {
+            return false;
+        }
+        let files = self.preview_files(leaf, sessions);
+        let had_any = !files.is_empty();
+        let ids: Vec<String> = files.into_iter().map(|f| f.id.clone()).filter(|id| !preview::is_link(id)).collect();
+        if let Some((_, session)) = self.preview_session(leaf) {
+            let session = session.to_string();
+            self.sent_removed.entry(session).or_default().extend(ids);
+        }
         if let Some(view) = self.leaves.get_mut(&leaf).and_then(|leaf| leaf.preview.as_mut()) {
             view.active = None;
+            view.linked.clear();
         }
-        !ids.is_empty()
+        had_any
+    }
+
+    /// Open `path` as a tab of preview pane `leaf` (a link in a file): a listed file with that path becomes active,
+    /// else a linked tab is added (the oldest dropped past `preview::MAX_LINKED`) and made active. Returns the active
+    /// tab's id; `None` unless `leaf` is a preview.
+    pub fn open_link(&mut self, leaf: NodeId, path: &Path, now_ms: u64, sessions: &SessionStore) -> Option<String> {
+        let listed =
+            self.preview_files(leaf, sessions).into_iter().find(|file| file.path == path).map(|f| f.id.clone());
+        let view = self.leaves.get_mut(&leaf)?.preview.as_mut()?;
+        let id = listed.unwrap_or_else(|| {
+            view.linked.push(SentFile {
+                id: preview::link_id(path),
+                path: path.to_path_buf(),
+                sent_ms: now_ms,
+                caption: None,
+                backlog: true,
+            });
+            if view.linked.len() > preview::MAX_LINKED {
+                view.linked.remove(0);
+            }
+            preview::link_id(path)
+        });
+        view.active = Some(id.clone());
+        Some(id)
     }
 
     /// Record that `session`'s file `id` has been shown. True when it was new.
@@ -4242,7 +4295,10 @@ mod tests {
         assert_eq!(preview.pane, None);
         assert_eq!(preview.session, None);
         assert_eq!(preview.launch, PaneLaunch::preview("/r".into()));
-        assert_eq!(preview.preview, Some(PreviewLeaf { follows: claude, session: Some("s1".into()), active: None }));
+        assert_eq!(
+            preview.preview,
+            Some(PreviewLeaf { follows: claude, session: Some("s1".into()), active: None, linked: Vec::new() })
+        );
         assert!(ws.is_preview(leaf) && !ws.is_preview(claude));
         assert_eq!(ws.preview_of(claude), Some(leaf));
         assert!(ws.is_consistent());
@@ -4368,6 +4424,108 @@ mod tests {
         assert!(!ws.clear_sent(leaf, &store), "nothing left to clear");
     }
 
+    /// A preview of Claude leaf running session "s1", and its leaf id.
+    fn preview_of_s1(ws: &mut Workspace) -> NodeId {
+        let claude = claude_with(ws, 1, "s1");
+        let Some(PreviewPlace::Split { leaf, .. }) = ws.open_preview(claude) else { panic!() };
+        leaf
+    }
+
+    fn ids(ws: &Workspace, leaf: NodeId, store: &SessionStore) -> Vec<String> {
+        ws.preview_files(leaf, store).iter().map(|f| f.id.clone()).collect()
+    }
+
+    #[test]
+    fn a_link_opens_a_tab_once() {
+        let mut ws = Workspace::default();
+        let leaf = preview_of_s1(&mut ws);
+        let store = store_with("s1", &["a", "b"]);
+        let id = ws.open_link(leaf, Path::new("/r/x.md"), 10, &store).unwrap();
+        assert_eq!(id, "link:/r/x.md");
+        assert_eq!(ws.open_link(leaf, Path::new("/r/x.md"), 20, &store), Some(id.clone()));
+        let view = ws.leaves[&leaf].preview.as_ref().unwrap();
+        assert_eq!(view.linked.len(), 1);
+        assert_eq!(view.linked[0].sent_ms, 10);
+        assert!(view.linked[0].backlog && view.linked[0].caption.is_none());
+        assert_eq!(ws.preview_active(leaf, &store).unwrap().id, id);
+        // A path equal to a sent file's activates that file, with no linked tab.
+        assert_eq!(ws.open_link(leaf, Path::new("/r/a.md"), 30, &store), Some("a".into()));
+        assert_eq!(ws.leaves[&leaf].preview.as_ref().unwrap().linked.len(), 1);
+        assert_eq!(ws.preview_active(leaf, &store).unwrap().id, "a");
+    }
+
+    #[test]
+    fn linked_tabs_sort_after_older_files() {
+        let mut ws = Workspace::default();
+        let leaf = preview_of_s1(&mut ws);
+        let files = vec![sent("a", 1), sent("b", 3)];
+        let mut store = SessionStore::default();
+        store.replace(
+            &HostId::local(),
+            vec![SessionInfo { sent_files: files, ..session_info("s1", SessionState::Closed) }],
+        );
+        ws.open_link(leaf, Path::new("/r/x.md"), 2, &store).unwrap();
+        assert_eq!(ids(&ws, leaf, &store), ["a", "link:/r/x.md", "b"]);
+    }
+
+    #[test]
+    fn removing_a_link_tab_does_not_mark_it_removed() {
+        let mut ws = Workspace::default();
+        let leaf = preview_of_s1(&mut ws);
+        let store = store_with("s1", &["a", "b"]);
+        let id = ws.open_link(leaf, Path::new("/r/x.md"), 10, &store).unwrap();
+        assert!(ws.remove_sent(leaf, &id, &store));
+        assert!(ws.sent_removed.is_empty());
+        assert!(ws.leaves[&leaf].preview.as_ref().unwrap().linked.is_empty());
+        assert_eq!(ws.preview_active(leaf, &store).unwrap().id, "b");
+        assert!(!ws.remove_sent(leaf, &id, &store), "already gone");
+    }
+
+    #[test]
+    fn linked_tabs_are_capped() {
+        let mut ws = Workspace::default();
+        let leaf = preview_of_s1(&mut ws);
+        let store = store_with("s1", &[]);
+        for n in 0..21u64 {
+            ws.open_link(leaf, Path::new(&format!("/r/{n}.md")), n, &store).unwrap();
+        }
+        let linked = &ws.leaves[&leaf].preview.as_ref().unwrap().linked;
+        assert_eq!(linked.len(), preview::MAX_LINKED);
+        assert_eq!(linked[0].id, "link:/r/1.md");
+        assert_eq!(ws.preview_active(leaf, &store).unwrap().id, "link:/r/20.md");
+    }
+
+    #[test]
+    fn a_new_session_drops_linked_tabs() {
+        let mut ws = Workspace::default();
+        let leaf = preview_of_s1(&mut ws);
+        let store = store_with("s1", &["a"]);
+        ws.open_link(leaf, Path::new("/r/x.md"), 10, &store).unwrap();
+        assert!(ws.session_seen(&PaneKey::local(1), "s2"));
+        assert!(ws.leaves[&leaf].preview.as_ref().unwrap().linked.is_empty());
+    }
+
+    #[test]
+    fn clear_drops_linked_tabs() {
+        let mut ws = Workspace::default();
+        let leaf = preview_of_s1(&mut ws);
+        let store = store_with("s1", &["a"]);
+        ws.open_link(leaf, Path::new("/r/x.md"), 10, &store).unwrap();
+        assert!(ws.clear_sent(leaf, &store));
+        assert!(ws.leaves[&leaf].preview.as_ref().unwrap().linked.is_empty());
+        assert!(ws.preview_files(leaf, &store).is_empty());
+        assert_eq!(ws.sent_removed["s1"], BTreeSet::from(["a".to_string()]));
+    }
+
+    #[test]
+    fn open_link_refuses_other_leaves() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        let store = store_with("s1", &["a"]);
+        assert_eq!(ws.open_link(claude, Path::new("/r/x.md"), 1, &store), None);
+        assert_eq!(ws.open_link(999, Path::new("/r/x.md"), 1, &store), None);
+    }
+
     #[test]
     fn seen_ids_are_per_session() {
         let mut ws = Workspace::default();
@@ -4391,7 +4549,7 @@ mod tests {
         // A second preview of the same session on this machine adds nothing.
         let twin = ws.new_tab(PaneLaunch::preview("/r".into()));
         ws.leaves.get_mut(&twin).unwrap().preview =
-            Some(PreviewLeaf { follows: one, session: Some("s2".into()), active: None });
+            Some(PreviewLeaf { follows: one, session: Some("s2".into()), active: None, linked: Vec::new() });
         let watched = ws.watched_sessions();
         assert_eq!(watched[&HostId::local()], ["s1", "s2"]);
         assert_eq!(watched[&HostId::named("devbox")], ["r1"]);

@@ -125,7 +125,8 @@ fn content_for(path: &Path, shown: Option<&Shown>) -> Content {
                 natural: (width as f32, height as f32),
             }
         }
-        FileKind::Text => text(data),
+        // Markdown is shown as plain text until the rendered view lands.
+        FileKind::Text | FileKind::Markdown => text(data),
         FileKind::Unknown if data.len() <= MAX_UNKNOWN_TEXT => text(data),
         _ => unsupported,
     }

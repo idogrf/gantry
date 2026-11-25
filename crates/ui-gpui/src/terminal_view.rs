@@ -1091,47 +1091,12 @@ impl Render for TerminalView {
             )
             .when_some(self.host_card.clone(), |this, card| {
                 // The host is not usable: its state, in the middle of the pane.
-                this.child(
-                    div().absolute().size_full().flex().items_center().justify_center().p(theme.ui(16.)).child(
-                        div()
-                            .max_w(theme.ui(320.))
-                            .px(theme.ui(20.))
-                            .py(theme.ui(18.))
-                            .flex()
-                            .flex_col()
-                            .gap(theme.ui(14.))
-                            .rounded(px(RADIUS))
-                            .bg(rgb(theme.tokens.raised))
-                            .border_1()
-                            .border_color(rgb(theme.tokens.line))
-                            .shadow_lg()
-                            .text_color(rgb(theme.tokens.text))
-                            .font_family(UI_FONT)
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child(card.title))
-                            .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(card.detail))
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(theme.ui(8.))
-                                    .when_some(card.button, |row, label| {
-                                        row.child(banner_button(
-                                            "host-action",
-                                            label,
-                                            true,
-                                            &theme,
-                                            cx.listener(|_, _, _, cx| cx.emit(PaneEvent::HostAction)),
-                                        ))
-                                    })
-                                    .child(banner_button(
-                                        "host-close",
-                                        "Close",
-                                        false,
-                                        &theme,
-                                        cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Close)),
-                                    )),
-                            ),
-                    ),
-                )
+                this.child(host_card_element(
+                    card,
+                    &theme,
+                    cx.listener(|_, _, _, cx| cx.emit(PaneEvent::HostAction)),
+                    cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Close)),
+                ))
             })
             .when_some(self.banner(), |this, bar| {
                 let dot = match bar.tone {
@@ -1230,6 +1195,43 @@ impl Render for TerminalView {
 /// from before the first layout. Before any layout (`cell` unknown) the daemon's size stands.
 fn resize_on_attach(grid: (u16, u16), cell: (u16, u16)) -> Option<(u16, u16, u16, u16)> {
     (cell != (0, 0)).then_some((grid.0, grid.1, cell.0, cell.1))
+}
+
+/// The card of a host that is not usable, centered over its pane: the state, its detail, the host's button
+/// (`on_press`) and Close (`on_close`).
+pub(crate) fn host_card_element(
+    card: HostCard,
+    theme: &Theme,
+    on_press: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div().absolute().size_full().flex().items_center().justify_center().p(theme.ui(16.)).child(
+        div()
+            .max_w(theme.ui(320.))
+            .px(theme.ui(20.))
+            .py(theme.ui(18.))
+            .flex()
+            .flex_col()
+            .gap(theme.ui(14.))
+            .rounded(px(RADIUS))
+            .bg(rgb(theme.tokens.raised))
+            .border_1()
+            .border_color(rgb(theme.tokens.line))
+            .shadow_lg()
+            .text_color(rgb(theme.tokens.text))
+            .font_family(UI_FONT)
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(card.title))
+            .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(card.detail))
+            .child(
+                div()
+                    .flex()
+                    .gap(theme.ui(8.))
+                    .when_some(card.button, |row, label| {
+                        row.child(banner_button("host-action", label, true, theme, on_press))
+                    })
+                    .child(banner_button("host-close", "Close", false, theme, on_close)),
+            ),
+    )
 }
 
 fn banner_button(

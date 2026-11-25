@@ -49,6 +49,15 @@ pub(crate) const CHEVRON_LEFT_ICON: &str = "icons/chevron-left.svg";
 /// The recent sessions pop-up's reset filters button (a counter-clockwise arrow), drawn by `recents_view`.
 pub(crate) const RESET_ICON: &str = "icons/reset.svg";
 
+/// The preview pane's icon (an eye), drawn by `preview_view`.
+pub(crate) const EYE_ICON: &str = "icons/eye.svg";
+
+/// A file tab's icon (a page with a folded corner), drawn by `preview_view`.
+pub(crate) const FILE_ICON: &str = "icons/file.svg";
+
+/// The Open in system viewer button's icon (an arrow leaving a box), drawn by `preview_view`.
+pub(crate) const OPEN_EXTERNAL_ICON: &str = "icons/open-external.svg";
+
 /// The app icon in color, drawn next to the name in the title bar (a picture, not a tinted icon like the others).
 pub(crate) const LOGO: &str = "icons/gantry.png";
 
@@ -77,6 +86,9 @@ impl AssetSource for Assets {
             BRANCH_ICON => Some(include_bytes!("../assets/icons/branch.svg")),
             CHEVRON_LEFT_ICON => Some(include_bytes!("../assets/icons/chevron-left.svg")),
             RESET_ICON => Some(include_bytes!("../assets/icons/reset.svg")),
+            EYE_ICON => Some(include_bytes!("../assets/icons/eye.svg")),
+            FILE_ICON => Some(include_bytes!("../assets/icons/file.svg")),
+            OPEN_EXTERNAL_ICON => Some(include_bytes!("../assets/icons/open-external.svg")),
             LOGO => Some(include_bytes!("../assets/icons/gantry.png")),
             _ => None,
         };

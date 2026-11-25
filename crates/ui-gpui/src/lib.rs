@@ -15,6 +15,7 @@ mod git_state;
 mod hover_card;
 pub mod launcher_view;
 mod pane_drag;
+mod preview_view;
 pub mod recents_view;
 mod release_check;
 mod self_update;

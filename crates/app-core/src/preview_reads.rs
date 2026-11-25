@@ -1,6 +1,6 @@
 //! Which preview files to read and when (through the daemon's `ReadFile`), and the GUI's byte cache.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,6 +10,9 @@ use protocol::message::FileBody;
 
 /// How often a shown file is read again.
 pub const POLL: Duration = Duration::from_secs(2);
+
+/// How long a request waits for its reply before it counts as lost and may be sent again.
+pub const LOST_AFTER: Duration = Duration::from_secs(30);
 
 /// The most file bytes kept in memory.
 pub const BUDGET: usize = 64 * 1024 * 1024;
@@ -50,7 +53,8 @@ pub enum Shown {
 #[derive(Default)]
 struct Entry {
     shown: Option<Shown>,
-    in_flight: Option<u64>,
+    /// The id of the request waiting for its reply and when it was sent.
+    in_flight: Option<(u64, Instant)>,
     last_asked: Option<Instant>,
     /// Recency stamp: the larger, the more recently wanted.
     touched: u64,
@@ -64,6 +68,8 @@ pub struct Reads {
     pending: HashMap<u64, FileKey>,
     next_id: u64,
     clock: u64,
+    /// The files wanted by the latest `due` call (and `request_now` since): never evicted.
+    wanted: HashSet<FileKey>,
 }
 
 impl Reads {
@@ -72,8 +78,10 @@ impl Reads {
     /// Each is `(request id, file, known_mtime_ms)`. Marks them in flight and touches every wanted file for the cache.
     pub fn due(&mut self, wanted: &[FileKey], now: Instant) -> Vec<(u64, FileKey, Option<u64>)> {
         let mut out = Vec::new();
+        self.wanted = wanted.iter().cloned().collect();
         for key in wanted {
             self.touch(key);
+            self.expire(key, now);
             let entry = &self.entries[key];
             let ready = entry.in_flight.is_none() && entry.last_asked.is_none_or(|at| now.duration_since(at) >= POLL);
             if ready && let Some((id, known)) = self.start(key, now) {
@@ -86,6 +94,8 @@ impl Reads {
     /// A request for one file whatever the poll wait; `None` while one is in flight.
     pub fn request_now(&mut self, key: &FileKey, now: Instant) -> Option<(u64, Option<u64>)> {
         self.touch(key);
+        self.wanted.insert(key.clone());
+        self.expire(key, now);
         self.start(key, now)
     }
 
@@ -141,6 +151,17 @@ impl Reads {
         self.entries.entry(key.clone()).or_default().touched = self.clock;
     }
 
+    /// Treats a request sent `LOST_AFTER` ago or more as lost: its late reply will be ignored.
+    fn expire(&mut self, key: &FileKey, now: Instant) {
+        let Some(entry) = self.entries.get_mut(key) else { return };
+        if let Some((id, sent)) = entry.in_flight
+            && now.duration_since(sent) >= LOST_AFTER
+        {
+            entry.in_flight = None;
+            self.pending.remove(&id);
+        }
+    }
+
     fn start(&mut self, key: &FileKey, now: Instant) -> Option<(u64, Option<u64>)> {
         let entry = self.entries.get_mut(key)?;
         if entry.in_flight.is_some() {
@@ -148,7 +169,7 @@ impl Reads {
         }
         self.next_id += 1;
         let id = self.next_id;
-        entry.in_flight = Some(id);
+        entry.in_flight = Some((id, now));
         entry.last_asked = Some(now);
         self.pending.insert(id, key.clone());
         let known = match &entry.shown {
@@ -158,7 +179,7 @@ impl Reads {
         Some((id, known))
     }
 
-    /// Drops the least recently wanted bytes until the total is under `BUDGET`; never `keep`.
+    /// Drops the least recently wanted bytes until the total is under `BUDGET`; never `keep` or a wanted file.
     fn evict(&mut self, keep: &FileKey) {
         let size = |entry: &Entry| match &entry.shown {
             Some(Shown::Bytes { data, .. }) => data.len(),
@@ -169,7 +190,7 @@ impl Reads {
             let oldest = self
                 .entries
                 .iter()
-                .filter(|(key, entry)| *key != keep && size(entry) > 0)
+                .filter(|(key, entry)| *key != keep && !self.wanted.contains(*key) && size(entry) > 0)
                 .min_by_key(|(_, entry)| entry.touched)
                 .map(|(key, _)| key.clone());
             let Some(oldest) = oldest else { break };
@@ -301,7 +322,7 @@ mod tests {
         let keys = [lkey("/1"), lkey("/2"), lkey("/3")];
         let t0 = Instant::now();
         for k in &keys {
-            let id = reads.request_now(k, t0).unwrap().0;
+            let id = reads.due(std::slice::from_ref(k), t0)[0].0;
             reads.apply(&local(), id, bytes(30 * 1024 * 1024, 1));
         }
         assert_eq!(reads.shown(&keys[0]), None);
@@ -319,5 +340,63 @@ mod tests {
         assert!(reads.due(std::slice::from_ref(&k), t0).is_empty());
         let (_, known) = reads.request_now(&k, t0).unwrap();
         assert_eq!(known, Some(5));
+    }
+
+    #[test]
+    fn a_lost_request_expires_and_its_late_reply_is_ignored() {
+        let mut reads = Reads::default();
+        let k = lkey("/a.md");
+        let t0 = Instant::now();
+        let old = reads.due(std::slice::from_ref(&k), t0)[0].0;
+        assert!(reads.due(std::slice::from_ref(&k), t0 + LOST_AFTER - Duration::from_secs(1)).is_empty());
+        let again = reads.due(std::slice::from_ref(&k), t0 + LOST_AFTER);
+        assert_eq!(again.len(), 1);
+        assert_ne!(again[0].0, old);
+        assert_eq!(reads.apply(&local(), old, bytes(1, 1)), None);
+        assert_eq!(reads.shown(&k), None);
+        assert!(reads.in_flight(&k));
+        assert!(reads.request_now(&k, t0 + LOST_AFTER * 2).is_some());
+    }
+
+    #[test]
+    fn forgetting_a_host_keeps_what_is_shown() {
+        let mut reads = Reads::default();
+        let k = key("box", "/a.md");
+        let id = reads.request_now(&k, Instant::now()).unwrap().0;
+        reads.apply(&k.host, id, bytes(2, 3));
+        reads.forget_host(&k.host);
+        assert!(matches!(reads.shown(&k), Some(Shown::Bytes { mtime_ms: 3, .. })));
+    }
+
+    #[test]
+    fn the_key_just_stored_is_never_evicted() {
+        let mut reads = Reads::default();
+        let keys = [lkey("/1"), lkey("/2"), lkey("/3")];
+        let t0 = Instant::now();
+        let ids: Vec<u64> = keys.iter().map(|k| reads.request_now(k, t0).unwrap().0).collect();
+        reads.due(&[], t0);
+        reads.apply(&local(), ids[1], bytes(30 * 1024 * 1024, 1));
+        reads.apply(&local(), ids[2], bytes(30 * 1024 * 1024, 1));
+        reads.apply(&local(), ids[0], bytes(30 * 1024 * 1024, 1));
+        assert!(reads.shown(&keys[0]).is_some());
+        assert_eq!(reads.shown(&keys[1]), None);
+        assert!(reads.shown(&keys[2]).is_some());
+    }
+
+    #[test]
+    fn wanted_files_stay_cached_over_budget() {
+        let mut reads = Reads::default();
+        let keys = [lkey("/1"), lkey("/2"), lkey("/3"), lkey("/4")];
+        let t0 = Instant::now();
+        let due = reads.due(&keys, t0);
+        for (id, _, _) in due {
+            reads.apply(&local(), id, bytes(25 * 1024 * 1024, 1));
+        }
+        assert!(keys.iter().all(|k| reads.shown(k).is_some()));
+        let due = reads.due(&keys[1..], t0 + POLL);
+        assert_eq!(due.len(), 3);
+        reads.apply(&local(), due[0].0, bytes(25 * 1024 * 1024, 2));
+        assert_eq!(reads.shown(&keys[0]), None);
+        assert!(keys[1..].iter().all(|k| reads.shown(k).is_some()));
     }
 }

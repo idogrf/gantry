@@ -5,6 +5,7 @@
 use std::io::{self, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use claude_index::sent_files::TOOL_NAME;
@@ -72,21 +73,34 @@ pub fn probe_version(program: &str, env: &[(String, String)], timeout: Duration)
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+    // Read on a helper thread: a wrapper's background child can hold the pipe open long after the wrapper exits.
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 256];
+        while let Ok(n @ 1..) = stdout.read(&mut buf) {
+            if tx.send(buf[..n].to_vec()).is_err() {
+                break;
             }
         }
-    }
-    let mut output = String::new();
-    child.stdout.take()?.read_to_string(&mut output).ok()?;
-    parse_version(&output)
+    });
+    let deadline = Instant::now() + timeout;
+    let mut output = Vec::new();
+    let version = loop {
+        match rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(chunk) => output.extend(chunk),
+            Err(RecvTimeoutError::Disconnected) => break parse_version(&String::from_utf8_lossy(&output)),
+            // The program has exited and nothing more is coming: a leftover holder of the pipe is not waited for.
+            Err(RecvTimeoutError::Timeout) if matches!(child.try_wait(), Ok(Some(_))) => {
+                break parse_version(&String::from_utf8_lossy(&output));
+            }
+            Err(RecvTimeoutError::Timeout) if Instant::now() >= deadline => break None,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    version
 }
 
 #[cfg(test)]
@@ -147,6 +161,22 @@ mod tests {
         assert_eq!(parse_version("2.1.332 (Claude Code)"), Some((2, 1, 332)));
         assert_eq!(parse_version("claude 2.0.9"), Some((2, 0, 9)));
         assert_eq!(parse_version("no version"), None);
+    }
+
+    // Needs a shell script to stand in for a wrapper whose background child keeps stdout open.
+    #[cfg(unix)]
+    #[test]
+    fn probe_returns_when_a_background_child_holds_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("wrapper");
+        std::fs::write(&script, "#!/bin/sh\n(sleep 5 &)\necho 2.1.332\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = Instant::now();
+        let env = vec![("PATH".to_string(), std::env::var("PATH").unwrap_or_default())];
+        let version = probe_version(script.to_str().unwrap(), &env, Duration::from_secs(2));
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(version.is_none() || version == Some((2, 1, 332)));
     }
 
     // Needs a shell script to stand in for a program that hangs.

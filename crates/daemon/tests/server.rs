@@ -598,6 +598,25 @@ async fn no_flags_for_a_wrapper_without_a_version() {
 }
 
 #[tokio::test]
+async fn pane_starts_when_the_version_probe_hangs() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let (script, args) = (tmp.path().join("claude"), tmp.path().join("args"));
+    let body = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  sleep 10\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > '{}'\nsleep 5\n",
+        args.display()
+    );
+    std::fs::write(&script, body).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let h = start_plugin_server(std::env::vars().collect(), &tmp.path().join("plugin")).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    let start = std::time::Instant::now();
+    c.spawn_request(claude_request(&script, true)).await;
+    assert!(start.elapsed() < Duration::from_secs(4), "{:?}", start.elapsed());
+    assert_eq!(recorded_args(&args).await, ["--model", "x"]);
+}
+
+#[tokio::test]
 async fn child_session_marker_is_not_passed_on() {
     let tmp = tempfile::tempdir().unwrap();
     let mut env: Vec<(String, String)> = std::env::vars().collect();

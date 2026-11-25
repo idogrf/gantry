@@ -348,6 +348,8 @@ pub struct WorkspaceView {
     reads: app_core::preview_reads::Reads,
     /// Each shown file's decoded content (an image decoded, a text parsed), made once per reply that changed it.
     decoded: HashMap<app_core::preview_reads::FileKey, crate::preview_view::Content>,
+    /// Images that were replaced or dropped, whose GPUI bitmap and atlas tile are freed at the next chance with a window.
+    pending_release: Vec<Arc<gpui::Image>>,
     /// Remote files an Open in system viewer waits for, with the sent file's id: the reply writes the copy and opens it.
     open_after_read: HashMap<app_core::preview_reads::FileKey, String>,
     /// The timer that asks for the shown files again every `preview_reads::POLL`.
@@ -666,6 +668,7 @@ impl WorkspaceView {
             preview_rows: HashMap::new(),
             reads: Default::default(),
             decoded: HashMap::new(),
+            pending_release: Vec::new(),
             open_after_read: HashMap::new(),
             preview_task: None,
             pending: HashMap::new(),

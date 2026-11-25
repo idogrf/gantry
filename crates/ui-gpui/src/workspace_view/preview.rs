@@ -144,14 +144,20 @@ fn can_open(local: bool, connected: bool, content: &Content) -> bool {
     !matches!(content, Content::Missing) && (local || (connected && !matches!(content, Content::TooLarge(Some(_)))))
 }
 
-/// Free what GPUI holds for the images of replaced or dropped contents (their decoded bitmaps stay in its asset
-/// cache until removed).
-fn release_images(contents: Vec<Content>, cx: &mut App) {
-    for content in contents {
-        if let Content::Image { image, .. } = content {
-            gpui::ImageSource::Image(image).remove_asset(cx);
-        }
-    }
+/// Whether a file's decoded content must be made again from the byte cache: nothing decoded, but the cache holds it.
+fn needs_refill(decoded: bool, shown: Option<&Shown>) -> bool {
+    !decoded && shown.is_some()
+}
+
+/// The images among `contents`, which GPUI holds a decoded bitmap and an atlas tile for until released.
+fn images_of(contents: Vec<Content>) -> Vec<Arc<gpui::Image>> {
+    contents
+        .into_iter()
+        .filter_map(|content| match content {
+            Content::Image { image, .. } => Some(image),
+            _ => None,
+        })
+        .collect()
 }
 
 impl WorkspaceView {
@@ -195,7 +201,8 @@ impl WorkspaceView {
     }
 
     /// Ask for the wanted files that are due (the timer).
-    fn preview_tick(&mut self, window: &Window, cx: &mut Context<Self>) {
+    fn preview_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.flush_releases(window, cx);
         let wanted = self.wanted_reads(window, cx);
         for (request, key, known) in self.reads.due(&wanted, Instant::now()) {
             self.send_read(&key, request, known);
@@ -253,7 +260,7 @@ impl WorkspaceView {
         host: &HostId,
         request: u64,
         body: protocol::message::FileBody,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let changed = self.reads.apply(host, request, body);
@@ -277,7 +284,36 @@ impl WorkspaceView {
         }
         // After the views have the new content, so a replaced image is not drawn (and decoded) again.
         old.extend(self.prune_decoded(cx));
-        release_images(old, cx);
+        self.pending_release.extend(images_of(old));
+        self.flush_releases(window, cx);
+    }
+
+    /// Free what GPUI holds for the images that were replaced or dropped: the atlas tile of each (it is keyed by a new
+    /// id per version) and its decoded bitmap.
+    pub(super) fn flush_releases(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for image in std::mem::take(&mut self.pending_release) {
+            if let Some(render) = image.clone().get_render_image(window, cx) {
+                cx.drop_image(render, Some(window));
+            }
+            image.remove_asset(cx);
+        }
+    }
+
+    /// Decode each shown file the cache holds but `decoded` lost (it was unlisted for a while, and the daemon answers
+    /// `Unchanged` for it), once.
+    fn refill_decoded(&mut self, cx: &App) {
+        let wanted: Vec<FileKey> = self
+            .previews
+            .keys()
+            .filter_map(|leaf| self.active_file(*leaf, cx))
+            .map(|(key, _)| key)
+            .filter(|key| is_read(kind_of(&key.path)))
+            .filter(|key| needs_refill(self.decoded.contains_key(key), self.reads.shown(key)))
+            .collect();
+        for key in wanted {
+            let content = content_for(&key.path, self.reads.shown(&key));
+            self.decoded.insert(key, content);
+        }
     }
 
     /// Drop the decoded content of files no preview lists any more or whose bytes the cache no longer holds; returns it.
@@ -299,7 +335,7 @@ impl WorkspaceView {
     /// Drop and release the decoded content nothing lists any more.
     pub(super) fn release_unlisted_previews(&mut self, cx: &mut Context<Self>) {
         let old = self.prune_decoded(cx);
-        release_images(old, cx);
+        self.pending_release.extend(images_of(old));
     }
 
     /// Forget a host's reads and the Open in system viewer wishes waiting on them.
@@ -534,6 +570,7 @@ impl WorkspaceView {
 
     /// Give each preview view its model when something it draws changed; whether a sidebar entry's row changed.
     fn push_preview_models(&mut self, cx: &mut Context<Self>) -> bool {
+        self.refill_decoded(cx);
         let leaves: Vec<NodeId> = self.previews.keys().copied().collect();
         let mut rows_changed = false;
         for leaf in &leaves {
@@ -745,6 +782,14 @@ mod tests {
         assert!(!can_open(false, true, &Content::TooLarge(Some(9))));
         assert!(can_open(false, true, &Content::TooLarge(None)));
         assert!(!can_open(false, true, &Content::Missing));
+    }
+
+    #[test]
+    fn a_cached_file_is_decoded_again_instead_of_loading() {
+        let held = bytes(b"x".to_vec());
+        assert!(needs_refill(false, Some(&held)));
+        assert!(!needs_refill(true, Some(&held)));
+        assert!(!needs_refill(false, None));
     }
 
     #[test]

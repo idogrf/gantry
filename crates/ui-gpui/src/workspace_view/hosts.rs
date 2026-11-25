@@ -153,6 +153,8 @@ impl WorkspaceView {
         self.host_states.remove(host);
         self.hosts_with_rows.remove(host);
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, Vec::new(), cx));
+        self.release_unlisted_previews(cx);
+        self.flush_releases(window, cx);
         self.welcome_items.take();
         self.attention.reset(host, &[]);
         self.sync_unseen(cx);

@@ -14,6 +14,7 @@ pub mod preview_mcp;
 pub mod preview_plugin;
 pub mod process_tree;
 pub mod pty;
+pub mod read_file;
 pub mod remote_install;
 pub mod search;
 pub mod sent_files;

@@ -150,6 +150,8 @@ impl WorkspaceView {
                         view.update(cx, |view, cx| view.set_listing_failed(*request, reason, cx));
                     }
                 }
+                // The preview pane that asks for files comes in a later change.
+                ClientEvent::FileContents { .. } => {}
                 ClientEvent::GitStatus { request, state } => {
                     if self.git.apply(host, *request, Ok(state.clone()), Instant::now()) {
                         self.refresh_git_diff(false, cx);

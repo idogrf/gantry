@@ -627,3 +627,31 @@ async fn child_session_marker_is_not_passed_on() {
     let text = c.output_until(pane, "END_OF_ENV").await;
     assert!(!text.contains("CLAUDE_CODE_CHILD_SESSION"), "{text}");
 }
+
+#[tokio::test]
+async fn read_file_answers_with_the_request_id() {
+    let h = start_server(Duration::from_secs(10)).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("a.md");
+    std::fs::write(&file, b"hello").unwrap();
+    c.send(&ClientMessage::ReadFile { request: 41, path: file.display().to_string(), known_mtime_ms: None }).await;
+    let mtime_ms = loop {
+        match c.control().await {
+            DaemonMessage::FileContents { request: 41, body: FileBody::Bytes { data, mtime_ms } } => {
+                assert_eq!(data, b"hello");
+                break mtime_ms;
+            }
+            DaemonMessage::FileContents { body, .. } => panic!("unexpected {body:?}"),
+            _ => {}
+        }
+    };
+    c.send(&ClientMessage::ReadFile { request: 42, path: file.display().to_string(), known_mtime_ms: Some(mtime_ms) })
+        .await;
+    loop {
+        if let DaemonMessage::FileContents { request, body } = c.control().await {
+            assert_eq!((request, body), (42, FileBody::Unchanged));
+            break;
+        }
+    }
+}

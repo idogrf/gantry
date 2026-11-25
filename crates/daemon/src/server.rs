@@ -782,7 +782,9 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
         ClientMessage::WatchSentFiles { sessions } => {
             shared.lock().watch_requested = sessions.into_iter().collect();
         }
-        ClientMessage::ReadFile { .. } => {}
+        ClientMessage::ReadFile { request, path, known_mtime_ms } => {
+            read_file_request(shared, request, path, known_mtime_ms)
+        }
         ClientMessage::GitStatus { request, folder, known_head } => {
             git_status_request(shared, request, folder, known_head)
         }
@@ -1009,6 +1011,15 @@ fn list_dir_request(shared: &Arc<Shared>, request: u64, path: String) {
             Err(reason) => DaemonMessage::DirListingFailed { request, reason },
         };
         shared.lock().control(&reply);
+    });
+}
+
+/// Answer `ReadFile` off the async threads.
+fn read_file_request(shared: &Arc<Shared>, request: u64, path: String, known_mtime_ms: Option<u64>) {
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || {
+        let body = crate::read_file::read_file(&path, known_mtime_ms, std::env::home_dir().as_deref());
+        shared.lock().control(&DaemonMessage::FileContents { request, body });
     });
 }
 

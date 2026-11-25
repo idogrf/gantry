@@ -171,7 +171,8 @@ struct Shared {
     paste_dir: Option<PathBuf>,
     /// The Claude Code plugin folder; `None` = no preview flags.
     plugin_dir: Option<PathBuf>,
-    /// The version each Claude program printed for `--version`, by program (only a version is kept; each program's slot is locked while its first probe runs).
+    /// The version each Claude program printed for `--version`, by program (only a version is kept; each program's
+    /// slot is locked while its first probe runs).
     claude_versions: Mutex<HashMap<String, ClaudeVersion>>,
 }
 

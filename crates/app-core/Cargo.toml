@@ -17,6 +17,7 @@ serde_json.workspace = true
 protocol.workspace = true
 uuid.workspace = true
 nucleo-matcher.workspace = true
+imagesize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

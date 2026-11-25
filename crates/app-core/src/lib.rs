@@ -24,6 +24,7 @@ pub mod menus;
 pub mod mouse;
 pub mod palette;
 pub mod paste;
+pub mod preview;
 pub mod recents;
 pub mod release;
 pub mod replay;

@@ -9,6 +9,7 @@ publish = false
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+imagesize = "0.14"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "1a28cff4b409169bac058bca40dfbfeb7621d19b" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1a28cff4b409169bac058bca40dfbfeb7621d19b", features = ["font-kit", "wayland", "x11"] }
 alacritty_terminal = "=0.26.0"

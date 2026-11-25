@@ -222,6 +222,7 @@ name = "app-core"
 version = "0.15.0"
 dependencies = [
  "alacritty_terminal",
+ "imagesize",
  "nucleo-matcher",
  "protocol",
  "regex",

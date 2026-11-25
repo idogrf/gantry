@@ -266,6 +266,70 @@ impl TextDoc {
         self.lines[start..end].iter().map(|r| &self.text[r.clone()]).collect::<Vec<_>>().join("\n")
     }
 
+    /// The raw byte length of a line (line ending excluded).
+    pub fn line_len(&self, line: usize) -> usize {
+        self.lines.get(line).map_or(0, |r| r.len())
+    }
+
+    /// Map a byte offset into `display(line)` (tabs as 4 spaces, cut at `MAX_LINE_CHARS` plus `…`) back to a byte
+    /// offset in the raw line: inside an expanded tab it is the tab's start, on or past the `…` the line's end.
+    /// Work is bounded by `MAX_LINE_CHARS`.
+    pub fn raw_offset(&self, line: usize, display_byte: usize) -> usize {
+        let Some(range) = self.lines.get(line) else { return 0 };
+        let raw = &self.text[range.clone()];
+        let mut shown_bytes = 0;
+        let mut count = 0;
+        for (at, c) in raw.char_indices() {
+            if count == MAX_LINE_CHARS {
+                break;
+            }
+            // A tab shows as up to 4 spaces, fewer when the cut falls inside it.
+            let (width, bytes) = if c == '\t' {
+                (4.min(MAX_LINE_CHARS - count), 4.min(MAX_LINE_CHARS - count))
+            } else {
+                (1, c.len_utf8())
+            };
+            if display_byte < shown_bytes + bytes {
+                return at;
+            }
+            shown_bytes += bytes;
+            count += width;
+        }
+        raw.len()
+    }
+
+    /// The text between two `(line, byte)` positions given in either order, lines joined by `\n`. Lines and offsets
+    /// are clamped, and an offset inside a character moves back to its start.
+    pub fn copy_span(&self, a: (usize, usize), b: (usize, usize)) -> String {
+        if self.lines.is_empty() {
+            return String::new();
+        }
+        let last = self.lines.len() - 1;
+        let snap = |(line, byte): (usize, usize)| {
+            let line = line.min(last);
+            let raw = &self.text[self.lines[line].clone()];
+            let mut byte = byte.min(raw.len());
+            while !raw.is_char_boundary(byte) {
+                byte -= 1;
+            }
+            (line, byte)
+        };
+        let (a, b) = (snap(a), snap(b));
+        let (from, to) = if a <= b { (a, b) } else { (b, a) };
+        let line = |i: usize| &self.text[self.lines[i].clone()];
+        if from.0 == to.0 {
+            return line(from.0)[from.1..to.1].to_string();
+        }
+        let mut out = line(from.0)[from.1..].to_string();
+        for i in from.0 + 1..to.0 {
+            out.push('\n');
+            out.push_str(line(i));
+        }
+        out.push('\n');
+        out.push_str(&line(to.0)[..to.1]);
+        out
+    }
+
     /// The whole text (BOM dropped, line endings as in the file).
     pub fn text(&self) -> &str {
         &self.text
@@ -464,6 +528,36 @@ mod tests {
         assert!(shown.ends_with('…'));
         assert_eq!(d.copy(0..1).chars().count(), 25_000);
         assert_eq!(d.widest(), 10_001);
+    }
+
+    #[test]
+    fn raw_offset_undoes_tabs_and_the_cut() {
+        let d = TextDoc::parse(b"\tx").unwrap();
+        assert_eq!(d.raw_offset(0, 0), 0);
+        assert_eq!(d.raw_offset(0, 2), 0);
+        assert_eq!(d.raw_offset(0, 4), 1);
+        assert_eq!(d.raw_offset(0, 5), 2);
+        let long = TextDoc::parse("x".repeat(25_000).as_bytes()).unwrap();
+        assert_eq!(long.raw_offset(0, 30_000), 25_000);
+        assert_eq!(long.raw_offset(0, 10_000), 25_000);
+        assert_eq!(long.raw_offset(0, 9_999), 9_999);
+        assert_eq!(long.line_len(0), 25_000);
+    }
+
+    #[test]
+    fn copy_span_runs_either_way_and_across_lines() {
+        let d = TextDoc::parse(b"ab\ncd\nef").unwrap();
+        assert_eq!(d.copy_span((2, 1), (0, 1)), "b\ncd\ne");
+        assert_eq!(d.copy_span((0, 1), (2, 1)), "b\ncd\ne");
+        assert_eq!(d.copy_span((1, 0), (1, 9)), "cd");
+        assert_eq!(d.copy_span((0, 0), (9, 9)), "ab\ncd\nef");
+    }
+
+    #[test]
+    fn copy_span_snaps_to_chars() {
+        let d = TextDoc::parse("héllo".as_bytes()).unwrap();
+        assert_eq!(d.copy_span((0, 2), (0, 5)), "éll");
+        assert_eq!(d.copy_span((0, 0), (0, 2)), "h");
     }
 
     #[test]

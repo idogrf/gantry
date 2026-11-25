@@ -13,15 +13,16 @@ use app_core::bidi::{display_line, is_rtl_letter};
 use app_core::preview::{FileKind, kind_of};
 use app_core::theme_colors::mix;
 use gpui::{
-    AnyElement, Context, Div, Entity, Font, FontStyle, FontWeight, Hsla, InteractiveText, IntoElement, SharedString,
-    StrikethroughStyle, StyledText, TextRun, TextStyle, UnderlineStyle, div, prelude::*, px, relative, rgb, svg,
+    AnyElement, App, Context, Div, Entity, Font, FontStyle, FontWeight, Hsla, InteractiveText, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, StrikethroughStyle, StyledText, TextLayout, TextRun,
+    TextStyle, UnderlineStyle, div, prelude::*, px, relative, rgb, svg,
 };
 use preview_doc::highlight::{Span, Token};
 use preview_doc::markdown::{AlertKind, Align, Block, BlockKind, ImageSrc, Inline, LinkTarget, Marker, MdDoc, RowKind};
 use preview_doc::words::{VisualText, Word, visual_words};
 
 use crate::assets::COPY_ICON;
-use crate::preview_view::{Content, PreviewView};
+use crate::preview_view::{BlockSelection, Content, PreviewView};
 use crate::terminal_view::pane_font;
 use crate::theme::{RADIUS_SMALL, Theme, UI_FONT, ansi_color, token_color};
 
@@ -48,6 +49,150 @@ pub(crate) struct RowState {
     pub image: Option<Content>,
     /// The list's width in px (0 before it is laid out once).
     pub viewport: f32,
+    /// The text selection (one block).
+    pub selection: Option<BlockSelection>,
+}
+
+/// A press or a drag on text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Gesture {
+    /// The left button went down; `clicks` counts the quick presses in a row.
+    Press { shift: bool, clicks: usize },
+    /// The pointer moved with the left button held.
+    Drag,
+}
+
+impl Gesture {
+    /// The gesture of a mouse press.
+    fn press(event: &MouseDownEvent) -> Self {
+        Gesture::Press { shift: event.modifiers.shift, clicks: event.click_count }
+    }
+}
+
+/// Reports a gesture with the logical byte offset it landed on, in the unit the text stands for.
+pub(crate) type Hit = Rc<dyn Fn(Gesture, usize, &mut App)>;
+
+/// How a piece of text takes part in selection.
+pub(crate) struct Interact {
+    /// Where presses and drags go.
+    pub hit: Hit,
+    /// The selected bytes of this text, painted.
+    pub selected: Option<Range<usize>>,
+}
+
+/// The offset of a press or drag on block `block`.
+fn block_hit(view: Entity<PreviewView>, block: usize) -> Hit {
+    Rc::new(move |gesture, offset, app| view.update(app, |this, cx| this.md_gesture(block, offset, gesture, cx)))
+}
+
+/// `hit` for text that starts `base` bytes into the unit.
+fn shifted(hit: &Hit, base: usize) -> Hit {
+    let hit = hit.clone();
+    Rc::new(move |gesture, at, app| hit(gesture, base + at, app))
+}
+
+/// The caret index of a position that may fall outside the text.
+fn caret(found: Result<usize, usize>) -> usize {
+    match found {
+        Ok(at) | Err(at) => at,
+    }
+}
+
+/// Turn a press or drag on `el` into `hit`, the offset read from `layout` and mapped by `map`.
+fn layout_pointer<E: InteractiveElement>(
+    el: E,
+    hit: &Hit,
+    layout: TextLayout,
+    map: impl Fn(usize) -> usize + Clone + 'static,
+) -> E {
+    let (down, drag, down_layout, drag_layout, down_map) =
+        (hit.clone(), hit.clone(), layout.clone(), layout, map.clone());
+    el.on_mouse_down(MouseButton::Left, move |event, _, app| {
+        down(Gesture::press(event), down_map(caret(down_layout.index_for_position(event.position))), app)
+    })
+    .on_mouse_move(move |event: &MouseMoveEvent, _, app| {
+        if event.pressed_button == Some(MouseButton::Left) {
+            drag(Gesture::Drag, map(caret(drag_layout.index_for_position(event.position))), app);
+        }
+    })
+}
+
+/// Turn a press or drag on `el` into `hit` at the fixed `offset` (a character drawn on its own).
+fn offset_pointer<E: InteractiveElement>(el: E, hit: &Hit, offset: usize) -> E {
+    let (down, drag) = (hit.clone(), hit.clone());
+    el.on_mouse_down(MouseButton::Left, move |event, _, app| down(Gesture::press(event), offset, app)).on_mouse_move(
+        move |event: &MouseMoveEvent, _, app| {
+            if event.pressed_button == Some(MouseButton::Left) {
+                drag(Gesture::Drag, offset, app);
+            }
+        },
+    )
+}
+
+/// The kind of a character for double-click words: word, space or other.
+fn char_class(c: char) -> u8 {
+    if c.is_alphanumeric() || c == '_' {
+        0
+    } else if c.is_whitespace() {
+        1
+    } else {
+        2
+    }
+}
+
+/// The word at byte `at` of `text`: the run of characters of the same kind around it.
+pub(crate) fn word_bounds(text: &str, at: usize) -> Range<usize> {
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    let Some(pivot) = text[at..].chars().next().or_else(|| text[..at].chars().next_back()) else { return 0..0 };
+    let pivot_at = if at < text.len() { at } else { at - pivot.len_utf8() };
+    let kind = char_class(pivot);
+    let before: usize = text[..pivot_at].chars().rev().take_while(|c| char_class(*c) == kind).map(char::len_utf8).sum();
+    let after: usize = text[pivot_at..].chars().take_while(|c| char_class(*c) == kind).map(char::len_utf8).sum();
+    pivot_at - before..pivot_at + after
+}
+
+/// The selection a press makes: a caret, a word (two clicks), the whole block (three), or, with Shift in the same block,
+/// the old selection stretched to the new place.
+pub(crate) fn press_selection(
+    previous: Option<BlockSelection>,
+    block: usize,
+    offset: usize,
+    shift: bool,
+    clicks: usize,
+    text: &str,
+) -> BlockSelection {
+    match clicks {
+        0 | 1 => {
+            let anchor = previous.filter(|p| shift && p.block == block).map_or(offset, |p| p.anchor);
+            BlockSelection { block, anchor, head: offset }
+        }
+        2 => {
+            let word = word_bounds(text, offset);
+            BlockSelection { block, anchor: word.start, head: word.end }
+        }
+        _ => BlockSelection { block, anchor: 0, head: text.len() },
+    }
+}
+
+/// The part of `range` that falls in a line of `len` bytes starting `base` bytes into its block, relative to the line.
+fn clip_range(range: &Range<usize>, base: usize, len: usize) -> Option<Range<usize>> {
+    let (start, end) = (range.start.max(base), range.end.min(base + len));
+    (start < end).then(|| start - base..end - base)
+}
+
+/// The logical offset of the character a word of `chars` shows at byte `index` of its text.
+fn word_offset(chars: &[(char, usize)], index: usize) -> usize {
+    let mut at = 0;
+    for (c, offset) in chars {
+        at += c.len_utf8();
+        if index < at {
+            return *offset;
+        }
+    }
+    chars.last().map_or(0, |(_, offset)| *offset)
 }
 
 /// Body text size in base px.
@@ -269,7 +414,14 @@ fn base_style(look: Look, theme: &Theme) -> TextStyle {
 
 /// Open the link `target` (a click on it).
 fn link_opener(view: Entity<PreviewView>, target: LinkTarget) -> impl Fn(&mut gpui::App) + 'static {
-    move |app| view.update(app, |this, cx| this.open_link(target.clone(), cx))
+    // A drag that ends inside the link selected text; it is not a click.
+    move |app| {
+        view.update(app, |this, cx| {
+            if !this.md_selecting() {
+                this.open_link(target.clone(), cx);
+            }
+        })
+    }
 }
 
 /// A block of text as an element: wrapped styled text, or, for right-to-left text with the display on, words in
@@ -292,13 +444,17 @@ fn text_block(
     let Some(block) = doc.blocks.get(block_ix) else { return frame };
     let base = base_style(look, theme);
     let code = pane_font(Some(&state.code_font));
+    let selected = state.selection.filter(|s| s.block == block_ix).map(|s| s.range());
+    let hit = block_hit(cx.entity(), block_ix);
     if state.rtl && block.text.chars().any(is_rtl_letter) {
         let words =
             state.visual.borrow_mut().entry(block_ix).or_insert_with(|| Arc::new(visual_words(&block.text))).clone();
-        return frame.child(rtl_text(doc, block_ix, &words, &base, &code, theme, cx));
+        let interact = Interact { hit, selected };
+        return frame.child(rtl_text(doc, block_ix, &words, &base, &code, theme, &interact, cx));
     }
-    let runs = text_runs(block, doc, &base, &code, theme, None);
+    let runs = text_runs(block, doc, &base, &code, theme, selected);
     let styled = StyledText::new(SharedString::from(block.text.clone())).with_runs(runs);
+    let frame = layout_pointer(frame, &hit, styled.layout().clone(), |at| at);
     let links: Vec<(Range<usize>, LinkTarget)> = block
         .inlines
         .iter()
@@ -318,6 +474,7 @@ fn text_block(
 
 /// The words of a right-to-left paragraph in a wrapping row (reversed when the paragraph reads right to left). Each
 /// word with a non-ASCII letter, or a link, is drawn a character at a time: the shaper never gets the text.
+#[allow(clippy::too_many_arguments)] // The block's whole context.
 fn rtl_text(
     doc: &MdDoc,
     block_ix: usize,
@@ -325,19 +482,25 @@ fn rtl_text(
     base: &TextStyle,
     code: &Font,
     theme: &Theme,
+    interact: &Interact,
     cx: &mut Context<PreviewView>,
 ) -> Div {
     let Some(block) = doc.blocks.get(block_ix) else { return div() };
+    let background = selection_background(theme);
     let run_at = |offset: usize, len: usize| -> (TextRun, Option<usize>) {
         let inline = block.inlines.iter().find(|inline| inline.range.contains(&offset));
-        match inline {
+        let (mut run, link) = match inline {
             Some(inline) => {
                 let mut run = inline_run(inline, doc, base, code, theme);
                 run.len = len;
                 (run, live_link(doc, inline))
             }
             None => (TextRun { len, font: base.font(), color: base.color, ..Default::default() }, None),
+        };
+        if interact.selected.as_ref().is_some_and(|range| range.contains(&offset)) {
+            run.background_color = Some(background);
         }
+        (run, link)
     };
     let mut flow = div().w_full().flex().flex_wrap();
     if words.rtl {
@@ -350,7 +513,7 @@ fn rtl_text(
             continue;
         }
         let linked = word.chars.iter().any(|(_, offset)| run_at(*offset, 1).1.is_some());
-        flow = flow.child(rtl_word(doc, word, linked, &run_at, (block_ix, &mut counter), cx));
+        flow = flow.child(rtl_word(doc, word, linked, &run_at, (block_ix, &mut counter), &interact.hit, cx));
     }
     flow
 }
@@ -362,6 +525,7 @@ fn rtl_word(
     per_char: bool,
     run_at: &dyn Fn(usize, usize) -> (TextRun, Option<usize>),
     (block_ix, counter): (usize, &mut usize),
+    hit: &Hit,
     cx: &mut Context<PreviewView>,
 ) -> Div {
     let el = div().flex().flex_none();
@@ -375,23 +539,25 @@ fn rtl_word(
                 _ => runs.push(run),
             }
         }
-        return el.child(StyledText::new(SharedString::from(text)).with_runs(runs));
+        let styled = StyledText::new(SharedString::from(text)).with_runs(runs);
+        let chars: Rc<[(char, usize)]> = word.chars.clone().into();
+        let el = layout_pointer(el, hit, styled.layout().clone(), move |at| word_offset(&chars, at));
+        return el.child(styled);
     }
     el.children(word.chars.iter().map(|(c, offset)| {
         let (run, link) = run_at(*offset, c.len_utf8());
         let text = StyledText::new(SharedString::from(c.to_string())).with_runs(vec![run]);
+        let cell = offset_pointer(div().child(text), hit, *offset);
         match link.and_then(|link| doc.links.get(link)) {
             Some(target) => {
                 *counter += 1;
                 let open = link_opener(cx.entity(), target.clone());
-                div()
-                    .id(("md-link", (block_ix << 20) | *counter))
+                cell.id(("md-link", (block_ix << 20) | *counter))
                     .cursor_pointer()
                     .on_click(move |_, _, app| open(app))
-                    .child(text)
                     .into_any_element()
             }
-            None => text.into_any_element(),
+            None => cell.into_any_element(),
         }
     }))
 }
@@ -402,7 +568,8 @@ fn same_look(a: &TextRun, b: &TextRun) -> bool {
 }
 
 /// A line of code as an element: wrapped styled text with its token colors, or, for a line with right-to-left letters
-/// with the display on, characters in display order colored by their logical offsets.
+/// with the display on, characters in display order colored by their logical offsets. `interact` gets presses and drags
+/// (as byte offsets of `line`) and says what to paint selected.
 pub(crate) fn code_line(
     line: &str,
     spans: &[(Range<usize>, Token)],
@@ -410,20 +577,30 @@ pub(crate) fn code_line(
     rtl: bool,
     wrap: bool,
     theme: &Theme,
+    interact: &Interact,
 ) -> AnyElement {
+    let background = selection_background(theme);
     if rtl && let Some(order) = display_line(line) {
         let offsets: Vec<usize> = line.char_indices().map(|(at, _)| at).collect();
         return div()
             .flex()
             .when(wrap, |d| d.flex_wrap())
             .children(order.into_iter().map(|(logical, ch)| {
-                let color = token_color(token_at(spans, offsets[logical]), theme);
-                div().text_color(rgb(color)).child(ch.to_string())
+                let at = offsets[logical];
+                let color = token_color(token_at(spans, at), theme);
+                let shown = interact.selected.as_ref().is_some_and(|range| range.contains(&at));
+                let cell = div().text_color(rgb(color)).when(shown, |d| d.bg(background)).child(ch.to_string());
+                offset_pointer(cell, &interact.hit, at)
             }))
             .into_any_element();
     }
-    let runs = token_runs(line.len(), spans.iter().cloned(), font, theme);
-    StyledText::new(SharedString::from(line.to_string())).with_runs(runs).into_any_element()
+    let mut runs = token_runs(line.len(), spans.iter().cloned(), font, theme);
+    if let Some(range) = interact.selected.clone() {
+        runs = paint_selection(runs, range, background);
+    }
+    let styled = StyledText::new(SharedString::from(line.to_string())).with_runs(runs);
+    let layout = styled.layout().clone();
+    layout_pointer(div().w_full().child(styled), &interact.hit, layout, |at| at).into_any_element()
 }
 
 /// The list item at `ix` of the document's list.
@@ -609,17 +786,24 @@ fn code_row(
     let radius = px(RADIUS_SMALL);
     let starts = state.lines.borrow_mut().entry(block_ix).or_insert_with(|| Arc::new(line_starts(&block.text))).clone();
     let range = code_range(block.text.len(), &starts, lines);
-    let text = &block.text[range];
+    let text = &block.text[range.clone()];
     let line_height = theme.ui(CODE * 1.45);
     let highlights = match &block.kind {
         BlockKind::Code { highlights, .. } => highlights.as_ref(),
         _ => None,
     };
+    let selection = state.selection.filter(|s| s.block == block_ix).map(|s| s.range());
+    let hit = block_hit(cx.entity(), block_ix);
     let body = text.split('\n').enumerate().map(|(n, line)| {
         let spans: Vec<(Range<usize>, Token)> = highlights
             .map(|h| h.line(lines.start + n).iter().map(|s| (s.range.clone(), s.token)).collect())
             .unwrap_or_default();
-        div().w_full().min_h(line_height).child(code_line(line, &spans, &font, state.rtl, true, theme))
+        let base = starts.get(lines.start + n).copied().unwrap_or(range.start);
+        let interact = Interact {
+            hit: shifted(&hit, base),
+            selected: selection.as_ref().and_then(|range| clip_range(range, base, line.len())),
+        };
+        div().w_full().min_h(line_height).child(code_line(line, &spans, &font, state.rtl, true, theme, &interact))
     });
     let copied = state.copied == Some(block_ix);
     div()
@@ -865,6 +1049,48 @@ mod tests {
         assert_eq!(cut(0..1), "a");
         assert_eq!(cut(3..9), "dddd");
         assert!(cut(9..12).is_empty());
+    }
+
+    #[test]
+    fn a_press_picks_a_caret_a_word_or_the_block() {
+        let text = "hello big world";
+        let at = |prev, offset, shift, clicks| press_selection(prev, 2, offset, shift, clicks, text);
+        assert_eq!(at(None, 7, false, 1), BlockSelection { block: 2, anchor: 7, head: 7 });
+        assert_eq!(at(None, 7, false, 2), BlockSelection { block: 2, anchor: 6, head: 9 });
+        assert_eq!(at(None, 7, false, 3), BlockSelection { block: 2, anchor: 0, head: 15 });
+        let before = Some(BlockSelection { block: 2, anchor: 1, head: 3 });
+        assert_eq!(at(before, 9, true, 1), BlockSelection { block: 2, anchor: 1, head: 9 });
+        // Shift on another block starts over.
+        let other = Some(BlockSelection { block: 5, anchor: 1, head: 3 });
+        assert_eq!(at(other, 9, true, 1), BlockSelection { block: 2, anchor: 9, head: 9 });
+    }
+
+    #[test]
+    fn words_are_runs_of_one_kind_of_character() {
+        assert_eq!(word_bounds("ab  cd", 1), 0..2);
+        assert_eq!(word_bounds("ab  cd", 3), 2..4);
+        assert_eq!(word_bounds("ab, cd", 2), 2..3);
+        assert_eq!(word_bounds("שלום עולם", 3), 0..8);
+        assert_eq!(word_bounds("ab", 2), 0..2);
+        assert_eq!(word_bounds("", 0), 0..0);
+    }
+
+    #[test]
+    fn a_range_is_cut_to_a_line_of_a_block() {
+        assert_eq!(clip_range(&(2..12), 5, 4), Some(0..4));
+        assert_eq!(clip_range(&(6..8), 5, 4), Some(1..3));
+        assert_eq!(clip_range(&(0..5), 5, 4), None);
+        assert_eq!(clip_range(&(9..12), 5, 4), None);
+    }
+
+    #[test]
+    fn a_displayed_byte_of_a_word_maps_to_its_character() {
+        let chars = [('ש', 10), ('l', 12), ('x', 13)];
+        assert_eq!(word_offset(&chars, 0), 10);
+        assert_eq!(word_offset(&chars, 1), 10);
+        assert_eq!(word_offset(&chars, 2), 12);
+        assert_eq!(word_offset(&chars, 3), 13);
+        assert_eq!(word_offset(&chars, 99), 13);
     }
 
     #[test]

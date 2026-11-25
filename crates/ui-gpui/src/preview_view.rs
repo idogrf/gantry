@@ -23,14 +23,13 @@ use gpui::{
 use preview_doc::markdown::{DocImage, ImageSrc, LinkTarget, MdDoc, RowKind};
 
 use crate::assets::{CLOSE_ICON, EYE_ICON, FILE_ICON, OPEN_EXTERNAL_ICON};
-use crate::git_diff_view::{display_chars, size_text};
+use crate::git_diff_view::size_text;
 use crate::hover_card::{self, HoverCard};
 use crate::pane_drag::DraggedPane;
-use crate::preview_markdown::{self, LineCache, RowState, VisualCache, code_line, display_spans};
+use crate::preview_markdown::{self, Gesture, Interact, LineCache, RowState, VisualCache, code_line, display_spans};
 use crate::settings_store::SettingsStore;
 use crate::terminal_view::{host_card_element, installed_families, installed_family, pane_font};
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, theme};
-use app_core::theme_colors::mix;
 
 /// The width of a file tab, in UI px.
 pub(crate) const TAB_WIDTH: f32 = 160.0;
@@ -181,14 +180,101 @@ pub(crate) enum PreviewEvent {
     ImagesInView,
 }
 
-/// The lines between the two ends of a selection, whichever end is first.
-fn selection_lines(anchor: usize, head: usize) -> Range<usize> {
-    anchor.min(head)..anchor.max(head) + 1
+/// A selection inside one block of a markdown document, as byte offsets into the block's text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BlockSelection {
+    /// The block.
+    pub block: usize,
+    /// Where the selection started.
+    pub anchor: usize,
+    /// Where the pointer is now.
+    pub head: usize,
 }
 
-/// The text copied for a selection: whole lines, as the file has them.
-fn copy_lines(doc: &TextDoc, lines: Range<usize>) -> String {
-    doc.copy(lines)
+impl BlockSelection {
+    /// The selected bytes, whichever end is first.
+    pub(crate) fn range(&self) -> Range<usize> {
+        self.anchor.min(self.head)..self.anchor.max(self.head)
+    }
+}
+
+/// A selection in a text file: `(line, byte in the raw line)` at both ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TextSelection {
+    /// Where the selection started.
+    pub anchor: (usize, usize),
+    /// Where the pointer is now.
+    pub head: (usize, usize),
+}
+
+/// The text of a block selection (a selection never leaves its block).
+fn copy_block_selection(doc: &MdDoc, selection: &BlockSelection) -> String {
+    doc.copy(selection.block, selection.range())
+}
+
+/// The text of a text selection, lines joined by `\n`.
+fn copy_text_selection(doc: &TextDoc, selection: &TextSelection) -> String {
+    doc.copy_span(selection.anchor, selection.head)
+}
+
+/// The selected bytes of raw line `line` (of `len` bytes), `None` when none of it is selected.
+fn line_range(selection: &TextSelection, line: usize, len: usize) -> Option<Range<usize>> {
+    let (from, to) = if selection.anchor <= selection.head {
+        (selection.anchor, selection.head)
+    } else {
+        (selection.head, selection.anchor)
+    };
+    if line < from.0 || line > to.0 {
+        return None;
+    }
+    let start = if line == from.0 { from.1.min(len) } else { 0 };
+    let end = if line == to.0 { to.1.min(len) } else { len };
+    (start < end).then_some(start..end)
+}
+
+/// The bytes of the displayed line `line` (tabs as four spaces, long lines cut) that show the raw bytes `raw`.
+fn display_range(doc: &TextDoc, line: usize, raw: Range<usize>) -> Range<usize> {
+    let shown = doc.display(line).len();
+    // The first displayed byte whose raw offset reaches `at`; raw offsets never go back as the display advances.
+    let first_at = |at: usize| {
+        if at == 0 {
+            return 0;
+        }
+        if at >= doc.line_len(line) {
+            return shown;
+        }
+        let (mut low, mut high) = (0, shown);
+        while low < high {
+            let mid = (low + high) / 2;
+            if doc.raw_offset(line, mid) < at {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        low
+    };
+    first_at(raw.start)..first_at(raw.end)
+}
+
+/// The width of the zone along the top and bottom edge of the body where a drag scrolls it, in px.
+const EDGE_PX: f32 = 24.0;
+/// The most a drag scrolls per tick, in px.
+const MAX_STEP_PX: f32 = 20.0;
+/// The time between two drag scroll ticks.
+const AUTO_SCROLL_TICK: Duration = Duration::from_millis(16);
+
+/// How far a drag at height `y` scrolls a body between `top` and `bottom`: negative (up) inside the top edge zone,
+/// positive (down) inside the bottom one, 0 elsewhere; grows linearly with the depth into the zone, up to
+/// `MAX_STEP_PX`, and a pointer outside the body counts as the deepest.
+pub(crate) fn auto_scroll_step(y: f32, top: f32, bottom: f32) -> f32 {
+    if y < top + EDGE_PX {
+        -MAX_STEP_PX * (top + EDGE_PX - y).min(EDGE_PX) / EDGE_PX
+    } else if y > bottom - EDGE_PX {
+        MAX_STEP_PX * (y - (bottom - EDGE_PX)).min(EDGE_PX) / EDGE_PX
+    } else {
+        0.0
+    }
 }
 
 /// Pixels one wheel line pans an image.
@@ -242,9 +328,14 @@ pub(crate) struct PreviewView {
     focus_handle: FocusHandle,
     model: PreviewModel,
     scroll: UniformListScrollHandle,
-    /// The selected lines as (anchor, head).
-    selection: Option<(usize, usize)>,
+    /// The selection in a text file.
+    selection: Option<TextSelection>,
+    /// The selection in a markdown document.
+    md_selection: Option<BlockSelection>,
+    /// The left button is held after a press on text.
     dragging: bool,
+    /// The loop that scrolls while a drag sits at an edge of the body.
+    auto_scroll: Option<Task<()>>,
     /// The tab row's width in px, measured while drawing.
     row_width: f32,
     /// How the active image is placed; `None` until an image is shown, reset when the active file changes.
@@ -306,6 +397,8 @@ impl PreviewView {
             },
             scroll: UniformListScrollHandle::new(),
             selection: None,
+            md_selection: None,
+            auto_scroll: None,
             dragging: false,
             row_width: 0.0,
             zoom: None,
@@ -329,6 +422,7 @@ impl PreviewView {
         if !same_file {
             self.scroll = UniformListScrollHandle::new();
             self.selection = None;
+            self.md_selection = None;
             self.zoom = None;
             self.panning = None;
             self.md_doc = None;
@@ -365,6 +459,7 @@ impl PreviewView {
                 let item_ix = top.item_ix.min(doc.rows.len() - 1);
                 self.md_list.scroll_to(ListOffset { item_ix, ..top });
             }
+            self.md_selection = None;
             self.md_words.borrow_mut().clear();
             self.md_lines.borrow_mut().clear();
             self.copied = None;
@@ -372,9 +467,13 @@ impl PreviewView {
         }
         // Other content (loading, an error) keeps the selection, so Text -> Loading -> Text on one file still has it.
         if let Content::Text { doc, .. } = &self.model.content {
-            self.selection = self.selection.and_then(|(anchor, head)| {
+            self.selection = self.selection.and_then(|selection| {
                 let last = doc.line_count().checked_sub(1)?;
-                Some((anchor.min(last), head.min(last)))
+                let clamp = |(line, byte): (usize, usize)| {
+                    let line = line.min(last);
+                    (line, byte.min(doc.line_len(line)))
+                };
+                Some(TextSelection { anchor: clamp(selection.anchor), head: clamp(selection.head) })
             });
         }
         cx.notify();
@@ -452,6 +551,7 @@ impl PreviewView {
             code_font: look.family.clone(),
             rtl: look.rtl,
             copied: self.copied.as_ref().map(|(block, _)| *block),
+            selection: self.md_selection,
             visual: self.md_words.clone(),
             lines: self.md_lines.clone(),
         };
@@ -489,11 +589,151 @@ impl PreviewView {
         &self.model
     }
 
-    /// The selected lines as text, `None` with no selection.
+    /// The selected text, `None` with nothing selected.
     pub(crate) fn copy_selection(&self) -> Option<String> {
-        let Content::Text { doc, .. } = &self.model.content else { return None };
-        let (anchor, head) = self.selection?;
-        Some(copy_lines(doc, selection_lines(anchor, head)))
+        match &self.model.content {
+            Content::Text { doc, .. } => {
+                let selection = self.selection.filter(|s| s.anchor != s.head)?;
+                Some(copy_text_selection(doc, &selection))
+            }
+            Content::Markdown(doc) => {
+                let selection = self.md_selection.filter(|s| s.anchor != s.head)?;
+                Some(copy_block_selection(doc, &selection))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a markdown selection with something in it exists (a click on a link that ends one does not open it).
+    pub(crate) fn md_selecting(&self) -> bool {
+        self.md_selection.is_some_and(|s| s.anchor != s.head)
+    }
+
+    /// A press or drag on the text of markdown block `block`, at byte `offset` of it.
+    pub(crate) fn md_gesture(&mut self, block: usize, offset: usize, gesture: Gesture, cx: &mut Context<Self>) {
+        let Content::Markdown(doc) = &self.model.content else { return };
+        let Some(text) = doc.blocks.get(block).map(|b| b.text.as_str()) else { return };
+        let mut offset = offset.min(text.len());
+        while !text.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        match gesture {
+            Gesture::Press { shift, clicks } => {
+                self.md_selection =
+                    Some(preview_markdown::press_selection(self.md_selection, block, offset, shift, clicks, text));
+                self.selection = None;
+                self.dragging = true;
+            }
+            Gesture::Drag => {
+                // A selection never leaves its block: another block's text does not move it.
+                match self.md_selection.as_mut() {
+                    Some(selection) if self.dragging && selection.block == block && selection.head != offset => {
+                        selection.head = offset;
+                    }
+                    _ => return,
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// A press or drag on line `line` of a text file, at byte `shown` of the displayed line.
+    fn text_gesture(&mut self, line: usize, shown: usize, gesture: Gesture, cx: &mut Context<Self>) {
+        let Content::Text { doc, .. } = &self.model.content else { return };
+        let at = (line, doc.raw_offset(line, shown));
+        match gesture {
+            Gesture::Press { shift, .. } => {
+                let anchor = self.selection.filter(|_| shift).map_or(at, |s| s.anchor);
+                self.selection = Some(TextSelection { anchor, head: at });
+                self.md_selection = None;
+                self.dragging = true;
+            }
+            Gesture::Drag => match self.selection.as_mut() {
+                Some(selection) if self.dragging && selection.head != at => selection.head = at,
+                _ => return,
+            },
+        }
+        cx.notify();
+    }
+
+    /// The button went up: the drag and its scroll loop end.
+    fn end_drag(&mut self) {
+        self.dragging = false;
+        self.auto_scroll = None;
+    }
+
+    /// The top and bottom of the body's scrolling list in the window, when it shows text that can be selected.
+    fn body_edges(&self) -> Option<(f32, f32)> {
+        let bounds = match &self.model.content {
+            Content::Markdown(_) => self.md_list.viewport_bounds(),
+            Content::Text { .. } => self.scroll.0.borrow().base_handle.bounds(),
+            _ => return None,
+        };
+        Some((f32::from(bounds.top()), f32::from(bounds.bottom())))
+    }
+
+    /// The pointer moved over the pane: while a selection drag holds it in an edge zone of the body, scroll.
+    fn pointer_moved(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.dragging {
+            return;
+        }
+        if event.pressed_button != Some(MouseButton::Left) {
+            // The release happened where this pane did not see it.
+            self.dragging = false;
+            self.auto_scroll = None;
+            return;
+        }
+        let Some((top, bottom)) = self.body_edges() else { return };
+        if self.auto_scroll.is_none() && auto_scroll_step(f32::from(event.position.y), top, bottom) != 0.0 {
+            self.auto_scroll = Some(cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(AUTO_SCROLL_TICK).await;
+                    let go = this.update_in(cx, |this, window, cx| this.auto_scroll_tick(window, cx)).unwrap_or(false);
+                    if !go {
+                        break;
+                    }
+                }
+                this.update(cx, |this, _| this.auto_scroll = None).ok();
+            }));
+        }
+    }
+
+    /// One step of the drag scroll; `false` ends the loop (button up, window inactive or the pointer left the zone).
+    fn auto_scroll_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.dragging || !window.is_window_active() {
+            return false;
+        }
+        let Some((top, bottom)) = self.body_edges() else { return false };
+        let step = auto_scroll_step(f32::from(window.mouse_position().y), top, bottom);
+        if step == 0.0 {
+            return false;
+        }
+        match &self.model.content {
+            Content::Markdown(doc) => {
+                self.md_list.scroll_by(px(step));
+                if let Some(selection) = self.md_selection.as_mut() {
+                    let length = doc.blocks.get(selection.block).map_or(0, |b| b.text.len());
+                    selection.head = if step < 0.0 { 0 } else { length };
+                }
+            }
+            Content::Text { doc, .. } => {
+                let handle = self.scroll.0.borrow().base_handle.clone();
+                let (offset, max) = (handle.offset(), handle.max_offset());
+                let moved = (f32::from(offset.y) - step).clamp(-f32::from(max.y), 0.0);
+                handle.set_offset(point(offset.x, px(moved)));
+                let row = Self::metrics(window, cx).row_height;
+                let last = doc.line_count().saturating_sub(1);
+                let first_in_view = ((-moved / row) as usize).min(last);
+                let last_in_view = (((-moved + f32::from(handle.bounds().size.height)) / row) as usize).min(last);
+                if let Some(selection) = self.selection.as_mut() {
+                    selection.head =
+                        if step < 0.0 { (first_in_view, 0) } else { (last_in_view, doc.line_len(last_in_view)) };
+                }
+            }
+            _ => return false,
+        }
+        cx.notify();
+        true
     }
 
     /// The active image's natural size.
@@ -977,14 +1217,28 @@ impl PreviewView {
         let font = pane_font(Some(&metrics.family));
         let width = px(metrics.cell_width * (doc.widest() as f32 + 2.0) + 24.0);
         let right_to_left = cx.global::<SettingsStore>().settings().window.right_to_left;
-        let selected = self.selection.map(|(anchor, head)| selection_lines(anchor, head));
+        let view = cx.entity();
         range
             .filter(|&index| index < doc.line_count())
             .map(|index| {
-                let background = if selected.as_ref().is_some_and(|lines| lines.contains(&index)) {
-                    mix(theme.tokens.accent, theme.tokens.terminal, 0.30)
-                } else {
-                    theme.tokens.terminal
+                let selected = self
+                    .selection
+                    .and_then(|selection| line_range(&selection, index, doc.line_len(index)))
+                    .map(|raw| display_range(doc, index, raw));
+                let view = view.clone();
+                let interact = Interact {
+                    hit: Rc::new(move |gesture, shown, app| {
+                        view.update(app, |this, cx| this.text_gesture(index, shown, gesture, cx))
+                    }),
+                    selected,
+                };
+                let shown = doc.display(index);
+                let spans = match highlights {
+                    Some(highlights) if doc.line_len(index) == shown.len() => {
+                        highlights.line(index).iter().map(|s| (s.range.clone(), s.token)).collect()
+                    }
+                    Some(highlights) => display_spans(&doc.copy(index..index + 1), highlights.line(index)),
+                    None => Vec::new(),
                 };
                 div()
                     .id(("preview-row", index))
@@ -997,42 +1251,9 @@ impl PreviewView {
                     .whitespace_nowrap()
                     .font_family(metrics.family.clone())
                     .text_size(px(metrics.size))
-                    .bg(rgb(background))
+                    .bg(rgb(theme.tokens.terminal))
                     .text_color(rgb(theme.tokens.text))
-                    .child(match highlights {
-                        Some(highlights) => {
-                            let shown = doc.display(index);
-                            let spans = if doc.line_len(index) == shown.len() {
-                                highlights.line(index).iter().map(|s| (s.range.clone(), s.token)).collect()
-                            } else {
-                                display_spans(&doc.copy(index..index + 1), highlights.line(index))
-                            };
-                            div().child(code_line(&shown, &spans, &font, right_to_left, false, &theme))
-                        }
-                        None => line_text(&doc.display(index), right_to_left),
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                            let anchor = if event.modifiers.shift {
-                                this.selection.map_or(index, |(anchor, _)| anchor)
-                            } else {
-                                index
-                            };
-                            this.selection = Some((anchor, index));
-                            this.dragging = true;
-                            cx.notify();
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                        if this.dragging
-                            && event.pressed_button == Some(MouseButton::Left)
-                            && let Some((_, head)) = this.selection.as_mut().filter(|(_, head)| *head != index)
-                        {
-                            *head = index;
-                            cx.notify();
-                        }
-                    }))
+                    .child(code_line(&shown, &spans, &font, right_to_left, false, &theme, &interact))
                     .into_any_element()
             })
             .collect()
@@ -1127,16 +1348,6 @@ impl PreviewView {
     }
 }
 
-/// One line as an element. With right-to-left display on, a line with Hebrew or Arabic letters is drawn in display
-/// order, one character at a time (the shaper never gets right-to-left text); selection and copy stay logical.
-fn line_text(text: &str, right_to_left: bool) -> gpui::Div {
-    let reordered = right_to_left.then(|| display_chars(text, &[])).flatten();
-    match reordered {
-        Some(chars) => div().flex().items_center().children(chars.into_iter().map(|(ch, _)| div().child(ch))),
-        None => div().child(SharedString::from(text.to_string())),
-    }
-}
-
 /// The card the state bodies sit in.
 fn card(theme: &Theme) -> gpui::Div {
     div()
@@ -1218,8 +1429,11 @@ impl Render for PreviewView {
                     cx.emit(PreviewEvent::Menu { position: event.position, file: active.clone() });
                 }),
             )
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.dragging = false))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.dragging = false))
+            .on_mouse_move(
+                cx.listener(|this, event: &MouseMoveEvent, window, cx| this.pointer_moved(event, window, cx)),
+            )
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
             .child(self.header(&theme, cx))
             .when(!self.model.tabs.is_empty(), |pane| pane.child(self.tab_row(&theme, cx)))
             .child(div().relative().flex_1().min_h_0().bg(rgb(theme.tokens.terminal)).child(body))
@@ -1231,15 +1445,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selection_runs_either_way() {
-        assert_eq!(selection_lines(5, 2), 2..6);
-        assert_eq!(selection_lines(2, 5), 2..6);
+    fn block_selection_orders_its_range() {
+        assert_eq!(BlockSelection { block: 0, anchor: 7, head: 2 }.range(), 2..7);
+        assert_eq!(BlockSelection { block: 0, anchor: 2, head: 7 }.range(), 2..7);
     }
 
     #[test]
-    fn copy_selection_copies_whole_lines() {
-        let doc = TextDoc::parse(b"a\nb\nc").unwrap();
-        assert_eq!(copy_lines(&doc, 1..3), "b\nc");
+    fn text_selection_copies_across_lines() {
+        let doc = TextDoc::parse(b"abc\ndef").unwrap();
+        let selection = TextSelection { anchor: (1, 1), head: (0, 1) };
+        assert_eq!(copy_text_selection(&doc, &selection), "bc\nd");
+    }
+
+    #[test]
+    fn markdown_copy_stays_in_the_block() {
+        let doc = preview_doc::markdown::parse("first one\n\nsecond", Path::new("/"));
+        let selection = BlockSelection { block: 0, anchor: 6, head: 999 };
+        assert_eq!(copy_block_selection(&doc, &selection), "one");
+        let nothing = BlockSelection { block: 0, anchor: 3, head: 3 };
+        assert_eq!(copy_block_selection(&doc, &nothing), "");
+    }
+
+    #[test]
+    fn a_text_selection_paints_its_part_of_each_line() {
+        let selection = TextSelection { anchor: (3, 4), head: (1, 2) };
+        assert_eq!(line_range(&selection, 0, 9), None);
+        assert_eq!(line_range(&selection, 1, 9), Some(2..9));
+        assert_eq!(line_range(&selection, 2, 5), Some(0..5));
+        assert_eq!(line_range(&selection, 3, 9), Some(0..4));
+        assert_eq!(line_range(&selection, 4, 9), None);
+        let one_line = TextSelection { anchor: (2, 6), head: (2, 3) };
+        assert_eq!(line_range(&one_line, 2, 9), Some(3..6));
+        assert_eq!(line_range(&one_line, 2, 4), Some(3..4));
+    }
+
+    #[test]
+    fn auto_scroll_is_zero_away_from_the_edges_and_grows_into_them() {
+        assert_eq!(auto_scroll_step(250.0, 0.0, 500.0), 0.0);
+        assert_eq!(auto_scroll_step(0.0, 0.0, 500.0), -20.0);
+        assert_eq!(auto_scroll_step(12.0, 0.0, 500.0), -10.0);
+        assert_eq!(auto_scroll_step(500.0, 0.0, 500.0), 20.0);
+        assert_eq!(auto_scroll_step(600.0, 0.0, 500.0), 20.0);
+        assert_eq!(auto_scroll_step(-50.0, 0.0, 500.0), -20.0);
+    }
+
+    #[test]
+    fn a_display_offset_maps_back_to_the_raw_line() {
+        let doc = TextDoc::parse(b"\tab\tc").unwrap();
+        // Shown as "    ab    c".
+        assert_eq!(display_range(&doc, 0, 0..1), 0..4);
+        assert_eq!(display_range(&doc, 0, 1..3), 4..6);
+        assert_eq!(display_range(&doc, 0, 0..doc.line_len(0)), 0..doc.display(0).len());
     }
 
     #[test]

@@ -48,6 +48,8 @@ impl WorkspaceView {
             )
         });
         let group = format!("pane-card-{index}");
+        let items = self.items_button_of(leaf, ("items-pane", index), false, theme, cx);
+        let has_items = items.is_some();
         let can_split = self.workspace.can_split();
         let button = |axis: Axis, label: &'static str, shortcut: &'static str, icon: &'static str| {
             let platform = Platform::current();
@@ -114,11 +116,8 @@ impl WorkspaceView {
             .bg(rgba((theme.tokens.terminal << 8) | 0xb3))
             .opacity(if focused || popup_open { 1. } else { 0. })
             .group_hover(group, |style| style.opacity(1.))
-            .children(self.items_button_of(leaf, ("items-pane", index), false, theme, cx))
-            .children(
-                self.items_state(leaf, cx)
-                    .map(|_| div().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.line)).self_center()),
-            )
+            .children(items)
+            .children(has_items.then(|| div().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.line)).self_center()))
             .child(button(Axis::Horizontal, "Split right", "splitRightClaude", SPLIT_RIGHT_ICON))
             .child(button(Axis::Vertical, "Split down", "splitDownClaude", SPLIT_DOWN_ICON))
             .child(div().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.line)).self_center())
@@ -707,9 +706,12 @@ pub(super) fn items_button_element(
     if state.enabled {
         button
             .cursor_pointer()
-            .hover(|style| style.bg(rgb(theme.tokens.raised)))
+            .when(!state.lit, |button| button.hover(|style| style.bg(rgb(theme.tokens.raised))))
             .on_mouse_down(MouseButton::Left, on_down)
     } else {
-        button.opacity(0.35)
+        button.opacity(0.35).on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
     }
 }

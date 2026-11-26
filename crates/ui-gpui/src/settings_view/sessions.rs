@@ -403,9 +403,38 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        let preview = self.preview_group(theme, settings, window, cx);
         let dirs = self.claude_dirs_group(theme, settings, window, cx);
         let favorites = self.favorites_group(theme, settings, window, cx);
-        div().flex().flex_col().gap(theme.ui(26.)).child(dirs).child(favorites)
+        div().flex().flex_col().gap(theme.ui(26.)).child(preview).child(dirs).child(favorites)
+    }
+
+    /// The Preview group: the switch that gives Claude panes the "show in preview" tool.
+    fn preview_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
+        let enabled = settings.preview.enabled;
+        let control =
+            self.switch("preview-enabled", 0, enabled, window, cx, change(move |s| s.preview.enabled = !enabled));
+        let reset = self.reset_slot(
+            "reset-preview-enabled",
+            0,
+            settings,
+            |s| s.preview.enabled,
+            |s, v| s.preview.enabled = v,
+            window,
+            cx,
+        );
+        group(
+            theme,
+            "Preview",
+            None,
+            vec![row(
+                theme,
+                "Let Claude show you files",
+                "Claude gets a \"show in preview\" tool. Applies to sessions started or resumed after the change.",
+                control,
+                reset,
+            )],
+        )
     }
 
     /// A small text button for a list row's trailing slot.

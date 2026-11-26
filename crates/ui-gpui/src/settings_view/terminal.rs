@@ -223,7 +223,7 @@ impl SettingsView {
                 row(
                     theme,
                     "Right-to-left display",
-                    "Shows Hebrew and Arabic in reading order. Off: characters stay in the order the program wrote them.",
+                    "Shows Hebrew and Arabic in reading order. Off: characters stay in the order the program wrote them. Also lays out right-to-left documents in the preview pane.",
                     rtl_control,
                     rtl_reset,
                 ),

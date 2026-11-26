@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use app_core::scroll::{Thumb, activity, offset_for_extent, thumb_for_extent};
 use app_core::theme_colors::{deepen, mix};
-use gpui::{Bounds, Pixels, Rgba, UniformListScrollHandle, div, prelude::*, px, rgb};
+use gpui::{Bounds, ListState, Pixels, Rgba, ScrollHandle, UniformListScrollHandle, div, prelude::*, px, rgb};
 
 use crate::theme::Theme;
 
@@ -33,6 +33,8 @@ pub(crate) struct Extent {
     pub offset: (f32, f32),
     /// Where the list is drawn.
     pub bounds: Bounds<Pixels>,
+    /// Each track gives up a corner to the other bar when both show; off when the bars lie outside the list.
+    pub shared_corner: bool,
 }
 
 impl Extent {
@@ -46,13 +48,52 @@ impl Extent {
             contents: (f32::from(size.contents.width), f32::from(size.contents.height)),
             offset: (-f32::from(offset.x), -f32::from(offset.y)),
             bounds: state.base_handle.bounds(),
+            shared_corner: true,
         })
+    }
+
+    /// The extent of a variable-height list, from its own scrollbar measures (the height is an estimate until the
+    /// rows are measured). Only a vertical bar, outside the list.
+    pub(crate) fn of_list(state: &ListState) -> Option<Extent> {
+        let bounds = state.viewport_bounds();
+        if bounds.size.height <= px(0.) {
+            return None;
+        }
+        let height = f32::from(bounds.size.height);
+        Some(Extent {
+            viewport: (f32::from(bounds.size.width), height),
+            contents: (f32::from(bounds.size.width), height + f32::from(state.max_offset_for_scrollbar().y)),
+            offset: (0.0, -f32::from(state.scroll_px_offset_for_scrollbar().y)),
+            bounds,
+            shared_corner: false,
+        })
+    }
+
+    /// The extent of a plain scrolling element tracked by `handle`: only a vertical bar, outside the element.
+    pub(crate) fn of_handle(handle: &ScrollHandle) -> Option<Extent> {
+        let bounds = handle.bounds();
+        if bounds.size.height <= px(0.) {
+            return None;
+        }
+        let (width, height) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        Some(Extent {
+            viewport: (width, height),
+            contents: (width, height + f32::from(handle.max_offset().y)),
+            offset: (0.0, -f32::from(handle.offset().y)),
+            bounds,
+            shared_corner: false,
+        })
+    }
+
+    /// What a track gives up to the other bar.
+    fn corner(&self, ui_scale: f32) -> f32 {
+        if self.shared_corner { WIDTH * ui_scale } else { 0.0 }
     }
 
     /// The thumbs, vertical then horizontal; each track gives up a corner to the other bar when both show.
     pub(crate) fn thumbs(&self, ui_scale: f32) -> (Option<Thumb>, Option<Thumb>) {
         let min = MIN_THUMB * ui_scale;
-        let corner = WIDTH * ui_scale;
+        let corner = self.corner(ui_scale);
         let (vx, vy) = (self.contents.0 > self.viewport.0 + 0.5, self.contents.1 > self.viewport.1 + 0.5);
         let v_track = self.viewport.1 - if vx { corner } else { 0.0 };
         let h_track = self.viewport.0 - if vy { corner } else { 0.0 };
@@ -64,7 +105,7 @@ impl Extent {
 
     /// The offset along `bar` for a thumb of length `len` grabbed so its start is at `top` on the track.
     pub(crate) fn offset_for(&self, bar: Bar, top: f32, len: f32, ui_scale: f32) -> f32 {
-        let corner = WIDTH * ui_scale;
+        let corner = self.corner(ui_scale);
         let (vx, vy) = (self.contents.0 > self.viewport.0 + 0.5, self.contents.1 > self.viewport.1 + 0.5);
         match bar {
             Bar::Vertical => {
@@ -124,5 +165,39 @@ pub(crate) fn thumb_div(bar: Bar, thumb: Thumb, color: Rgba, theme: &Theme) -> g
     match bar {
         Bar::Vertical => base.top(px(thumb.top)).left(theme.ui(2.)).w(thickness).h(px(thumb.len)),
         Bar::Horizontal => base.left(px(thumb.top)).top(theme.ui(2.)).h(thickness).w(px(thumb.len)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extent(shared_corner: bool) -> Extent {
+        Extent {
+            viewport: (200.0, 100.0),
+            contents: (400.0, 300.0),
+            offset: (0.0, 0.0),
+            bounds: Bounds::default(),
+            shared_corner,
+        }
+    }
+
+    #[test]
+    fn a_shared_corner_shortens_both_tracks() {
+        let (v, h) = extent(true).thumbs(1.0);
+        let (v_apart, h_apart) = extent(false).thumbs(1.0);
+        let (v, h, v_apart, h_apart) = (v.unwrap(), h.unwrap(), v_apart.unwrap(), h_apart.unwrap());
+        assert!(v.len < v_apart.len);
+        assert!(h.len < h_apart.len);
+    }
+
+    #[test]
+    fn separate_tracks_use_the_whole_viewport() {
+        let extent = extent(false);
+        let (v, _) = extent.thumbs(1.0);
+        let v = v.unwrap();
+        // The thumb at the end of the track maps back to the largest offset.
+        let end = extent.offset_for(Bar::Vertical, 100.0 - v.len, v.len, 1.0);
+        assert!((end - 200.0).abs() < 0.01, "{end}");
     }
 }

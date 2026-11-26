@@ -1263,7 +1263,8 @@ impl PreviewView {
         )
     }
 
-    /// Catches Ctrl+wheel over the document before the list scrolls and steps the text size.
+    /// Catches Ctrl+wheel over the document before the list scrolls and steps the text size. It asks
+    /// `should_handle_scroll`, not `is_hovered`: holding Ctrl is keyboard input, and `is_hovered` is false after any.
     fn text_size_wheel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
         canvas(
@@ -1273,7 +1274,7 @@ impl PreviewView {
                 window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
                     if phase != gpui::DispatchPhase::Capture
                         || !event.modifiers.secondary()
-                        || !hitbox.is_hovered(window)
+                        || !hitbox.should_handle_scroll(window)
                     {
                         return;
                     }

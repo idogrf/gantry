@@ -421,7 +421,10 @@ impl WorkspaceView {
                 let project = self.leaf_project_color(leaf, cx);
                 let marker = self.workspace.leaf_color(leaf).map(|tint| tint.value(theme.preset));
                 let git_chip = self.git_chip_of(leaf, ("git-chip-pane", index), &theme, cx);
-                let items_button = self.items_button_of(leaf, ("items-pane", index), false, &theme, cx);
+                // Only a split tab's pane has a header to put it in.
+                let items_button = (multiple && preview.is_none())
+                    .then(|| self.items_button_of(leaf, ("items-pane", index), false, &theme, cx))
+                    .flatten();
                 let folder = self
                     .workspace
                     .leaves
@@ -694,9 +697,9 @@ pub(super) enum ItemsLook {
     Chip,
 }
 
-/// The Items button: the file icon, with the word `Files` for [`ItemsLook::Chip`]. Lit (accent border and tint) while the preview
-/// is open; dimmed and inert when `state.enabled` is false; a dot at the top right when `state.dot`. `on_down` runs
-/// on a left press of an enabled button.
+/// The Items button: the file icon, with the word `Files` for [`ItemsLook::Chip`]. Lit (accent border and tint)
+/// while the preview is open; dimmed and inert when `state.enabled` is false; a dot at the top right when
+/// `state.dot`. `on_down` runs on a left press of an enabled button.
 pub(super) fn items_button_element(
     id: impl Into<gpui::ElementId>,
     state: ItemsButton,

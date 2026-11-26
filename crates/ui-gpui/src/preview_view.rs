@@ -575,7 +575,8 @@ impl PreviewView {
     /// rows out of view do not go stale.
     fn sync_md(&mut self, window: &Window, cx: &App) {
         let Content::Markdown(doc) = &self.model.content else { return };
-        let mirror = doc_rtl(cx.global::<SettingsStore>().settings().window.right_to_left, doc.rtl, self.flipped);
+        let settings = cx.global::<SettingsStore>().settings();
+        let mirror = doc_rtl(settings.window.right_to_left, doc.rtl, self.flipped);
         let metrics = Self::metrics(window, cx);
         let key = (theme(cx).ui_scale.to_bits(), metrics.family.clone(), metrics.size.to_bits());
         let char_px = match &self.char_px_cache {
@@ -586,7 +587,6 @@ impl PreviewView {
                 px
             }
         };
-        let settings = cx.global::<SettingsStore>().settings();
         let look = MdLook {
             family: metrics.family,
             size: metrics.size,
@@ -1140,7 +1140,18 @@ impl PreviewView {
             .bg(rgb(theme.tokens.raised))
             .text_color(rgb(theme.tokens.text))
             .child(svg().path(EYE_ICON).flex_none().size(theme.ui(14.)).text_color(rgb(theme.tokens.muted)))
-            .child(div().min_w_0().truncate().child(bidi_label(&title, label_rtl)))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .truncate()
+                    .child(if self.model.title.is_empty() {
+                        div().child("Preview")
+                    } else {
+                        div().flex_none().mr(theme.ui(4.)).child("Preview ·")
+                    })
+                    .child(bidi_label(&self.model.title, label_rtl)),
+            )
             .child(
                 div()
                     .flex_none()
@@ -1595,6 +1606,7 @@ mod tests {
     #[test]
     fn labels_with_hebrew_are_split_per_character() {
         assert_eq!(label_parts("notes.md", true), None);
+        assert_eq!(label_parts("Fix the build", false), None, "an ASCII title is one element");
         let text = "תוכנית.md";
         let display: Vec<char> = app_core::bidi::display_line(text).unwrap().into_iter().map(|(_, c)| c).collect();
         assert_eq!(label_parts(text, true), Some(display));

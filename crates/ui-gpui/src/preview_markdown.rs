@@ -1460,6 +1460,9 @@ mod tests {
         assert!(!packs_end(true, true, false), "Hebrew in a mirrored document");
         assert!(packs_end(false, true, false), "English in a mirrored document");
         assert!(packs_end(true, false, true), "Hebrew in a flipped document packs left, by the bullet");
+        assert!(!packs_end(false, false, true), "English in a flipped document");
+        assert!(packs_end(false, true, true), "English in a mirrored flipped document");
+        assert!(!packs_end(true, true, true), "Hebrew in a mirrored flipped document");
     }
 
     #[test]

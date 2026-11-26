@@ -373,6 +373,9 @@ fn wheel_pan(delta: ScrollDelta) -> (f32, f32) {
     }
 }
 
+/// The room under a text or markdown body for the text size bar: its height plus its 12 px offset.
+const BAR_ROOM: f32 = 46.0;
+
 /// A font's measures at the terminal font size.
 struct Metrics {
     family: SharedString,
@@ -1227,18 +1230,29 @@ impl PreviewView {
                 .text_xs()
                 .font_family(UI_FONT)
                 .text_color(rgb(theme.tokens.text))
-                .child(self.zoom_button("text-smaller", "−", theme, cx, |this, cx| this.step_text_size(-1, cx)))
+                .child(
+                    self.zoom_button("text-smaller", "−", theme, cx, |this, cx| this.step_text_size(-1, cx))
+                        .tooltip(hover_card::tooltip(plain_card("Smaller text"))),
+                )
                 .child(
                     div()
                         .id("text-reset")
                         .min_w(theme.ui(40.))
                         .flex()
                         .justify_center()
+                        .h(theme.ui(22.))
+                        .items_center()
+                        .rounded(px(RADIUS_SMALL))
                         .cursor_pointer()
+                        .hover(|style| style.bg(rgb(theme.tokens.surface)))
+                        .tooltip(hover_card::tooltip(plain_card("Reset text size")))
                         .on_mouse_down(MouseButton::Left, reset)
                         .child(format!("{size}%")),
                 )
-                .child(self.zoom_button("text-larger", "+", theme, cx, |this, cx| this.step_text_size(1, cx))),
+                .child(
+                    self.zoom_button("text-larger", "+", theme, cx, |this, cx| this.step_text_size(1, cx))
+                        .tooltip(hover_card::tooltip(plain_card("Larger text"))),
+                ),
         )
     }
 
@@ -1246,13 +1260,13 @@ impl PreviewView {
     fn text_size_wheel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
         canvas(
-            |_, _, _| {},
-            move |bounds, _, window, _| {
+            |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+            move |_, hitbox, window, _| {
                 let view = view.clone();
-                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
+                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
                     if phase != gpui::DispatchPhase::Capture
                         || !event.modifiers.secondary()
-                        || !bounds.contains(&event.position)
+                        || !hitbox.is_hovered(window)
                     {
                         return;
                     }
@@ -1624,11 +1638,13 @@ impl PreviewView {
             Content::Loading => div().size_full().into_any_element(),
             Content::Markdown(_) => {
                 let view = cx.entity();
+                let room = theme.ui(BAR_ROOM);
                 let theme = Self::scaled_theme(cx);
                 let look = self.md_look.clone().unwrap_or_default();
                 let after = cx.entity();
                 div()
                     .size_full()
+                    .pb(room)
                     .child(
                         list(self.md_list.clone(), move |ix, _, cx| {
                             view.update(cx, |this, cx| this.md_row(ix, &theme, &look, cx))
@@ -1646,16 +1662,21 @@ impl PreviewView {
             Content::Text { doc, .. } => {
                 // Every row has its own `min_w`, so the width needs no scan of the document.
                 let longest = (doc.line_count() > 0).then_some(0);
-                uniform_list(
-                    "preview-rows",
-                    doc.line_count(),
-                    cx.processor(|this, range: Range<usize>, window, cx| this.text_rows(range, window, cx)),
-                )
-                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-                .with_width_from_item(longest)
-                .track_scroll(&self.scroll)
-                .size_full()
-                .into_any_element()
+                div()
+                    .size_full()
+                    .pb(theme.ui(BAR_ROOM))
+                    .child(
+                        uniform_list(
+                            "preview-rows",
+                            doc.line_count(),
+                            cx.processor(|this, range: Range<usize>, window, cx| this.text_rows(range, window, cx)),
+                        )
+                        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+                        .with_width_from_item(longest)
+                        .track_scroll(&self.scroll)
+                        .size_full(),
+                    )
+                    .into_any_element()
             }
             Content::Image { image, natural } => self.image_body(image, *natural, theme, cx),
             Content::Missing => centered(vec![muted("This file no longer exists").into_any_element()]),
@@ -1934,6 +1955,7 @@ mod tests {
         assert_eq!(wheel_text_steps(&mut acc, pixels(-5.)), 0);
         assert_eq!(acc, -5.0);
         assert_eq!(wheel_text_steps(&mut acc, ScrollDelta::Lines(gpui::point(0.0, 1.0))), 1);
+        assert_eq!(acc, 0.0);
         assert_eq!(wheel_text_steps(&mut acc, ScrollDelta::Lines(gpui::point(0.0, -3.0))), -1);
     }
 

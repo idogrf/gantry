@@ -332,28 +332,78 @@ mod tests {
         assert_eq!(load(&path).unwrap(), Some(workspace));
     }
 
+    /// A layout file exactly as PR 3 wrote it (a following preview, no `held`, `active` or `linked`).
+    const PR3_LAYOUT: &str = r#"{
+  "version": 2,
+  "workspace": {
+    "instances": {
+      "local": "i"
+    },
+    "tabs": [
+      {
+        "root": {
+          "Split": {
+            "id": 2,
+            "axis": "Vertical",
+            "ratio": 0.5,
+            "first": {
+              "Leaf": 1
+            },
+            "second": {
+              "Leaf": 3
+            }
+          }
+        },
+        "focused": 3
+      }
+    ],
+    "active": 0,
+    "leaves": {
+      "1": {
+        "pane": 3,
+        "launch": {
+          "program": "claude",
+          "args": [
+            "--session-id",
+            "s1"
+          ],
+          "cwd": "/repo",
+          "claude": true
+        },
+        "session": "s1"
+      },
+      "3": {
+        "pane": null,
+        "launch": {
+          "program": "",
+          "args": [],
+          "cwd": "/repo"
+        },
+        "session": null,
+        "preview": {
+          "follows": 1,
+          "session": "s1"
+        }
+      }
+    },
+    "sidebar": {
+      "width": 280.0
+    },
+    "next_id": 3
+  }
+}"#;
+
     #[test]
     fn a_pr3_preview_layout_saves_byte_identical() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("layout.json");
-        let mut workspace = sample();
-        let claude = workspace.focused().unwrap();
-        let preview =
-            workspace.split(crate::split_tree::Axis::Horizontal, PaneLaunch::preview("/repo".into())).unwrap();
-        workspace.leaves.get_mut(&preview).unwrap().preview = Some(PreviewLeaf {
-            follows: Some(claude),
-            held: None,
-            session: Some("s1".into()),
-            active: None,
-            linked: Vec::new(),
-        });
-        save(&path, &workspace).unwrap();
-        let before = std::fs::read_to_string(&path).unwrap();
-        assert!(before.contains(&format!("\"follows\": {claude}")), "{before}");
-        assert!(!before.contains("held") && !before.contains("Some"), "{before}");
+        std::fs::write(&path, PR3_LAYOUT).unwrap();
         let loaded = load(&path).unwrap().unwrap();
+        let preview = loaded.leaves.values().find_map(|leaf| leaf.preview.as_ref()).unwrap();
+        assert_eq!((preview.follows, preview.session.as_deref()), (Some(1), Some("s1")));
+        assert!(preview.held.is_none() && preview.active.is_none() && preview.linked.is_empty());
         save(&path, &loaded).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), PR3_LAYOUT);
     }
 
     #[test]

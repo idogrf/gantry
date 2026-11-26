@@ -14,12 +14,12 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - Right-to-left documents are laid out from the right with Settings > Terminal > Right-to-left display on; ⇄ flips one.
   - Open in system viewer on every file. Files reload while shown.
   - Works on SSH hosts.
+  - Needs Claude Code 2.1.332 or newer. Needs a daemon restart; SSH hosts need the new `gantryd` (Install… / Update and restart).
 - **File chip and pop-ups** - A chip on a session's row counts the files you have not looked at (outlined once seen); click it for the preview.
   - A pop-up at the bottom right says Claude sent a file (Preview, Go to session; drag it onto a pane).
   - Pop-ups can also be turned on for Needs input and Finished in Settings > Alerts (new Pop-up column and File sent row).
 - **Drag files onto panes** - Drag a file tab or a pop-up onto a pane's edge for a pane that holds that one file, or onto a preview to show it there.
 - **Preview setting** - Settings > Sessions > Preview > Let Claude show you files (on by default; applies to sessions started or resumed after the change).
-- **Needs a daemon restart** - The preview pane needs a daemon restart. SSH hosts need the new `gantryd` (Install… / Update and restart) to preview files.
 
 ### Fixed
 - **Claude started from a Claude session** - A Claude pane of a Gantry that was started from inside a Claude Code session saves its transcript again. Needs a daemon restart.

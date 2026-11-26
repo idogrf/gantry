@@ -1879,7 +1879,7 @@ impl SidebarView {
                 let colors = theme.tone(*tone);
                 let counts = self.file_counts.get(&(session.host.clone(), session.id.clone())).copied();
                 let file_chip = counts.zip(*leaf).and_then(|(counts, leaf)| {
-                    chip_shown(counts, *tone == Tone::Closed, self.file_badge).then_some((counts.new, leaf))
+                    chip_shown(counts, *tone == Tone::Closed, self.file_badge).then_some(leaf)
                 });
                 let files = counts.filter(|counts| counts.total > 0).map(files_line);
                 let badge = dir_badge_for(
@@ -1905,10 +1905,10 @@ impl SidebarView {
                 let (container, remote) = (session.container.is_some(), !session.host.is_local());
                 let row_chip = file_chip
                     .filter(|_| close_slot_shown(amount))
-                    .map(|(count, leaf)| file_chip_element(index, count, leaf, colors, &theme, cx));
+                    .map(|leaf| file_chip_element(index, leaf, colors, &theme, cx));
                 let bubble = file_chip
                     .filter(|_| !close_slot_shown(amount))
-                    .map(|(count, leaf)| file_bubble(index, count, leaf, colors, amount, &theme, cx));
+                    .map(|leaf| file_bubble(index, leaf, colors, amount, &theme, cx));
                 let letter = tile_letter(session_title(session)).to_string();
                 base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
@@ -2876,42 +2876,32 @@ fn corner_marks(
         )
 }
 
-/// The number a compact tile's bubble shows: the count, `9+` above nine.
-fn bubble_text(count: usize) -> String {
-    if count > 9 { "9+".to_string() } else { count.to_string() }
+/// The chip's background and glyph color: the row's ink as background and its fill (else the `surface`) as glyph.
+fn chip_colors(colors: ToneColors, surface: u32) -> (u32, u32) {
+    (colors.ink, colors.fill.unwrap_or(surface))
 }
 
-/// The chip's background (none when outlined) and glyph color: a new-files chip takes the row's ink as background and
-/// its fill (else the `surface`) as text; a seen chip is outlined in the ink.
-fn chip_colors(colors: ToneColors, surface: u32, new: bool) -> (Option<u32>, u32) {
-    if new { (Some(colors.ink), colors.fill.unwrap_or(surface)) } else { (None, colors.ink) }
-}
-
-/// The file chip of a session row: filled with the unseen count, or an outlined glyph. A click opens its preview.
+/// The file chip of a session row: a filled file glyph for a new file. A click opens its preview.
 fn file_chip_element(
     index: usize,
-    count: usize,
     leaf: NodeId,
     colors: ToneColors,
     theme: &Theme,
     cx: &mut Context<SidebarView>,
 ) -> gpui::Stateful<gpui::Div> {
-    let (background, glyph) = chip_colors(colors, theme.tokens.surface, true);
+    let (background, glyph) = chip_colors(colors, theme.tokens.surface);
     div()
         .id(("file-chip", index))
         .flex_none()
         .h(theme.ui(16.))
-        .px(theme.ui(4.))
+        .w(theme.ui(18.))
         .flex()
         .items_center()
-        .gap(theme.ui(2.))
+        .justify_center()
         .rounded(px(RADIUS_TINY))
         .cursor_pointer()
-        .text_color(rgb(glyph))
-        .text_xs()
-        .when_some(background, |chip, background| chip.bg(rgb(background)))
+        .bg(rgb(background))
         .child(svg().path(FILE_ICON).flex_none().size(theme.ui(11.)).text_color(rgb(glyph)))
-        .child(count.to_string())
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |_, _: &MouseDownEvent, _, cx| {
@@ -2921,35 +2911,29 @@ fn file_chip_element(
         )
 }
 
-/// A compact tile's bubble on its bottom-right corner: the unseen count; fades in with `amount`.
+/// A compact tile's bubble on its bottom-right corner: the file glyph; fades in with `amount`.
 fn file_bubble(
     index: usize,
-    count: usize,
     leaf: NodeId,
     colors: ToneColors,
     amount: f32,
     theme: &Theme,
     cx: &mut Context<SidebarView>,
 ) -> gpui::Stateful<gpui::Div> {
-    let (background, glyph) = chip_colors(colors, theme.tokens.surface, true);
+    let (background, glyph) = chip_colors(colors, theme.tokens.surface);
     div()
         .id(("file-bubble", index))
         .absolute()
         .bottom(theme.ui(1.))
         .right(theme.ui(3.))
-        .min_w(theme.ui(14.))
-        .h(theme.ui(14.))
-        .px(theme.ui(3.))
+        .size(theme.ui(14.))
         .flex()
         .items_center()
         .justify_center()
         .rounded_full()
         .opacity(amount)
-        .when_some(background, |bubble, background| bubble.bg(rgb(background)))
-        .text_color(rgb(glyph))
-        .text_size(theme.ui(9.))
-        .font_weight(FontWeight::BOLD)
-        .child(bubble_text(count))
+        .bg(rgb(background))
+        .child(svg().path(FILE_ICON).flex_none().size(theme.ui(9.)).text_color(rgb(glyph)))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |_, _: &MouseDownEvent, _, cx| {
@@ -3018,19 +3002,11 @@ mod tests {
     }
 
     #[test]
-    fn bubble_text_caps_at_nine() {
-        assert_eq!(bubble_text(3), "3");
-        assert_eq!(bubble_text(9), "9");
-        assert_eq!(bubble_text(10), "9+");
-    }
-
-    #[test]
-    fn chip_text_colors_follow_the_row() {
+    fn chip_colors_fill_with_the_ink() {
         let colors = ToneColors { fill: Some(0x123456), ink: 0xffffff, dot: 0 };
-        assert_eq!(chip_colors(colors, 0x111111, true), (Some(0xffffff), 0x123456));
+        assert_eq!(chip_colors(colors, 0x111111), (0xffffff, 0x123456));
         let bare = ToneColors { fill: None, ..colors };
-        assert_eq!(chip_colors(bare, 0x111111, true), (Some(0xffffff), 0x111111));
-        assert_eq!(chip_colors(colors, 0x111111, false), (None, 0xffffff));
+        assert_eq!(chip_colors(bare, 0x111111), (0xffffff, 0x111111));
     }
 
     #[test]

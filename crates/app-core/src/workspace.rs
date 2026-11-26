@@ -4971,11 +4971,9 @@ mod tests {
         assert_eq!(ws.preview_of(claude), None);
         assert!(ws.leaves.contains_key(&held));
         // A session change in the pane that is gone does nothing to a holding pane.
-        let other = claude_with(&mut ws, 2, "s2");
         ws.session_seen(&PaneKey::local(2), "s3");
         let view = ws.leaves[&held].preview.as_ref().unwrap();
         assert!(view.held.is_some() && view.session.is_none());
-        let _ = other;
     }
 
     #[test]

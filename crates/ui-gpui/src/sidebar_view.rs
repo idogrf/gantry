@@ -41,8 +41,8 @@ use crate::pane_drag::DraggedPane;
 use crate::preview_view::bidi_label;
 use crate::settings_store::{SettingsStore, dir_badge_for, shortcut_label};
 use crate::theme::{
-    RADIUS, Theme, UI_FONT, container_icon, dir_badge, group_tint, pane_marker, pill_sweep, pin_icon, side_line,
-    ssh_icon, sweeping, theme, working_sweep,
+    RADIUS, RADIUS_TINY, Theme, UI_FONT, container_icon, dir_badge, group_tint, pane_marker, pill_sweep, pin_icon,
+    side_line, ssh_icon, sweeping, theme, working_sweep,
 };
 
 /// The width of the pill that shows a project's state, three dots wide.
@@ -2907,7 +2907,7 @@ fn file_chip_element(
         .flex()
         .items_center()
         .gap(theme.ui(2.))
-        .rounded(px(5.))
+        .rounded(px(RADIUS_TINY))
         .cursor_pointer()
         .text_color(rgb(glyph))
         .text_xs()
@@ -2949,7 +2949,7 @@ fn file_bubble(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(7.))
+        .rounded_full()
         .opacity(amount)
         .when_some(background, |bubble, background| bubble.bg(rgb(background)))
         .text_color(rgb(glyph))

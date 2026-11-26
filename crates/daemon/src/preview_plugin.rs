@@ -175,15 +175,38 @@ mod tests {
         assert_eq!(parse_version("no version"), None);
     }
 
+    /// Write an executable shell script and wait until it starts. A script this process just wrote can briefly fail
+    /// to start ("Text file busy") while another test thread forks with its write handle still open; once one start
+    /// works, no handle is left, so later starts cannot fail that way.
+    #[cfg(unix)]
+    fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for _ in 0..100 {
+            let start = Command::new(&path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+            match start {
+                Ok(mut child) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return path;
+                }
+                Err(e) if e.kind() == io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(e) => panic!("could not start {}: {e}", path.display()),
+            }
+        }
+        panic!("{} stayed busy", path.display());
+    }
+
     // Needs a shell script to stand in for a wrapper whose background child keeps stdout open.
     #[cfg(unix)]
     #[test]
     fn probe_returns_when_a_background_child_holds_stdout() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("wrapper");
-        std::fs::write(&script, "#!/bin/sh\n(sleep 5 &)\necho 2.1.332\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = script(dir.path(), "wrapper", "(sleep 5 &)\necho 2.1.332");
         let start = Instant::now();
         let env = vec![("PATH".to_string(), std::env::var("PATH").unwrap_or_default())];
         let version = probe_version(script.to_str().unwrap(), &env, Duration::from_secs(2));
@@ -195,11 +218,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn probe_reads_the_output_of_a_program_that_exits() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("claude");
-        std::fs::write(&script, "#!/bin/sh\nprintf '2.1.332 (Claude Code)'\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = script(dir.path(), "claude", "printf '2.1.332 (Claude Code)'");
         let env = vec![("PATH".to_string(), std::env::var("PATH").unwrap_or_default())];
         for _ in 0..20 {
             assert_eq!(probe_version(script.to_str().unwrap(), &env, Duration::from_secs(2)), Some((2, 1, 332)));
@@ -210,11 +230,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn probe_gives_up_after_the_timeout() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("slow");
-        std::fs::write(&script, "#!/bin/sh\nsleep 5\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = script(dir.path(), "slow", "sleep 5");
         let start = Instant::now();
         let env = vec![("PATH".to_string(), std::env::var("PATH").unwrap_or_default())];
         assert_eq!(probe_version(script.to_str().unwrap(), &env, Duration::from_millis(300)), None);

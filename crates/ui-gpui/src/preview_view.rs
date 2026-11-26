@@ -1288,7 +1288,10 @@ impl PreviewView {
                 });
             },
         )
+        // Pinned to the corner: an absolute element without an inset sits where the flow would put it, below the body.
         .absolute()
+        .top_0()
+        .left_0()
         .size_full()
     }
 

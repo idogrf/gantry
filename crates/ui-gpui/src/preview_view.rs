@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use app_core::host_state::HostCard;
-use app_core::preview::{FileKind, TabFit, TextDoc, file_name, fit_tabs, kind_of};
+use app_core::preview::{FileKind, TEXT_SIZE_DEFAULT, TabFit, TextDoc, file_name, fit_tabs, kind_of, text_size_step};
 use app_core::preview_zoom::{STEP, WHEEL_STEP_PX, Zoom, wheel_factor};
 use app_core::split_tree::NodeId;
 use app_core::workspace::DropFile;
@@ -344,6 +344,27 @@ fn wheel_zoom_factor(delta: ScrollDelta) -> f32 {
     wheel_factor(-dy)
 }
 
+/// The text size steps of a Ctrl+wheel movement (up = larger): a `Lines` event is one step, `Pixels` add to `acc`, one
+/// step per 50 px, and a change of direction drops what was collected.
+fn wheel_text_steps(acc: &mut f32, delta: ScrollDelta) -> i32 {
+    match delta {
+        ScrollDelta::Lines(lines) => {
+            *acc = 0.0;
+            if lines.y == 0.0 { 0 } else { lines.y.signum() as i32 }
+        }
+        ScrollDelta::Pixels(pixels) => {
+            let dy = f32::from(pixels.y);
+            if dy != 0.0 && *acc != 0.0 && dy.signum() != acc.signum() {
+                *acc = 0.0;
+            }
+            *acc += dy;
+            let steps = (*acc / WHEEL_STEP_PX).trunc();
+            *acc -= steps * WHEEL_STEP_PX;
+            steps as i32
+        }
+    }
+}
+
 /// The pan of a wheel movement in pixels: a line is 20 px, the content follows the delta.
 fn wheel_pan(delta: ScrollDelta) -> (f32, f32) {
     match delta {
@@ -398,6 +419,8 @@ pub(crate) struct PreviewView {
     flipped: bool,
     /// The measured `char_px` with what it was measured for (UI scale bits, font family, size bits).
     char_px_cache: Option<((u32, SharedString, u32), f32)>,
+    /// Pixels of Ctrl+wheel movement not yet worth a text size step.
+    wheel_acc: f32,
     /// What the rows were last measured with; a change remeasures the list.
     md_look: Option<MdLook>,
     /// The image files of the rows laid out in the frame being drawn (cleared at its start).
@@ -524,6 +547,7 @@ impl PreviewView {
             md_look: None,
             flipped: false,
             char_px_cache: None,
+            wheel_acc: 0.0,
             frame_images: Vec::new(),
             md_width: 0.0,
             images_in_view: Vec::new(),
@@ -633,11 +657,12 @@ impl PreviewView {
         let settings = cx.global::<SettingsStore>().settings();
         let mirror = doc_rtl(settings.window.right_to_left, doc.rtl, self.flipped);
         let metrics = Self::metrics(window, cx);
-        let key = (theme(cx).ui_scale.to_bits(), metrics.family.clone(), metrics.size.to_bits());
+        let scaled = Self::scaled_theme(cx);
+        let key = (scaled.ui_scale.to_bits(), metrics.family.clone(), metrics.size.to_bits());
         let char_px = match &self.char_px_cache {
             Some((cached, px)) if *cached == key => *px,
             _ => {
-                let px = preview_markdown::char_px(window, theme(cx));
+                let px = preview_markdown::char_px(window, &scaled);
                 self.char_px_cache = Some((key, px));
                 px
             }
@@ -646,7 +671,7 @@ impl PreviewView {
             family: metrics.family,
             size: metrics.size,
             line_height: metrics.row_height,
-            ui_scale: theme(cx).ui_scale,
+            ui_scale: scaled.ui_scale,
             rtl: settings.window.right_to_left,
             mirror,
             flipped: self.flipped,
@@ -1145,12 +1170,104 @@ impl PreviewView {
         let id = text_system.resolve_font(&face);
         let cell_width =
             text_system.advance(id, px(font.size), 'm').map_or(font.size * 0.6, |advance| f32::from(advance.width));
+        let scale = Self::text_scale(cx);
         Metrics {
             family: family.into(),
-            size: font.size,
-            row_height: (font.size * font.line_height).round(),
-            cell_width,
+            size: font.size * scale,
+            row_height: (font.size * scale * font.line_height).round(),
+            cell_width: cell_width * scale,
         }
+    }
+
+    /// The text size setting as a factor (1.0 at 100 %).
+    fn text_scale(cx: &App) -> f32 {
+        f32::from(cx.global::<SettingsStore>().settings().preview.text_size) / 100.0
+    }
+
+    /// The theme with its UI scale multiplied by the text size: what markdown is drawn and measured with.
+    fn scaled_theme(cx: &App) -> Theme {
+        let mut scaled = theme(cx).clone();
+        scaled.ui_scale *= Self::text_scale(cx);
+        scaled
+    }
+
+    /// Steps the text size `steps` times (positive = larger) and saves it.
+    fn step_text_size(&mut self, steps: i32, cx: &mut Context<Self>) {
+        let mut size = cx.global::<SettingsStore>().settings().preview.text_size;
+        for _ in 0..steps.unsigned_abs() {
+            size = text_size_step(size, steps > 0);
+        }
+        self.set_text_size(size, cx);
+    }
+
+    /// Saves the text size (only that key).
+    fn set_text_size(&mut self, size: u16, cx: &mut Context<Self>) {
+        SettingsStore::update(cx, |settings| settings.preview.text_size = size);
+        cx.notify();
+    }
+
+    /// The text size bar: smaller, the percent (click resets), larger.
+    fn text_size_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let size = cx.global::<SettingsStore>().settings().preview.text_size;
+        let reset = cx.listener(|this, _: &MouseDownEvent, _, cx| {
+            cx.emit(PreviewEvent::Focused);
+            this.set_text_size(TEXT_SIZE_DEFAULT, cx);
+            cx.stop_propagation();
+        });
+        div().absolute().left_0().right_0().bottom(theme.ui(12.)).flex().justify_center().child(
+            div()
+                .flex()
+                .items_center()
+                .gap(theme.ui(2.))
+                .p(theme.ui(3.))
+                .rounded(px(RADIUS_SMALL))
+                .bg(rgb(theme.tokens.raised))
+                .border_1()
+                .border_color(rgb(theme.tokens.line))
+                .text_xs()
+                .font_family(UI_FONT)
+                .text_color(rgb(theme.tokens.text))
+                .child(self.zoom_button("text-smaller", "−", theme, cx, |this, cx| this.step_text_size(-1, cx)))
+                .child(
+                    div()
+                        .id("text-reset")
+                        .min_w(theme.ui(40.))
+                        .flex()
+                        .justify_center()
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, reset)
+                        .child(format!("{size}%")),
+                )
+                .child(self.zoom_button("text-larger", "+", theme, cx, |this, cx| this.step_text_size(1, cx))),
+        )
+    }
+
+    /// Catches Ctrl+wheel over the document before the list scrolls and steps the text size.
+    fn text_size_wheel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity();
+        canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                let view = view.clone();
+                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
+                    if phase != gpui::DispatchPhase::Capture
+                        || !event.modifiers.secondary()
+                        || !bounds.contains(&event.position)
+                    {
+                        return;
+                    }
+                    view.update(cx, |this, cx| {
+                        let steps = wheel_text_steps(&mut this.wheel_acc, event.delta);
+                        if steps != 0 {
+                            this.step_text_size(steps, cx);
+                        }
+                    });
+                    cx.stop_propagation();
+                });
+            },
+        )
+        .absolute()
+        .size_full()
     }
 
     fn header(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1507,7 +1624,7 @@ impl PreviewView {
             Content::Loading => div().size_full().into_any_element(),
             Content::Markdown(_) => {
                 let view = cx.entity();
-                let theme = theme.clone();
+                let theme = Self::scaled_theme(cx);
                 let look = self.md_look.clone().unwrap_or_default();
                 let after = cx.entity();
                 div()
@@ -1621,6 +1738,8 @@ impl Render for PreviewView {
         let theme = theme(cx).clone();
         let active = self.model.active.clone();
         let host_card = self.model.host_card.clone();
+        let has_text_size =
+            host_card.is_none() && matches!(self.model.content, Content::Markdown(_) | Content::Text { .. });
         let body = match host_card {
             Some(card) => host_card_element(
                 card,
@@ -1673,7 +1792,17 @@ impl Render for PreviewView {
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
             .child(self.header(&theme, cx))
             .when(!self.model.tabs.is_empty(), |pane| pane.child(self.tab_row(&theme, cx)))
-            .child(div().relative().flex_1().min_h_0().bg(rgb(theme.tokens.terminal)).child(body))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .bg(rgb(theme.tokens.terminal))
+                    .child(body)
+                    .when(has_text_size, |pane| {
+                        pane.child(self.text_size_wheel(cx)).child(self.text_size_bar(&theme, cx))
+                    }),
+            )
     }
 }
 
@@ -1792,6 +1921,20 @@ mod tests {
         let mut zoom = Zoom::fit((1000.0, 1000.0), (333.0, 333.0));
         zoom.scale = 0.333;
         assert_eq!(zoom_label(&zoom), "33%");
+    }
+
+    #[test]
+    fn wheel_text_steps_accumulate_pixels() {
+        let pixels = |y: f32| ScrollDelta::Pixels(gpui::point(px(0.), px(y)));
+        let mut acc = 0.0;
+        assert_eq!(wheel_text_steps(&mut acc, pixels(20.)), 0);
+        assert_eq!(wheel_text_steps(&mut acc, pixels(20.)), 0);
+        assert_eq!(wheel_text_steps(&mut acc, pixels(20.)), 1);
+        assert_eq!(acc, 10.0);
+        assert_eq!(wheel_text_steps(&mut acc, pixels(-5.)), 0);
+        assert_eq!(acc, -5.0);
+        assert_eq!(wheel_text_steps(&mut acc, ScrollDelta::Lines(gpui::point(0.0, 1.0))), 1);
+        assert_eq!(wheel_text_steps(&mut acc, ScrollDelta::Lines(gpui::point(0.0, -3.0))), -1);
     }
 
     #[test]

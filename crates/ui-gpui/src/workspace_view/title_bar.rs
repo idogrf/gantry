@@ -509,6 +509,7 @@ impl WorkspaceView {
                     ),
             )
             .children(self.git_chip_of(leaf, "git-chip-title", &theme, cx))
+            .children(self.items_button_of(leaf, "items-title", true, &theme, cx))
     }
 }
 

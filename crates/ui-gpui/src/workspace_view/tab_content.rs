@@ -3,6 +3,7 @@ use super::{PANE_GAP, WorkspaceView};
 
 use app_core::attention::without_claude_glyph;
 use app_core::launcher::{self, LauncherItem};
+use app_core::preview::ItemsButton;
 use app_core::split_tree::{self, Axis, NodeId};
 use app_core::theme_colors::mix;
 use app_core::workspace::{DirBadge, MAX_PANES_PER_TAB};
@@ -17,7 +18,7 @@ use app_core::menus::{self, MenuAction, MenuEntry, MenuItem};
 use app_core::session_tree::{Tone, Unseen, display_path, leaf_tone, status_tone, tone_word};
 use app_core::shortcuts::{self, Platform};
 
-use crate::assets::{CLOSE_ICON, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
+use crate::assets::{CLOSE_ICON, FILE_ICON, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
 use crate::context_menu::OpenMenu;
 use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{FolderRow, star};
@@ -113,6 +114,11 @@ impl WorkspaceView {
             .bg(rgba((theme.tokens.terminal << 8) | 0xb3))
             .opacity(if focused || popup_open { 1. } else { 0. })
             .group_hover(group, |style| style.opacity(1.))
+            .children(self.items_button_of(leaf, ("items-pane", index), false, theme, cx))
+            .children(
+                self.items_state(leaf, cx)
+                    .map(|_| div().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.line)).self_center()),
+            )
             .child(button(Axis::Horizontal, "Split right", "splitRightClaude", SPLIT_RIGHT_ICON))
             .child(button(Axis::Vertical, "Split down", "splitDownClaude", SPLIT_DOWN_ICON))
             .child(div().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.line)).self_center())
@@ -138,6 +144,40 @@ impl WorkspaceView {
                         }),
                     ),
             )
+    }
+
+    /// The Items button of `leaf` (title bar size when `title_bar`, else the pane corner's), or none when
+    /// `items_state` has none. A click opens or closes the preview of its Claude pane.
+    pub(super) fn items_button_of(
+        &self,
+        leaf: NodeId,
+        id: impl Into<gpui::ElementId>,
+        title_bar: bool,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> Option<gpui::Stateful<Div>> {
+        let (claude, state) = self.items_state(leaf, cx)?;
+        let open = self.workspace.preview_of(claude).is_some();
+        let settings = cx.global::<SettingsStore>().settings();
+        let platform = Platform::current();
+        let label = if open { "Close preview" } else { "Open preview" };
+        let title = match shortcuts::current("openPreview", &settings.shortcuts, platform) {
+            Some(keystroke) => format!("{label} ({})", shortcuts::label(Some(&keystroke), platform)),
+            None => label.to_string(),
+        };
+        let (frame, icon) = if title_bar { (26., 15.) } else { (22., 14.) };
+        Some(items_button_element(
+            id,
+            state,
+            title,
+            (theme.ui(frame), theme.ui(icon)),
+            theme,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.toggle_preview_for(claude, window, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            }),
+        ))
     }
 
     /// Open the Claude / Terminal popup of pane `leaf`'s split button at `position`.
@@ -631,4 +671,45 @@ fn pane_header(
             header.child(ssh_icon(colors.map_or(theme.tokens.text, |colors| colors.ink), theme))
         })
         .children(dir.map(|badge| dir_badge(&badge, theme)))
+}
+
+/// The Items button: the file icon in a `frame` box with `icon` size. Lit (accent border and tint) while the preview
+/// is open; dimmed and inert when `state.enabled` is false; a dot at the top right when `state.dot`. `on_down` runs
+/// on a left press of an enabled button.
+pub(super) fn items_button_element(
+    id: impl Into<gpui::ElementId>,
+    state: ItemsButton,
+    title: String,
+    (frame, icon): (Pixels, Pixels),
+    theme: &Theme,
+    on_down: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<Div> {
+    let accent = theme.tokens.accent;
+    let title = if state.enabled { title } else { "No files from this session yet".to_string() };
+    let card = HoverCard { title, status: None, dir: None, container: false, host: None, folder: None, files: None };
+    let button = div()
+        .id(id)
+        .relative()
+        .flex_none()
+        .size(frame)
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(RADIUS_SMALL - 2.))
+        .border_1()
+        .border_color(if state.lit { rgb(accent) } else { rgba(0) })
+        .when(state.lit, |button| button.bg(rgba((accent << 8) | 0x24)))
+        .tooltip(hover_card::tooltip(card))
+        .child(svg().path(FILE_ICON).size(icon).text_color(rgb(if state.lit { accent } else { theme.tokens.muted })))
+        .when(state.dot, |button| {
+            button.child(div().absolute().top(px(1.)).right(px(1.)).size(theme.ui(7.)).rounded_full().bg(rgb(accent)))
+        });
+    if state.enabled {
+        button
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(theme.tokens.raised)))
+            .on_mouse_down(MouseButton::Left, on_down)
+    } else {
+        button.opacity(0.35)
+    }
 }

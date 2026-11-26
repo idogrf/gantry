@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use app_core::menus::{hidden_tabs_menu, preview_menu};
 use app_core::preview::{
-    self, FileKind, ImageType, MAX_UNKNOWN_TEXT, TextDoc, file_name, image_size, image_too_large, is_link, is_read,
-    kind_of, newly_sent, row_title,
+    self, FileKind, ImageType, ItemsButton, MAX_UNKNOWN_TEXT, TextDoc, file_name, image_size, image_too_large, is_link,
+    is_read, kind_of, newly_sent, row_title,
 };
 use app_core::preview_reads::{FileKey, POLL, Shown};
 use app_core::session_tree::session_title;
@@ -795,6 +795,45 @@ impl WorkspaceView {
             this.on_preview_event(leaf, event, window, cx)
         });
         self.previews.insert(leaf, PreviewSlot { view, _subscription: subscription });
+    }
+
+    /// The Claude leaf that `leaf`'s Items button acts on and the button's state: none for a shell, a holding preview,
+    /// or a Claude leaf that cannot get a preview while none is open (`app_core::preview::items_button`).
+    pub(super) fn items_state(&self, leaf: NodeId, cx: &App) -> Option<(NodeId, ItemsButton)> {
+        let claude = self.workspace.preview_claude(leaf)?;
+        let found = self.workspace.leaves.get(&claude)?;
+        let counts = found
+            .session
+            .as_deref()
+            .and_then(|id| self.sidebar.read(cx).sessions().get(&found.host, id))
+            .map(|session| {
+                preview::file_counts(
+                    &session.sent_files,
+                    self.workspace.sent_removed.get(&session.id),
+                    self.workspace.sent_seen.get(&session.id),
+                )
+            })
+            .unwrap_or_default();
+        let badge = cx.global::<SettingsStore>().settings().alerts.file_sent.badge;
+        let button = preview::items_button(
+            self.workspace.can_open_preview(claude),
+            self.workspace.preview_of(claude).is_some(),
+            counts,
+            badge,
+        )?;
+        Some((claude, button))
+    }
+
+    /// Close the preview that follows Claude pane `claude` (no dialog: a preview runs nothing) and focus the Claude
+    /// pane, or open it when none is open.
+    pub(super) fn toggle_preview_for(&mut self, claude: NodeId, window: &mut Window, cx: &mut Context<Self>) {
+        match self.workspace.preview_of(claude) {
+            Some(preview) => {
+                self.close_leaf(preview, window, cx);
+                self.focus_leaf(claude, window, cx);
+            }
+            None => self.open_preview_for(claude, window, cx),
+        }
     }
 
     /// Open (or focus) the preview pane that follows Claude pane `claude`. Does nothing unless `claude` is a Claude

@@ -426,7 +426,8 @@ pub struct ItemsButton {
     pub enabled: bool,
 }
 
-/// The Items button for a Claude leaf: none when it cannot get a preview (`can_open` false) and none is open.
+/// The Items button for a Claude leaf: none when it cannot get a preview (`can_open` false) and none is open. The dot
+/// is hidden while the preview is open.
 pub fn items_button(can_open: bool, open: bool, counts: FileCounts, badge: bool) -> Option<ItemsButton> {
     if !can_open && !open {
         return None;

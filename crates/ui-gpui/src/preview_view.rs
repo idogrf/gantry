@@ -408,20 +408,50 @@ pub(crate) struct PreviewView {
     images_in_view: Vec<PathBuf>,
 }
 
-/// The characters of a label in the order they are drawn when it must not reach the shaper as one run: `None` for
-/// ASCII-only text; else display order (`bidi::display_line`) when `right_to_left` is on, logical order when off.
-fn label_parts(text: &str, right_to_left: bool) -> Option<Vec<char>> {
-    if text.is_ascii() {
-        return None;
-    }
-    if right_to_left && let Some(line) = app_core::bidi::display_line(text) {
-        return Some(line.into_iter().map(|(_, c)| c).collect());
-    }
-    Some(text.chars().collect())
+/// Whether `ch` is zero width and belongs to the character before it: combining marks (accents, Hebrew and Arabic
+/// points), variation selectors and the zero width joiner.
+fn is_attached(ch: char) -> bool {
+    matches!(ch as u32,
+        0x0300..=0x036F | 0x0483..=0x0489 | 0x0591..=0x05BD | 0x05BF | 0x05C1..=0x05C2 | 0x05C4..=0x05C5 | 0x05C7
+        | 0x0610..=0x061A | 0x064B..=0x065F | 0x0670 | 0x06D6..=0x06DC | 0x06DF..=0x06E4 | 0x06E7..=0x06E8
+        | 0x06EA..=0x06ED | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x200D | 0x20D0..=0x20FF | 0xFE00..=0xFE0F
+        | 0xFE20..=0xFE2F)
 }
 
-/// A file or session name as an element: one plain string when it is ASCII, else one element per character in a row, so
-/// right-to-left letters never reach the shaper as one run.
+/// The pieces of a label in the order they are drawn when it must not reach the shaper as one run: `None` unless the
+/// text has a right-to-left letter (any other text is one string, so it keeps its ellipsis and its emoji sequences);
+/// else one piece per character with its combining marks, in display order (`bidi::display_line`) when
+/// `right_to_left` is on, logical order when off.
+fn label_parts(text: &str, right_to_left: bool) -> Option<Vec<String>> {
+    if !text.chars().any(app_core::bidi::is_rtl_letter) {
+        return None;
+    }
+    let mut pieces: Vec<String> = Vec::new();
+    for ch in text.chars() {
+        match pieces.last_mut() {
+            Some(last) if is_attached(ch) => last.push(ch),
+            _ => pieces.push(ch.to_string()),
+        }
+    }
+    if right_to_left {
+        let bases: String = pieces.iter().filter_map(|p| p.chars().next()).collect();
+        if let Some(line) = app_core::bidi::display_line(&bases) {
+            return Some(
+                line.into_iter()
+                    .map(|(logical, shown)| {
+                        let mut piece = pieces[logical].clone();
+                        piece.replace_range(..piece.chars().next().map_or(0, char::len_utf8), &shown.to_string());
+                        piece
+                    })
+                    .collect(),
+            );
+        }
+    }
+    Some(pieces)
+}
+
+/// A file or session name as an element: one plain string unless it has a right-to-left letter, else one element per
+/// character in a row, so right-to-left letters never reach the shaper as one run.
 pub(crate) fn bidi_label(text: &str, right_to_left: bool) -> gpui::AnyElement {
     match label_parts(text, right_to_left) {
         None => text.to_string().into_any_element(),
@@ -429,7 +459,7 @@ pub(crate) fn bidi_label(text: &str, right_to_left: bool) -> gpui::AnyElement {
             .flex()
             .whitespace_nowrap()
             .overflow_hidden()
-            .children(chars.into_iter().map(|c| div().flex_none().child(c.to_string())))
+            .children(chars.into_iter().map(|piece| div().flex_none().child(piece)))
             .into_any_element(),
     }
 }
@@ -1662,10 +1692,23 @@ mod tests {
     fn labels_with_hebrew_are_split_per_character() {
         assert_eq!(label_parts("notes.md", true), None);
         assert_eq!(label_parts("Fix the build", false), None, "an ASCII title is one element");
+        assert_eq!(label_parts("Preview · plan.md", true), None, "non-ASCII without Hebrew stays one string");
+        assert_eq!(label_parts("fix \u{1F468}\u{200D}\u{1F469} \u{2014} it\u{2019}s \u{1F1EE}\u{1F1F1}", true), None);
         let text = "תוכנית.md";
-        let display: Vec<char> = app_core::bidi::display_line(text).unwrap().into_iter().map(|(_, c)| c).collect();
+        let display: Vec<String> =
+            app_core::bidi::display_line(text).unwrap().into_iter().map(|(_, c)| c.to_string()).collect();
         assert_eq!(label_parts(text, true), Some(display));
-        assert_eq!(label_parts(text, false), Some(text.chars().collect()));
+        assert_eq!(label_parts(text, false), Some(text.chars().map(String::from).collect()));
+    }
+
+    #[test]
+    fn combining_marks_stay_with_their_base() {
+        let text = "ש\u{05B8}לום";
+        let logical = label_parts(text, false).unwrap();
+        assert_eq!(logical, vec!["ש\u{05B8}", "ל", "ו", "ם"]);
+        let shown = label_parts(text, true).unwrap();
+        assert_eq!(shown.len(), 4);
+        assert_eq!(shown.last().unwrap(), "ש\u{05B8}", "the mark follows its letter to the right end");
     }
 
     #[test]

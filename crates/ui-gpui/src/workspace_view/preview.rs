@@ -29,6 +29,14 @@ use crate::preview_view::{
 };
 use crate::settings_store::SettingsStore;
 
+/// The undo bar's text for the files just closed: `Closed plan.md` or `Closed 3 files`.
+fn closed_label(files: &[SentFile]) -> String {
+    match files {
+        [one] => format!("Closed {}", file_name(&one.path)),
+        _ => format!("Closed {} files", files.len()),
+    }
+}
+
 /// What to send each host's daemon with `WatchSentFiles`: the hosts (among `connected`) whose wanted session list
 /// differs from the one `sent` last, with the new list (empty when the host lost its last preview). A `fresh` host
 /// (its session list just arrived, so possibly a daemon that still watches old sessions) always gets its list.
@@ -714,7 +722,8 @@ impl WorkspaceView {
 
     /// Hide file `id` from preview `leaf`'s list.
     pub(super) fn remove_file(&mut self, leaf: NodeId, id: &str, window: &Window, cx: &mut Context<Self>) {
-        self.workspace.remove_sent(leaf, id, self.sidebar.read(cx).sessions());
+        let closed = self.workspace.remove_sent(leaf, id, self.sidebar.read(cx).sessions());
+        self.offer_undo(leaf, closed, cx);
         self.save(cx);
         self.previews_in_view(window, cx);
         self.push_preview_models(cx);
@@ -737,9 +746,36 @@ impl WorkspaceView {
         cx.defer_in(window, |this, window, cx| this.flush_releases(window, cx));
     }
 
+    /// Keep what a close hid and show the pane's Undo bar for it; nothing hidden means no bar.
+    fn offer_undo(&mut self, leaf: NodeId, closed: Vec<SentFile>, cx: &mut Context<Self>) {
+        if closed.is_empty() {
+            return;
+        }
+        let label = closed_label(&closed);
+        self.preview_undo.insert(leaf, closed);
+        if let Some(slot) = self.previews.get(&leaf) {
+            slot.view.update(cx, |view, cx| view.show_undo(label, cx));
+        }
+    }
+
+    /// Bring back the files the last close of preview `leaf` hid.
+    fn undo_close(&mut self, leaf: NodeId, window: &Window, cx: &mut Context<Self>) {
+        let Some(files) = self.preview_undo.remove(&leaf) else { return };
+        if !self.workspace.reopen_sent(leaf, &files, self.sidebar.read(cx).sessions()) {
+            return;
+        }
+        self.save(cx);
+        self.mark_previews_seen(window, cx);
+        self.previews_in_view(window, cx);
+        self.push_preview_models(cx);
+        self.ask_previews(window, cx);
+        cx.defer_in(window, |this, window, cx| this.flush_releases(window, cx));
+    }
+
     /// Hide every file of preview `leaf`'s session.
     pub(super) fn clear_files(&mut self, leaf: NodeId, window: &Window, cx: &mut Context<Self>) {
-        self.workspace.clear_sent(leaf, self.sidebar.read(cx).sessions());
+        let closed = self.workspace.clear_sent(leaf, self.sidebar.read(cx).sessions());
+        self.offer_undo(leaf, closed, cx);
         self.save(cx);
         self.previews_in_view(window, cx);
         self.push_preview_models(cx);
@@ -1133,6 +1169,7 @@ impl WorkspaceView {
                     model.closed.iter().map(|(id, name, sent_ms)| listed(id, name, *sent_ms)).collect();
                 self.open_preview_menu(all_files_menu(leaf, &open, &closed), *position, window, cx);
             }
+            PreviewEvent::Undo => self.undo_close(leaf, window, cx),
             PreviewEvent::Reopen(id) => self.reopen_file(leaf, id, window, cx),
             PreviewEvent::OpenExternal => self.open_in_system_viewer(leaf, cx),
             PreviewEvent::Link(target) => self.follow_link(leaf, target, window, cx),
@@ -1160,6 +1197,16 @@ mod tests {
 
     fn host(name: &str) -> HostId {
         HostId::named(name)
+    }
+
+    fn file(path: &str) -> SentFile {
+        SentFile { id: path.into(), path: PathBuf::from(path), sent_ms: 0, caption: None, backlog: false }
+    }
+
+    #[test]
+    fn closed_label_names_one_file_and_counts_several() {
+        assert_eq!(closed_label(&[file("/a/plan.md")]), "Closed plan.md");
+        assert_eq!(closed_label(&[file("/a/x.md"), file("/a/y.md"), file("/a/z.md")]), "Closed 3 files");
     }
 
     fn want(entries: &[(&str, &[&str])]) -> BTreeMap<HostId, Vec<String>> {

@@ -181,6 +181,9 @@ pub(crate) struct PreviewModel {
     pub can_open: bool,
 }
 
+/// How long the Undo bar shows after a close.
+const UNDO_MS: u64 = 6_000;
+
 /// What the user did in the pane.
 pub(crate) enum PreviewEvent {
     /// A mouse press in the pane.
@@ -205,6 +208,8 @@ pub(crate) enum PreviewEvent {
     },
     /// Bring the closed file with this id back and show it.
     Reopen(String),
+    /// Bring back the files the last close hid (the Undo bar).
+    Undo,
     /// Open the active file in the system viewer.
     OpenExternal,
     /// The button on the host's card.
@@ -441,6 +446,10 @@ pub(crate) struct PreviewView {
     md_doc: Option<Arc<MdDoc>>,
     /// The code block whose Copy button shows `Copied`, with the timer that puts the label back.
     copied: Option<(usize, Task<()>)>,
+    /// The Undo bar: its text, the number of the close it belongs to and the timer that hides it.
+    undo: Option<(String, u64, Task<()>)>,
+    /// Counts the closes shown, so an old timer never hides a newer bar.
+    undo_gen: u64,
     /// The ⇄ toggle: the document's direction is flipped. Reset when the active file changes, kept on a reload.
     flipped: bool,
     /// The measured `char_px` with what it was measured for (UI scale bits, font family, size bits).
@@ -577,6 +586,8 @@ impl PreviewView {
             md_list: ListState::new(0, ListAlignment::Top, px(400.)),
             md_doc: None,
             copied: None,
+            undo: None,
+            undo_gen: 0,
             md_look: None,
             flipped: false,
             char_px_cache: None,
@@ -681,6 +692,56 @@ impl PreviewView {
         });
         self.copied = Some((block, timer));
         cx.notify();
+    }
+
+    /// Show the Undo bar with `label` for `UNDO_MS`; a newer close replaces it.
+    pub(crate) fn show_undo(&mut self, label: String, cx: &mut Context<Self>) {
+        self.undo_gen += 1;
+        let generation = self.undo_gen;
+        let timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(UNDO_MS)).await;
+            this.update(cx, |this, cx| {
+                if this.undo.as_ref().is_some_and(|(_, shown, _)| *shown == generation) {
+                    this.undo = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        });
+        self.undo = Some((label, generation, timer));
+        cx.notify();
+    }
+
+    /// Hide the Undo bar and ask the workspace to bring the files back.
+    fn undo_close(&mut self, cx: &mut Context<Self>) {
+        if self.undo.take().is_some() {
+            cx.emit(PreviewEvent::Undo);
+            cx.notify();
+        }
+    }
+
+    /// The Undo bar: what closed and an Undo button, bottom center above the text size bar.
+    fn undo_bar(&self, label: &str, has_text_size: bool, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let bottom = if has_text_size { 48. } else { 12. };
+        div().absolute().left_0().right_0().bottom(theme.ui(bottom)).flex().justify_center().child(
+            div()
+                .flex()
+                .items_center()
+                .gap(theme.ui(8.))
+                .pl(theme.ui(10.))
+                .p(theme.ui(3.))
+                .rounded(px(RADIUS_SMALL))
+                .bg(rgb(theme.tokens.raised))
+                .border_1()
+                .border_color(rgb(theme.tokens.line))
+                .text_xs()
+                .font_family(UI_FONT)
+                .text_color(rgb(theme.tokens.text))
+                .on_mouse_down(MouseButton::Left, cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()))
+                .on_mouse_down(MouseButton::Right, cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()))
+                .child(label.to_string())
+                .child(self.zoom_button("undo-close", "Undo", theme, cx, |this, cx| this.undo_close(cx))),
+        )
     }
 
     /// Measure the settings markdown rows depend on once per frame; a change remeasures the list, so the heights of
@@ -1848,6 +1909,7 @@ impl Render for PreviewView {
         let host_card = self.model.host_card.clone();
         let has_text_size =
             host_card.is_none() && matches!(self.model.content, Content::Markdown(_) | Content::Text { .. });
+        let undo_label = self.undo.as_ref().map(|(label, _, _)| label.clone());
         let body = match host_card {
             Some(card) => host_card_element(
                 card,
@@ -1871,6 +1933,9 @@ impl Render for PreviewView {
                         cx.emit(PreviewEvent::Remove(id));
                         cx.stop_propagation();
                     }
+                } else if key.key == "z" && key.modifiers == Modifiers::secondary_key() && this.undo.is_some() {
+                    this.undo_close(cx);
+                    cx.stop_propagation();
                 } else if key.key == "c"
                     && key.modifiers == Modifiers::secondary_key()
                     && let Some(text) = this.copy_selection()
@@ -1912,6 +1977,7 @@ impl Render for PreviewView {
                     .min_h_0()
                     .bg(rgb(theme.tokens.terminal))
                     .child(body)
+                    .when_some(undo_label, |pane, label| pane.child(self.undo_bar(&label, has_text_size, &theme, cx)))
                     .when(has_text_size, |pane| {
                         pane.child(self.text_size_wheel(cx)).child(self.text_size_bar(&theme, cx))
                     }),

@@ -325,6 +325,7 @@ impl WorkspaceView {
         self.slots.remove(&leaf);
         self.previews.remove(&leaf);
         self.preview_known.remove(&leaf);
+        self.preview_undo.remove(&leaf);
         self.preview_rows.remove(&leaf);
         self.release_unlisted_previews(cx);
         self.flush_releases(window, cx);

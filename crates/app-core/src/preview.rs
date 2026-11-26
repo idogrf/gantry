@@ -462,24 +462,18 @@ pub fn files_line(counts: FileCounts) -> String {
 pub struct TabFit {
     /// Indexes of the drawn tabs, ascending.
     pub shown: Vec<usize>,
-    /// Indexes under `+N`, ascending.
-    pub hidden: Vec<usize>,
 }
 
-/// Fit `count` tabs of width `tab` into `width`: all when they fit, else the newest that fit beside the `plus`
-/// button, with the active one replacing the oldest shown when it would be hidden.
-pub fn fit_tabs(count: usize, active: Option<usize>, width: f32, tab: f32, plus: f32) -> TabFit {
-    if count as f32 * tab <= width {
-        return TabFit { shown: (0..count).collect(), hidden: Vec::new() };
-    }
-    let room = (((width - plus) / tab).floor().max(0.0) as usize).max(1).min(count);
+/// Fit `count` tabs of width `tab` into `width` beside the `All files` button of width `button`: all when they fit,
+/// else the newest that fit, with the active one replacing the oldest shown when it would be hidden.
+pub fn fit_tabs(count: usize, active: Option<usize>, width: f32, tab: f32, button: f32) -> TabFit {
+    let room = (((width - button) / tab).floor().max(0.0) as usize).max(1).min(count);
     let mut shown: Vec<usize> = (count - room..count).collect();
     if let Some(a) = active.filter(|a| *a < count && !shown.contains(a)) {
         shown[0] = a;
         shown.sort_unstable();
     }
-    let hidden = (0..count).filter(|i| !shown.contains(i)).collect();
-    TabFit { shown, hidden }
+    TabFit { shown }
 }
 
 /// A path's last component.
@@ -791,15 +785,14 @@ mod tests {
 
     #[test]
     fn overflow_hides_the_oldest_and_keeps_the_active_tab() {
-        let t = fit_tabs(9, Some(8), 500., 160., 44.);
+        let t = fit_tabs(9, Some(8), 500., 160., 120.);
         assert_eq!(t.shown, [7, 8]);
-        assert_eq!(t.hidden, (0..=6).collect::<Vec<_>>());
-        let t = fit_tabs(9, Some(0), 500., 160., 44.);
+        let t = fit_tabs(9, Some(0), 500., 160., 120.);
         assert_eq!(t.shown, [0, 8]);
-        assert_eq!(t.hidden, (1..=7).collect::<Vec<_>>());
-        let t = fit_tabs(3, None, 500., 160., 44.);
-        assert_eq!(t.shown, [0, 1, 2]);
-        assert!(t.hidden.is_empty());
+        let t = fit_tabs(2, None, 500., 160., 120.);
+        assert_eq!(t.shown, [0, 1]);
+        let t = fit_tabs(3, None, 500., 160., 120.);
+        assert_eq!(t.shown, [1, 2], "the button's room is always kept");
     }
 
     #[test]

@@ -12,7 +12,7 @@ use app_core::preview::{
     is_read, kind_of, newly_sent, row_title,
 };
 use app_core::preview_reads::{FileKey, POLL, Shown};
-use app_core::session_tree::session_title;
+use app_core::session_tree::{age, session_title};
 use app_core::split_tree::{Axis, NodeId};
 use app_core::workspace::PreviewPlace;
 use gpui::{App, AppContext, ClipboardItem, Context, Task, Window};
@@ -25,10 +25,9 @@ use super::layout::start_rects;
 use super::{PreviewSlot, WorkspaceView};
 use crate::context_menu::OpenMenu;
 use crate::preview_view::{
-    Content, MAX_IMAGES_IN_VIEW, PreviewEvent, PreviewModel, PreviewTab, PreviewView, same_content,
+    Content, MAX_IMAGES_IN_VIEW, PreviewEvent, PreviewModel, PreviewTab, PreviewView, now_ms, same_content,
 };
 use crate::settings_store::SettingsStore;
-use crate::theme::theme;
 
 /// What to send each host's daemon with `WatchSentFiles`: the hosts (among `connected`) whose wanted session list
 /// differs from the one `sent` last, with the new list (empty when the host lost its last preview). A `fresh` host
@@ -73,6 +72,7 @@ fn same_model(a: &PreviewModel, b: &PreviewModel) -> bool {
         && same_content(&a.content, &b.content)
         && a.images.len() == b.images.len()
         && a.images.iter().all(|(path, x)| b.images.get(path).is_some_and(|y| same_content(x, y)))
+        && a.closed == b.closed
         && a.tabs.len() == b.tabs.len()
         && a.tabs.iter().zip(&b.tabs).all(|(x, y)| {
             (&x.id, &x.name, &x.path, &x.caption, x.unseen, x.sent_ms)
@@ -721,6 +721,22 @@ impl WorkspaceView {
         cx.defer_in(window, |this, window, cx| this.flush_releases(window, cx));
     }
 
+    /// Bring the closed file `id` of preview `leaf` back and show it.
+    pub(super) fn reopen_file(&mut self, leaf: NodeId, id: &str, window: &Window, cx: &mut Context<Self>) {
+        let sessions = self.sidebar.read(cx).sessions();
+        let files: Vec<SentFile> =
+            self.workspace.closed_files(leaf, sessions).into_iter().filter(|f| f.id == id).cloned().collect();
+        if !self.workspace.reopen_sent(leaf, &files, sessions) {
+            return;
+        }
+        self.save(cx);
+        self.mark_previews_seen(window, cx);
+        self.previews_in_view(window, cx);
+        self.push_preview_models(cx);
+        self.ask_previews(window, cx);
+        cx.defer_in(window, |this, window, cx| this.flush_releases(window, cx));
+    }
+
     /// Hide every file of preview `leaf`'s session.
     pub(super) fn clear_files(&mut self, leaf: NodeId, window: &Window, cx: &mut Context<Self>) {
         self.workspace.clear_sent(leaf, self.sidebar.read(cx).sessions());
@@ -902,6 +918,15 @@ impl WorkspaceView {
                 sent_ms: file.sent_ms,
             })
             .collect();
+        let closed = if holding {
+            Vec::new()
+        } else {
+            self.workspace
+                .closed_files(leaf, sessions)
+                .into_iter()
+                .map(|file| (file.id.clone(), file_name(&file.path), file.sent_ms))
+                .collect()
+        };
         let active = self.workspace.preview_active(leaf, sessions).map(|file| file.id.clone());
         let host = self.workspace.leaves.get(&leaf).map(|entry| entry.host.clone());
         let file = self.workspace.preview_active(leaf, sessions);
@@ -945,6 +970,7 @@ impl WorkspaceView {
             host: host.clone(),
             session,
             tabs,
+            closed,
             active,
             content,
             images,
@@ -1096,12 +1122,18 @@ impl WorkspaceView {
                     cx,
                 );
             }
-            PreviewEvent::Hidden { position } => {
+            PreviewEvent::AllFiles { position } => {
                 let Some(slot) = self.previews.get(&leaf) else { return };
-                let files = slot.view.read(cx).hidden_tabs(theme(cx));
-                let open: Vec<_> = files.into_iter().map(|(id, name)| (id, name, String::new())).collect();
-                self.open_preview_menu(all_files_menu(leaf, &open, &[]), *position, window, cx);
+                let (now, model) = (now_ms(), slot.view.read(cx).model());
+                let listed = |id: &String, name: &String, sent_ms: u64| (id.clone(), name.clone(), age(now, sent_ms));
+                let mut open: Vec<_> = model.tabs.iter().map(|tab| (&tab.id, &tab.name, tab.sent_ms)).collect();
+                open.sort_by_key(|(_, _, sent_ms)| std::cmp::Reverse(*sent_ms));
+                let open: Vec<_> = open.into_iter().map(|(id, name, sent_ms)| listed(id, name, sent_ms)).collect();
+                let closed: Vec<_> =
+                    model.closed.iter().map(|(id, name, sent_ms)| listed(id, name, *sent_ms)).collect();
+                self.open_preview_menu(all_files_menu(leaf, &open, &closed), *position, window, cx);
             }
+            PreviewEvent::Reopen(id) => self.reopen_file(leaf, id, window, cx),
             PreviewEvent::OpenExternal => self.open_in_system_viewer(leaf, cx),
             PreviewEvent::Link(target) => self.follow_link(leaf, target, window, cx),
             PreviewEvent::ImagesInView => {
@@ -1183,6 +1215,7 @@ mod tests {
             holding: false,
             host: None,
             session: None,
+            closed: Vec::new(),
             tabs: vec![PreviewTab {
                 id: "a".into(),
                 name: "a.md".into(),

@@ -55,6 +55,9 @@ pub(crate) const EYE_ICON: &str = "icons/eye.svg";
 /// A file tab's icon (a page with a folded corner), drawn by `preview_view`.
 pub(crate) const FILE_ICON: &str = "icons/file.svg";
 
+/// The `All files` button's icon (a bulleted list), drawn by `preview_view`.
+pub(crate) const LIST_ICON: &str = "icons/list.svg";
+
 /// The Open in system viewer button's icon (an arrow leaving a box), drawn by `preview_view`.
 pub(crate) const OPEN_EXTERNAL_ICON: &str = "icons/open-external.svg";
 
@@ -94,6 +97,7 @@ impl AssetSource for Assets {
             RESET_ICON => Some(include_bytes!("../assets/icons/reset.svg")),
             EYE_ICON => Some(include_bytes!("../assets/icons/eye.svg")),
             FILE_ICON => Some(include_bytes!("../assets/icons/file.svg")),
+            LIST_ICON => Some(include_bytes!("../assets/icons/list.svg")),
             OPEN_EXTERNAL_ICON => Some(include_bytes!("../assets/icons/open-external.svg")),
             COPY_ICON => Some(include_bytes!("../assets/icons/copy.svg")),
             DIRECTION_ICON => Some(include_bytes!("../assets/icons/direction.svg")),

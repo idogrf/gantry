@@ -7,11 +7,12 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use app_core::host_state::HostCard;
 use app_core::preview::{FileKind, TEXT_SIZE_DEFAULT, TabFit, TextDoc, file_name, fit_tabs, kind_of, text_size_step};
 use app_core::preview_zoom::{STEP, WHEEL_STEP_PX, Zoom, wheel_factor};
+use app_core::session_tree::age;
 use app_core::split_tree::NodeId;
 use app_core::workspace::DropFile;
 use gpui::{
@@ -24,7 +25,7 @@ use preview_doc::markdown::{DocImage, ImageSrc, LinkTarget, MdDoc, RowKind};
 use protocol::host::HostId;
 use protocol::message::SentFile;
 
-use crate::assets::{CLOSE_ICON, DIRECTION_ICON, EYE_ICON, FILE_ICON, OPEN_EXTERNAL_ICON};
+use crate::assets::{CLOSE_ICON, DIRECTION_ICON, EYE_ICON, FILE_ICON, LIST_ICON, OPEN_EXTERNAL_ICON};
 use crate::git_diff_view::size_text;
 use crate::hover_card::{self, HoverCard};
 use crate::pane_drag::{DraggedFile, DraggedPane};
@@ -37,8 +38,8 @@ use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, theme};
 
 /// The width of a file tab, in UI px.
 pub(crate) const TAB_WIDTH: f32 = 160.0;
-/// The width of the `+N` button, in UI px.
-pub(crate) const PLUS_WIDTH: f32 = 44.0;
+/// The width of the `All files` button, in UI px.
+pub(crate) const ALL_FILES_WIDTH: f32 = 120.0;
 
 /// The most images of a markdown document read and decoded at once (those of the rows being drawn).
 pub(crate) const MAX_IMAGES_IN_VIEW: usize = 12;
@@ -166,6 +167,8 @@ pub(crate) struct PreviewModel {
     pub session: Option<String>,
     /// The file tabs, oldest first.
     pub tabs: Vec<PreviewTab>,
+    /// The session's closed files, newest first, as `(id, name, sent_ms)`.
+    pub closed: Vec<(String, String, u64)>,
     /// The active tab's id.
     pub active: Option<String>,
     /// The active file's body.
@@ -195,11 +198,13 @@ pub(crate) enum PreviewEvent {
         /// The file's id.
         file: Option<String>,
     },
-    /// The `+N` button: the hidden tabs.
-    Hidden {
+    /// The `All files` button: the list of open and closed files.
+    AllFiles {
         /// Where the button was pressed.
         position: Point<Pixels>,
     },
+    /// Bring the closed file with this id back and show it.
+    Reopen(String),
     /// Open the active file in the system viewer.
     OpenExternal,
     /// The button on the host's card.
@@ -285,6 +290,22 @@ fn display_range(doc: &TextDoc, line: usize, raw: Range<usize>) -> Range<usize> 
         low
     };
     first_at(raw.start)..first_at(raw.end)
+}
+
+/// The `All files` button's text for `count` files, open and closed.
+fn files_count_label(count: usize) -> String {
+    format!("All files ({count})")
+}
+
+/// The empty preview's line about the session's closed files.
+fn closed_files_line(count: usize) -> String {
+    let files = if count == 1 { "1 file".to_string() } else { format!("{count} files") };
+    format!("This session sent {files}. Pick one to show it again.")
+}
+
+/// Milliseconds since the Unix epoch (the clock of `SentFile::sent_ms`).
+pub(crate) fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 /// How long a pane may go undrawn before a drag scroll takes it for hidden (one late frame is not that).
@@ -533,6 +554,7 @@ impl PreviewView {
                 host: None,
                 session: None,
                 tabs: Vec::new(),
+                closed: Vec::new(),
                 active: None,
                 content: Content::NoFiles,
                 images: HashMap::new(),
@@ -1397,7 +1419,7 @@ impl PreviewView {
             )
     }
 
-    /// Which tabs fit the row and which are behind the `+N` button.
+    /// Which tabs fit the row beside the `All files` button.
     fn tab_fit(&self, theme: &Theme) -> TabFit {
         let active_index = self.model.active.as_ref().and_then(|id| self.model.tabs.iter().position(|t| &t.id == id));
         fit_tabs(
@@ -1405,18 +1427,8 @@ impl PreviewView {
             active_index,
             self.row_width,
             f32::from(theme.ui(TAB_WIDTH)),
-            f32::from(theme.ui(PLUS_WIDTH)),
+            f32::from(theme.ui(ALL_FILES_WIDTH)),
         )
-    }
-
-    /// The tabs behind the `+N` button as `(id, name)`.
-    pub(crate) fn hidden_tabs(&self, theme: &Theme) -> Vec<(String, String)> {
-        let fit = self.tab_fit(theme);
-        fit.hidden
-            .iter()
-            .filter_map(|&i| self.model.tabs.get(i))
-            .map(|tab| (tab.id.clone(), tab.name.clone()))
-            .collect()
     }
 
     fn tab_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1560,31 +1572,32 @@ impl PreviewView {
                         }),
                     )
             }))
-            .when(!fit.hidden.is_empty(), |row| {
-                row.child(
-                    div()
-                        .id("preview-hidden")
-                        .flex_none()
-                        .w(theme.ui(PLUS_WIDTH))
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_xs()
-                        .text_color(rgb(theme.tokens.muted))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(theme.tokens.surface)))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|_, event: &MouseDownEvent, _, cx| {
-                                cx.emit(PreviewEvent::Focused);
-                                cx.emit(PreviewEvent::Hidden { position: event.position });
-                                cx.stop_propagation();
-                            }),
-                        )
-                        .child(format!("+{}", fit.hidden.len())),
-                )
-            })
+            .child(
+                div()
+                    .id("preview-all-files")
+                    .flex_none()
+                    .ml_auto()
+                    .w(theme.ui(ALL_FILES_WIDTH))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(theme.ui(4.))
+                    .text_xs()
+                    .text_color(rgb(theme.tokens.muted))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme.tokens.surface)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, event: &MouseDownEvent, _, cx| {
+                            cx.emit(PreviewEvent::Focused);
+                            cx.emit(PreviewEvent::AllFiles { position: event.position });
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(svg().path(LIST_ICON).flex_none().size(theme.ui(12.)).text_color(rgb(theme.tokens.muted)))
+                    .child(files_count_label(self.model.tabs.len() + self.model.closed.len())),
+            )
     }
 
     /// The visible lines of a text file.
@@ -1662,8 +1675,51 @@ impl PreviewView {
             centered(all)
         };
         match &self.model.content {
-            Content::NoFiles => {
+            Content::NoFiles if self.model.closed.is_empty() => {
                 div().size_full().flex().items_center().justify_center().child(muted("No files yet")).into_any_element()
+            }
+            Content::NoFiles => {
+                let now = now_ms();
+                let rows = self.model.closed.iter().enumerate().map(|(index, (id, file, sent_ms))| {
+                    let id = id.clone();
+                    div()
+                        .id(("preview-closed", index))
+                        .w_full()
+                        .px_3()
+                        .py_1()
+                        .flex()
+                        .items_center()
+                        .gap_4()
+                        .rounded(px(RADIUS_SMALL))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(theme.tokens.surface)))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(PreviewEvent::Focused);
+                            cx.emit(PreviewEvent::Reopen(id.clone()));
+                        }))
+                        .child(
+                            svg().path(FILE_ICON).flex_none().size(theme.ui(13.)).text_color(rgb(theme.tokens.muted)),
+                        )
+                        .child(div().flex_1().truncate().child(bidi_label(file, label_rtl)))
+                        .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(age(now, *sent_ms)))
+                });
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(theme.ui(8.))
+                    .p(theme.ui(16.))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("No open files"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(theme.tokens.muted))
+                            .child(closed_files_line(self.model.closed.len())),
+                    )
+                    .child(div().w_full().max_w(theme.ui(360.)).flex().flex_col().children(rows))
+                    .into_any_element()
             }
             Content::Loading => div().size_full().into_any_element(),
             Content::Markdown(_) => {
@@ -1892,6 +1948,18 @@ mod tests {
             app_core::bidi::display_line(text).unwrap().into_iter().map(|(_, c)| c.to_string()).collect();
         assert_eq!(label_parts(text, true), Some(display));
         assert_eq!(label_parts(text, false), Some(text.chars().map(String::from).collect()));
+    }
+
+    #[test]
+    fn the_all_files_button_counts_open_and_closed_files() {
+        assert_eq!(files_count_label(0), "All files (0)");
+        assert_eq!(files_count_label(3), "All files (3)");
+    }
+
+    #[test]
+    fn the_empty_preview_says_how_many_files_the_session_sent() {
+        assert_eq!(closed_files_line(1), "This session sent 1 file. Pick one to show it again.");
+        assert_eq!(closed_files_line(4), "This session sent 4 files. Pick one to show it again.");
     }
 
     #[test]

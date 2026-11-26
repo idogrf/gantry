@@ -52,7 +52,7 @@ fn watch_changes(
 
 /// Whether two models draw the same thing, so the view need not be given the new one.
 fn same_model(a: &PreviewModel, b: &PreviewModel) -> bool {
-    a.title == b.title
+    (&a.title, a.holding, &a.host, &a.session) == (&b.title, b.holding, &b.host, &b.session)
         && a.active == b.active
         && a.host_card == b.host_card
         && a.can_open == b.can_open
@@ -61,7 +61,8 @@ fn same_model(a: &PreviewModel, b: &PreviewModel) -> bool {
         && a.images.iter().all(|(path, x)| b.images.get(path).is_some_and(|y| same_content(x, y)))
         && a.tabs.len() == b.tabs.len()
         && a.tabs.iter().zip(&b.tabs).all(|(x, y)| {
-            (&x.id, &x.name, &x.path, &x.caption, x.unseen) == (&y.id, &y.name, &y.path, &y.caption, y.unseen)
+            (&x.id, &x.name, &x.path, &x.caption, x.unseen, x.sent_ms)
+                == (&y.id, &y.name, &y.path, &y.caption, y.unseen, y.sent_ms)
         })
 }
 
@@ -833,10 +834,13 @@ impl WorkspaceView {
         let sessions = self.sidebar.read(cx).sessions();
         let info = self.workspace.preview_session(leaf).and_then(|(host, id)| sessions.get(host, id));
         let seen_in = info.map(|info| info.id.as_str());
+        let holding = self.workspace.is_holding(leaf);
+        // A holding pane holds one file: no tab row.
         let tabs: Vec<PreviewTab> = self
             .workspace
             .preview_files(leaf, sessions)
             .into_iter()
+            .filter(|_| !holding)
             .map(|file| PreviewTab {
                 id: file.id.clone(),
                 name: file_name(&file.path),
@@ -844,6 +848,7 @@ impl WorkspaceView {
                 caption: file.caption.clone(),
                 unseen: tracks_seen(&file.id)
                     && !seen_in.is_some_and(|session| self.workspace.is_seen(session, &file.id)),
+                sent_ms: file.sent_ms,
             })
             .collect();
         let active = self.workspace.preview_active(leaf, sessions).map(|file| file.id.clone());
@@ -878,8 +883,15 @@ impl WorkspaceView {
             }
             _ => false,
         };
+        let title = match (holding, file) {
+            (true, Some(file)) => file_name(&file.path),
+            _ => info.map(|info| session_title(info).to_string()).unwrap_or_default(),
+        };
         PreviewModel {
-            title: info.map(|info| session_title(info).to_string()).unwrap_or_default(),
+            title,
+            holding,
+            host: host.clone(),
+            session: info.map(|info| info.id.clone()),
             tabs,
             active,
             content,
@@ -1093,12 +1105,16 @@ mod tests {
     fn model() -> PreviewModel {
         PreviewModel {
             title: String::new(),
+            holding: false,
+            host: None,
+            session: None,
             tabs: vec![PreviewTab {
                 id: "a".into(),
                 name: "a.md".into(),
                 path: "/r/a.md".into(),
                 caption: None,
                 unseen: true,
+                sent_ms: 1,
             }],
             active: Some("a".into()),
             content: Content::Loading,
@@ -1106,6 +1122,19 @@ mod tests {
             host_card: None,
             can_open: false,
         }
+    }
+
+    #[test]
+    fn models_differ_by_mode() {
+        let mut changed = model();
+        changed.holding = true;
+        assert!(!same_model(&model(), &changed));
+        let mut changed = model();
+        changed.session = Some("s".into());
+        assert!(!same_model(&model(), &changed));
+        let mut changed = model();
+        changed.host = Some(host("box"));
+        assert!(!same_model(&model(), &changed));
     }
 
     #[test]

@@ -20,6 +20,7 @@ use gpui::{
     UniformListScrollHandle, Window, canvas, div, img, list, point, prelude::*, px, rgb, svg, uniform_list,
 };
 use preview_doc::markdown::{DocImage, ImageSrc, LinkTarget, MdDoc, RowKind};
+use protocol::host::HostId;
 
 use crate::assets::{CLOSE_ICON, DIRECTION_ICON, EYE_ICON, FILE_ICON, OPEN_EXTERNAL_ICON};
 use crate::git_diff_view::size_text;
@@ -52,6 +53,18 @@ pub(crate) struct PreviewTab {
     pub caption: Option<String>,
     /// A new file the user has not looked at yet.
     pub unseen: bool,
+    /// When Claude sent it, ms since the Unix epoch.
+    pub sent_ms: u64,
+}
+
+/// The header's label and tag: a holding pane shows the file's name and `Holds this file`, a following one
+/// `Preview · <session title>` (`Preview` while the title is empty) and `Follows session`.
+pub(crate) fn header_text(holding: bool, title: &str) -> (String, &'static str) {
+    match (holding, title.is_empty()) {
+        (true, _) => (title.to_string(), "Holds this file"),
+        (false, true) => ("Preview".to_string(), "Follows session"),
+        (false, false) => (format!("Preview · {title}"), "Follows session"),
+    }
 }
 
 /// What the body shows for the active file.
@@ -140,8 +153,15 @@ pub(crate) fn same_content(a: &Content, b: &Content) -> bool {
 
 /// Everything the view draws.
 pub(crate) struct PreviewModel {
-    /// The followed session's bare title; the header reads `Preview · <title>`, or `Preview` while it is empty.
+    /// The followed session's bare title; the header reads `Preview · <title>`, or `Preview` while it is empty. A
+    /// holding pane's is the held file's name.
     pub title: String,
+    /// Whether the pane holds one dropped file (no tab row, no session) instead of following a session.
+    pub holding: bool,
+    /// The leaf's host.
+    pub host: Option<HostId>,
+    /// The followed session's id; `None` for a holding pane.
+    pub session: Option<String>,
     /// The file tabs, oldest first.
     pub tabs: Vec<PreviewTab>,
     /// The active tab's id.
@@ -444,6 +464,9 @@ impl PreviewView {
             focus_handle: cx.focus_handle(),
             model: PreviewModel {
                 title: String::new(),
+                holding: false,
+                host: None,
+                session: None,
                 tabs: Vec::new(),
                 active: None,
                 content: Content::NoFiles,
@@ -1101,11 +1124,8 @@ impl PreviewView {
     fn header(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let label_rtl = cx.global::<SettingsStore>().settings().window.right_to_left;
         let leaf = self.leaf;
-        let title = if self.model.title.is_empty() {
-            "Preview".to_string()
-        } else {
-            format!("Preview · {}", self.model.title)
-        };
+        let holding = self.model.holding;
+        let (title, tag) = header_text(holding, &self.model.title);
         let can_open = self.model.can_open;
         let can_flip = matches!(self.model.content, Content::Markdown(_))
             && cx.global::<SettingsStore>().settings().window.right_to_left;
@@ -1145,10 +1165,12 @@ impl PreviewView {
                     .min_w_0()
                     .flex()
                     .truncate()
-                    .child(if self.model.title.is_empty() {
-                        div().child("Preview")
-                    } else {
-                        div().flex_none().mr(theme.ui(4.)).child("Preview ·")
+                    .when(!holding, |label| {
+                        label.child(if self.model.title.is_empty() {
+                            div().child("Preview")
+                        } else {
+                            div().flex_none().mr(theme.ui(4.)).child("Preview ·")
+                        })
                     })
                     .child(bidi_label(&self.model.title, label_rtl)),
             )
@@ -1161,7 +1183,7 @@ impl PreviewView {
                     .border_color(rgb(theme.tokens.line))
                     .text_color(rgb(theme.tokens.muted))
                     .font_weight(FontWeight::NORMAL)
-                    .child("Follows session"),
+                    .child(tag),
             )
             .child(div().flex_1())
             .when(can_flip, |header| {
@@ -1601,6 +1623,13 @@ impl Render for PreviewView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn header_text_depends_on_the_mode() {
+        assert_eq!(header_text(true, "plan.md"), ("plan.md".to_string(), "Holds this file"));
+        assert_eq!(header_text(false, "api"), ("Preview · api".to_string(), "Follows session"));
+        assert_eq!(header_text(false, ""), ("Preview".to_string(), "Follows session"));
+    }
+
     use super::*;
 
     #[test]

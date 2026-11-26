@@ -48,8 +48,6 @@ impl WorkspaceView {
             )
         });
         let group = format!("pane-card-{index}");
-        let items = self.items_button_of(leaf, ("items-pane", index), false, theme, cx);
-        let has_items = items.is_some();
         let can_split = self.workspace.can_split();
         let button = |axis: Axis, label: &'static str, shortcut: &'static str, icon: &'static str| {
             let platform = Platform::current();
@@ -116,8 +114,6 @@ impl WorkspaceView {
             .bg(rgba((theme.tokens.terminal << 8) | 0xb3))
             .opacity(if focused || popup_open { 1. } else { 0. })
             .group_hover(group, |style| style.opacity(1.))
-            .children(items)
-            .children(has_items.then(|| div().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.line)).self_center()))
             .child(button(Axis::Horizontal, "Split right", "splitRightClaude", SPLIT_RIGHT_ICON))
             .child(button(Axis::Vertical, "Split down", "splitDownClaude", SPLIT_DOWN_ICON))
             .child(div().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.line)).self_center())
@@ -145,8 +141,8 @@ impl WorkspaceView {
             )
     }
 
-    /// The Items button of `leaf` (title bar size when `title_bar`, else the pane corner's), or none when
-    /// `items_state` has none. A click opens or closes the preview of its Claude pane.
+    /// The Items button of `leaf` (the `Files` chip when `title_bar`, else the icon alone for a pane header), or none
+    /// when `items_state` has none. A click opens or closes the preview of its Claude pane.
     pub(super) fn items_button_of(
         &self,
         leaf: NodeId,
@@ -164,12 +160,12 @@ impl WorkspaceView {
             Some(keystroke) => format!("Open preview ({})", shortcuts::label(Some(&keystroke), platform)),
             None => "Open preview".to_string(),
         };
-        let (frame, icon) = if title_bar { (26., 15.) } else { (22., 14.) };
+        let look = if title_bar { ItemsLook::Chip } else { ItemsLook::Icon };
         Some(items_button_element(
             id,
             state,
             title,
-            (theme.ui(frame), theme.ui(icon)),
+            look,
             theme,
             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                 this.toggle_preview_for(claude, window, cx);
@@ -425,6 +421,7 @@ impl WorkspaceView {
                 let project = self.leaf_project_color(leaf, cx);
                 let marker = self.workspace.leaf_color(leaf).map(|tint| tint.value(theme.preset));
                 let git_chip = self.git_chip_of(leaf, ("git-chip-pane", index), &theme, cx);
+                let items_button = self.items_button_of(leaf, ("items-pane", index), false, &theme, cx);
                 let folder = self
                     .workspace
                     .leaves
@@ -496,8 +493,22 @@ impl WorkspaceView {
                                     content
                                         .when(multiple && preview.is_none(), |pane| {
                                             pane.child(pane_header(
-                                                index, leaf, title, status, unseen, offline, animate, container, host,
-                                                dir, folder, project, marker, git_chip, &theme,
+                                                index,
+                                                leaf,
+                                                title,
+                                                status,
+                                                unseen,
+                                                offline,
+                                                animate,
+                                                container,
+                                                host,
+                                                dir,
+                                                folder,
+                                                project,
+                                                marker,
+                                                items_button,
+                                                git_chip,
+                                                &theme,
                                             ))
                                         })
                                         .when_some(last_prompt, |pane, text| {
@@ -617,6 +628,7 @@ fn pane_header(
     folder: Option<String>,
     project: Option<u32>,
     marker: Option<u32>,
+    items_button: Option<gpui::Stateful<Div>>,
     git_chip: Option<gpui::Stateful<Div>>,
     theme: &Theme,
 ) -> impl IntoElement {
@@ -662,6 +674,7 @@ fn pane_header(
         })
         .children(pin)
         .child(div().flex_1().min_w_0().truncate().child(title))
+        .children(items_button)
         .children(git_chip)
         .when(container, |header| {
             header.child(container_icon(colors.map_or(theme.tokens.text, |colors| colors.ink), theme))
@@ -672,14 +685,23 @@ fn pane_header(
         .children(dir.map(|badge| dir_badge(&badge, theme)))
 }
 
-/// The Items button: the file icon in a `frame` box with `icon` size. Lit (accent border and tint) while the preview
+/// How the Items button is drawn.
+#[derive(Clone, Copy)]
+pub(super) enum ItemsLook {
+    /// The icon alone in a square box (the pane header).
+    Icon,
+    /// The icon and the word `Files` in the git chip's look (the title bar).
+    Chip,
+}
+
+/// The Items button: the file icon, with the word `Files` for [`ItemsLook::Chip`]. Lit (accent border and tint) while the preview
 /// is open; dimmed and inert when `state.enabled` is false; a dot at the top right when `state.dot`. `on_down` runs
 /// on a left press of an enabled button.
 pub(super) fn items_button_element(
     id: impl Into<gpui::ElementId>,
     state: ItemsButton,
     title: String,
-    (frame, icon): (Pixels, Pixels),
+    look: ItemsLook,
     theme: &Theme,
     on_down: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<Div> {
@@ -690,27 +712,36 @@ pub(super) fn items_button_element(
         .id(id)
         .relative()
         .flex_none()
-        .size(frame)
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(RADIUS_SMALL - 2.))
         .border_1()
-        .border_color(if state.lit { rgb(accent) } else { rgba(0) })
         .when(state.lit, |button| button.bg(rgba((accent << 8) | 0x24)))
-        .tooltip(hover_card::tooltip(card))
-        .child(svg().path(FILE_ICON).size(icon).text_color(rgb(if state.lit { accent } else { theme.tokens.muted })))
-        .when(state.dot, |button| {
-            button.child(
-                div()
-                    .absolute()
-                    .top(theme.ui(1.))
-                    .right(theme.ui(1.))
-                    .size(theme.ui(7.))
-                    .rounded_full()
-                    .bg(rgb(accent)),
-            )
-        });
+        .tooltip(hover_card::tooltip(card));
+    let ink = if state.lit { accent } else { theme.tokens.muted };
+    let button = match look {
+        ItemsLook::Icon => button
+            .size(theme.ui(22.))
+            .rounded(px(RADIUS_SMALL - 2.))
+            .border_color(if state.lit { rgb(accent) } else { rgba(0) })
+            .child(svg().path(FILE_ICON).size(theme.ui(14.)).text_color(rgb(ink))),
+        ItemsLook::Chip => button
+            .h(theme.ui(20.))
+            .px(theme.ui(8.))
+            .gap(theme.ui(5.))
+            .rounded(px(RADIUS_SMALL))
+            .border_color(if state.lit { rgb(accent) } else { rgb(theme.tokens.line) })
+            .text_xs()
+            .font_weight(FontWeight::NORMAL)
+            .text_color(rgb(if state.lit { accent } else { theme.tokens.text }))
+            .child(svg().path(FILE_ICON).flex_none().size(theme.ui(12.)).text_color(rgb(ink)))
+            .child("Files"),
+    };
+    let button = button.when(state.dot, |button| {
+        button.child(
+            div().absolute().top(theme.ui(1.)).right(theme.ui(1.)).size(theme.ui(7.)).rounded_full().bg(rgb(accent)),
+        )
+    });
     if state.enabled {
         button
             .cursor_pointer()

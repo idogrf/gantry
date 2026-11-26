@@ -412,6 +412,8 @@ pub(crate) struct PreviewView {
     viewport: Bounds<Pixels>,
     /// The last pointer position of a drag that pans the image.
     panning: Option<Point<Pixels>>,
+    /// The file tab a middle press started on; the release on the same tab removes it.
+    middle_pressed: Option<String>,
     /// The markdown document's rows.
     md_list: ListState,
     /// The document `md_list` was reset for.
@@ -514,6 +516,11 @@ impl Focusable for PreviewView {
     }
 }
 
+/// The tab id a middle release removes: the press must have been on the same tab.
+fn middle_release(pressed: Option<String>, released: &str) -> Option<String> {
+    pressed.filter(|id| id == released)
+}
+
 impl PreviewView {
     /// An empty preview pane for `leaf`.
     pub(crate) fn new(leaf: NodeId, cx: &mut Context<Self>) -> Self {
@@ -544,6 +551,7 @@ impl PreviewView {
             zoom: None,
             viewport: Bounds::default(),
             panning: None,
+            middle_pressed: None,
             md_list: ListState::new(0, ListAlignment::Top, px(400.)),
             md_doc: None,
             copied: None,
@@ -1441,6 +1449,7 @@ impl PreviewView {
                 let active = self.model.active.as_deref() == Some(tab.id.as_str());
                 let group = SharedString::from(format!("preview-tab-{}", tab.id));
                 let (activate, remove, menu) = (tab.id.clone(), tab.id.clone(), tab.id.clone());
+                let (middle_down, middle_up) = (tab.id.clone(), tab.id.clone());
                 let card = HoverCard {
                     title: tab.name.clone(),
                     status: tab.caption.clone(),
@@ -1521,6 +1530,24 @@ impl PreviewView {
                     )
                     .tooltip(hover_card::tooltip(card))
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(PreviewEvent::Activate(activate.clone()))))
+                    // A middle click removes the tab, like its x (press and release on the same tab).
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _, _, cx| {
+                            this.middle_pressed = Some(middle_down.clone());
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(id) = middle_release(this.middle_pressed.take(), &middle_up) {
+                                cx.emit(PreviewEvent::Focused);
+                                cx.emit(PreviewEvent::Remove(id));
+                            }
+                        }),
+                    )
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |_, event: &MouseDownEvent, _, cx| {
@@ -1811,6 +1838,11 @@ impl Render for PreviewView {
             )
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
+            .on_mouse_up(MouseButton::Middle, cx.listener(|this, _: &MouseUpEvent, _, _| this.middle_pressed = None))
+            .on_mouse_up_out(
+                MouseButton::Middle,
+                cx.listener(|this, _: &MouseUpEvent, _, _| this.middle_pressed = None),
+            )
             .child(self.header(&theme, cx))
             .when(!self.model.tabs.is_empty(), |pane| pane.child(self.tab_row(&theme, cx)))
             .child(
@@ -1830,6 +1862,13 @@ impl Render for PreviewView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn middle_release_needs_the_same_tab() {
+        assert_eq!(middle_release(Some("a".into()), "a"), Some("a".to_string()));
+        assert_eq!(middle_release(Some("a".into()), "b"), None);
+        assert_eq!(middle_release(None, "a"), None);
+    }
 
     #[test]
     fn header_text_depends_on_the_mode() {

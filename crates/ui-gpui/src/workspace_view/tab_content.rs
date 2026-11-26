@@ -21,7 +21,7 @@ use crate::assets::{CLOSE_ICON, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
 use crate::context_menu::OpenMenu;
 use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{FolderRow, star};
-use crate::pane_drag::DraggedPane;
+use crate::pane_drag::{DraggedFile, DraggedPane};
 use crate::settings_store::SettingsStore;
 use crate::theme::{
     RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, container_icon, dir_badge, pane_marker, pin_icon, side_line, ssh_icon,
@@ -401,6 +401,12 @@ impl WorkspaceView {
                         }))
                         .on_drop(cx.listener(move |this, dragged: &DraggedPane, window, cx| {
                             this.drop_pane(dragged.leaf, leaf, window, cx)
+                        }))
+                        .on_drag_move(cx.listener(move |this, event: &DragMoveEvent<DraggedFile>, _, cx| {
+                            this.drag_file_over_pane(leaf, event, cx)
+                        }))
+                        .on_drop(cx.listener(move |this, dragged: &DraggedFile, window, cx| {
+                            this.drop_file(&dragged.file, leaf, window, cx)
                         }))
                 });
                 // The entering pane keeps its final size and moves; every other pane's card follows its drawn rectangle.

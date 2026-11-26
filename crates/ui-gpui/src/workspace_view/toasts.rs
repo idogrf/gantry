@@ -8,13 +8,15 @@ use app_core::preview::file_name;
 use app_core::session_tree::{Tone, session_title};
 use app_core::split_tree::NodeId;
 use app_core::toasts::{FADE_OUT_MS, Toast};
+use app_core::workspace::DropFile;
 use gpui::{
-    Animation, AnimationExt, AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, rgb, svg,
+    Animation, AnimationExt, AnyElement, App, AppContext, Context, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, rgb, svg,
 };
 
 use super::WorkspaceView;
 use crate::assets::{CLOSE_ICON, FILE_ICON};
+use crate::pane_drag::DraggedFile;
 use crate::preview_view::bidi_label;
 use crate::settings_store::SettingsStore;
 use crate::theme::{FadeKind, RADIUS, RADIUS_SMALL, Theme, fade_in};
@@ -227,6 +229,13 @@ impl WorkspaceView {
     ) -> AnyElement {
         let id = toast.id;
         let is_file = matches!(toast.kind, AlertKind::FileSent { .. });
+        let dragged = match &toast.kind {
+            AlertKind::FileSent { files } => files.last().map(|file| DraggedFile {
+                file: DropFile { host: toast.host.clone(), session: Some(toast.session.clone()), file: file.clone() },
+                name: file_name(&file.path),
+            }),
+            _ => None,
+        };
         let button = |name: &'static str, label: &'static str, primary: bool, click: Click| {
             div()
                 .id((name, id))
@@ -262,6 +271,12 @@ impl WorkspaceView {
             .bg(rgb(theme.tokens.raised))
             .text_color(rgb(theme.tokens.text))
             .cursor_pointer()
+            // A File sent card drags its newest file (a copy: the card stays).
+            .when_some(dragged, |card, dragged| {
+                card.on_drag(dragged, |dragged: &DraggedFile, _offset, _window, cx: &mut App| {
+                    cx.new(|_| dragged.clone())
+                })
+            })
             .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
                 let now = this.now_ms();
                 this.toasts.set_hovered(id, *hovered, now);

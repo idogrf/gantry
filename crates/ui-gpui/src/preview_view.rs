@@ -13,6 +13,7 @@ use app_core::host_state::HostCard;
 use app_core::preview::{FileKind, TabFit, TextDoc, file_name, fit_tabs, kind_of};
 use app_core::preview_zoom::{STEP, WHEEL_STEP_PX, Zoom, wheel_factor};
 use app_core::split_tree::NodeId;
+use app_core::workspace::DropFile;
 use gpui::{
     App, Bounds, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, ListAlignment,
     ListHorizontalSizingBehavior, ListOffset, ListState, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -21,11 +22,12 @@ use gpui::{
 };
 use preview_doc::markdown::{DocImage, ImageSrc, LinkTarget, MdDoc, RowKind};
 use protocol::host::HostId;
+use protocol::message::SentFile;
 
 use crate::assets::{CLOSE_ICON, DIRECTION_ICON, EYE_ICON, FILE_ICON, OPEN_EXTERNAL_ICON};
 use crate::git_diff_view::size_text;
 use crate::hover_card::{self, HoverCard};
-use crate::pane_drag::DraggedPane;
+use crate::pane_drag::{DraggedFile, DraggedPane};
 use crate::preview_markdown::{
     self, Gesture, Interact, RowState, Unit, code_line, display_spans, doc_rtl, drag_selection, pad,
 };
@@ -1286,9 +1288,25 @@ impl PreviewView {
                     host: None,
                     folder: Some(tab.path.display().to_string()),
                 };
+                // A tab of a following preview drags its file out (a copy: the tab stays).
+                let dragged = self.model.host.clone().zip(self.model.session.clone()).map(|(host, session)| {
+                    let file = SentFile {
+                        id: tab.id.clone(),
+                        path: tab.path.clone(),
+                        sent_ms: tab.sent_ms,
+                        caption: tab.caption.clone(),
+                        backlog: false,
+                    };
+                    DraggedFile { file: DropFile { host, session: Some(session), file }, name: tab.name.clone() }
+                });
                 div()
                     .id(SharedString::from(format!("preview-tab-{}", tab.id)))
                     .group(group.clone())
+                    .when_some(dragged, |row, dragged| {
+                        row.on_drag(dragged, |dragged: &DraggedFile, _offset, _window, cx: &mut App| {
+                            cx.new(|_| dragged.clone())
+                        })
+                    })
                     .flex_none()
                     .w(theme.ui(TAB_WIDTH))
                     .h_full()

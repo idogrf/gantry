@@ -1,8 +1,10 @@
 //! Dragging a pane to rearrange the layout: what is carried while the button is down.
 
 use app_core::split_tree::{Direction, DropZone, NodeId, Rect, zone_rect};
-use app_core::workspace::{DropCheck, MAX_PANES_PER_TAB};
-use gpui::{Context, FontWeight, IntoElement, Render, Window, div, prelude::*, px, rgb};
+use app_core::workspace::{DropCheck, DropFile, MAX_PANES_PER_TAB};
+use gpui::{Context, FontWeight, IntoElement, Render, Window, div, prelude::*, px, rgb, svg};
+
+use crate::assets::FILE_ICON;
 
 use crate::preview_view::bidi_label;
 use crate::settings_store::SettingsStore;
@@ -29,6 +31,21 @@ pub fn preview_label(zone: DropZone, check: DropCheck, same_tab: bool, target: &
         (_, DropZone::Edge(Direction::Right)) => "Split right".into(),
         (_, DropZone::Edge(Direction::Up)) => "Split above".into(),
         (_, DropZone::Edge(Direction::Down)) => "Split below".into(),
+    }
+}
+
+/// The words on the preview of a dropped file: an edge makes a new preview, the middle holds the file in a holding
+/// pane (`holding_target`) or switches a following preview to it. Empty when there is nothing to drop on.
+pub fn file_drop_label(zone: DropZone, check: DropCheck, holding_target: bool) -> String {
+    match (check, zone) {
+        (DropCheck::Nothing, _) => String::new(),
+        (DropCheck::Full, _) => format!("Tab is full ({MAX_PANES_PER_TAB} panes max)"),
+        (_, DropZone::Center) if holding_target => "Hold this file".into(),
+        (_, DropZone::Center) => "Show in this preview".into(),
+        (_, DropZone::Edge(Direction::Left)) => "New preview on the left".into(),
+        (_, DropZone::Edge(Direction::Right)) => "New preview on the right".into(),
+        (_, DropZone::Edge(Direction::Up)) => "New preview above".into(),
+        (_, DropZone::Edge(Direction::Down)) => "New preview below".into(),
     }
 }
 
@@ -74,9 +91,43 @@ impl Render for DraggedPane {
     }
 }
 
+/// A file being dragged by its preview tab or its "File sent" pop-up; dropping copies it, nothing leaves the session.
+#[derive(Clone)]
+pub struct DraggedFile {
+    /// The file, with its host and session.
+    pub file: DropFile,
+    /// Its name, shown next to the pointer.
+    pub name: String,
+}
+
+impl Render for DraggedFile {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme(cx);
+        let rtl = cx.global::<SettingsStore>().settings().window.right_to_left;
+        div()
+            .px(theme.ui(12.))
+            .py(theme.ui(6.))
+            .flex()
+            .items_center()
+            .gap(theme.ui(6.))
+            .rounded(px(RADIUS))
+            .border_1()
+            .border_color(rgb(theme.tokens.accent))
+            .bg(rgb(theme.tokens.raised))
+            .text_color(rgb(theme.tokens.accent))
+            .text_sm()
+            .font_family(UI_FONT)
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(svg().path(FILE_ICON).flex_none().size(theme.ui(14.)).text_color(rgb(theme.tokens.accent)))
+            .child(bidi_label(&self.name, rtl))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::host::HostId;
+    use protocol::message::SentFile;
 
     const AREA: Rect = Rect { x: 0.5, y: 0.0, w: 0.5, h: 1.0 };
 
@@ -117,5 +168,31 @@ mod tests {
         let dragged = DraggedPane { leaf: 7, title: "api".into() };
         let copy = dragged.clone();
         assert_eq!((copy.leaf, copy.title.as_str()), (7, "api"));
+    }
+
+    #[test]
+    fn file_drop_labels() {
+        let label = file_drop_label;
+        let left = DropZone::Edge(Direction::Left);
+        assert_eq!(label(left, DropCheck::Allowed, false), "New preview on the left");
+        assert_eq!(label(DropZone::Edge(Direction::Right), DropCheck::Allowed, false), "New preview on the right");
+        assert_eq!(label(DropZone::Edge(Direction::Up), DropCheck::Allowed, false), "New preview above");
+        assert_eq!(label(DropZone::Edge(Direction::Down), DropCheck::Allowed, false), "New preview below");
+        assert_eq!(label(DropZone::Center, DropCheck::Allowed, true), "Hold this file");
+        assert_eq!(label(DropZone::Center, DropCheck::Allowed, false), "Show in this preview");
+        assert_eq!(label(left, DropCheck::Full, false), "Tab is full (4 panes max)");
+        assert_eq!(label(left, DropCheck::Nothing, false), "");
+    }
+
+    #[test]
+    fn a_dragged_file_carries_its_host_and_session() {
+        let file = SentFile { id: "a:0".into(), path: "/r/a.md".into(), sent_ms: 1, caption: None, backlog: false };
+        let host = HostId::named("box");
+        let dragged = DraggedFile {
+            file: DropFile { host: host.clone(), session: Some("s1".into()), file },
+            name: "a.md".into(),
+        };
+        let copy = dragged.clone();
+        assert_eq!((copy.file.host, copy.file.session.as_deref(), copy.name.as_str()), (host, Some("s1"), "a.md"));
     }
 }

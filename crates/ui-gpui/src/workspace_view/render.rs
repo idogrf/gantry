@@ -15,7 +15,7 @@ use app_core::sidebar_compact;
 use crate::color_picker_view::ColorPickerEvent;
 use crate::context_menu::{self};
 use crate::dialog_view::dialog_overlay;
-use crate::pane_drag::DraggedPane;
+use crate::pane_drag::{DraggedFile, DraggedPane};
 use crate::settings_store::SettingsStore;
 use crate::theme::{FadeKind, RADIUS, RADIUS_SMALL, Theme, UI_FONT, fade_in, theme};
 use crate::window_frame;
@@ -201,6 +201,11 @@ impl Render for WorkspaceView {
             .on_mouse_move(cx.listener(Self::drag_sidebar))
             // Only a pane drag reports here; a file dragged in from the OS is a drag too, but not this type.
             .on_drag_move(cx.listener(|this, _: &DragMoveEvent<DraggedPane>, _, cx| {
+                if !std::mem::replace(&mut this.pane_dragging, true) {
+                    cx.notify();
+                }
+            }))
+            .on_drag_move(cx.listener(|this, _: &DragMoveEvent<DraggedFile>, _, cx| {
                 if !std::mem::replace(&mut this.pane_dragging, true) {
                     cx.notify();
                 }

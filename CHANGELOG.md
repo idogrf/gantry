@@ -13,6 +13,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - Text and code with syntax colors. Select and copy.
   - Right-to-left documents are laid out from the right with Settings > Terminal > Right-to-left display on; ⇄ flips one.
   - Open in system viewer on every file. Files reload while shown.
+  - Scrollbars wherever a view scrolls (documents, text, the closed files list), like the diff page's.
   - Works on SSH hosts.
   - Needs Claude Code 2.1.332 or newer. Needs a daemon restart; SSH hosts need the new `gantryd` (Install… / Update and restart).
 - **File chip and pop-ups** - A chip on a session's row shows while Claude has sent a file you have not looked at; click it for the preview.

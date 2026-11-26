@@ -18,8 +18,9 @@ use app_core::workspace::DropFile;
 use gpui::{
     App, Bounds, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, ListAlignment,
     ListHorizontalSizingBehavior, ListOffset, ListState, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Task,
-    UniformListScrollHandle, Window, canvas, div, img, list, point, prelude::*, px, rgb, svg, uniform_list,
+    MouseUpEvent, ObjectFit, PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+    SharedString, Task, UniformListScrollHandle, Window, canvas, div, img, list, point, prelude::*, px, rgb, svg,
+    uniform_list,
 };
 use preview_doc::markdown::{DocImage, ImageSrc, LinkTarget, MdDoc, RowKind};
 use protocol::host::HostId;
@@ -27,6 +28,7 @@ use protocol::message::SentFile;
 
 use crate::assets::{CLOSE_ICON, DIRECTION_ICON, EYE_ICON, FILE_ICON, LIST_ICON, OPEN_EXTERNAL_ICON};
 use crate::git_diff_view::size_text;
+use crate::git_scrollbar::{self, Bar, Bars, Extent};
 use crate::hover_card::{self, HoverCard};
 use crate::pane_drag::{DraggedFile, DraggedPane};
 use crate::preview_markdown::{
@@ -399,6 +401,14 @@ fn wheel_pan(delta: ScrollDelta) -> (f32, f32) {
     }
 }
 
+/// The scrolling view of the body that has scrollbars.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BarTarget {
+    Markdown,
+    Text,
+    Closed,
+}
+
 /// The room under a text or markdown body for the text size bar: its height plus its 12 px offset.
 const BAR_ROOM: f32 = 46.0;
 
@@ -416,6 +426,10 @@ pub(crate) struct PreviewView {
     focus_handle: FocusHandle,
     model: PreviewModel,
     scroll: UniformListScrollHandle,
+    /// The closed files list on the empty body.
+    closed_scroll: ScrollHandle,
+    /// The scrollbars' activity and the thumb being dragged.
+    bars: Bars,
     /// The selection in a text file.
     selection: Option<TextSelection>,
     /// The selection in a markdown document.
@@ -444,6 +458,8 @@ pub(crate) struct PreviewView {
     md_list: ListState,
     /// The document `md_list` was reset for.
     md_doc: Option<Arc<MdDoc>>,
+    /// The markdown rows still need their estimated height (set once the list's width and the look are known).
+    md_estimate_pending: bool,
     /// The code block whose Copy button shows `Copied`, with the timer that puts the label back.
     copied: Option<(usize, Task<()>)>,
     /// The Undo bar: its text, the number of the close it belongs to and the timer that hides it.
@@ -571,6 +587,8 @@ impl PreviewView {
                 can_open: false,
             },
             scroll: UniformListScrollHandle::new(),
+            closed_scroll: ScrollHandle::new(),
+            bars: Bars::new(),
             selection: None,
             md_selection: None,
             auto_scroll: None,
@@ -591,6 +609,7 @@ impl PreviewView {
             md_look: None,
             flipped: false,
             char_px_cache: None,
+            md_estimate_pending: false,
             wheel_acc: 0.0,
             frame_images: Vec::new(),
             md_width: 0.0,
@@ -641,6 +660,7 @@ impl PreviewView {
             // A new parse of the same file (a live reload) keeps the place; another file starts at the top.
             let top = self.md_doc.is_some().then(|| self.md_list.logical_scroll_top());
             self.md_list.reset(doc.rows.len());
+            self.md_estimate_pending = true;
             if let Some(top) = top.filter(|_| !doc.rows.is_empty()) {
                 let item_ix = top.item_ix.min(doc.rows.len() - 1);
                 self.md_list.scroll_to(ListOffset { item_ix, ..top });
@@ -782,6 +802,22 @@ impl PreviewView {
                 self.md_list.remeasure();
             }
             self.md_look = Some(look);
+        }
+        // Rows not yet measured get an estimated height, so the scrollbar is about right before they are seen.
+        if self.md_estimate_pending {
+            let width = f32::from(self.md_list.viewport_bounds().size.width);
+            if width <= 0.0 {
+                // The list has not been laid out yet: try again on the next frame.
+                window.request_animation_frame();
+                return;
+            }
+            self.md_estimate_pending = false;
+            let estimate = preview_markdown::average_row_height(doc, scaled.ui_scale, width, char_px);
+            let top = self.md_list.logical_scroll_top();
+            self.md_list.reset_with_uniform_height(doc.rows.len(), px(estimate));
+            if !doc.rows.is_empty() {
+                self.md_list.scroll_to(ListOffset { item_ix: top.item_ix.min(doc.rows.len() - 1), ..top });
+            }
         }
     }
 
@@ -939,6 +975,178 @@ impl PreviewView {
     fn end_drag(&mut self) {
         self.dragging = false;
         self.auto_scroll = None;
+        self.release_bar();
+    }
+
+    /// Which scrolling view the body shows, if any.
+    fn bar_target(&self) -> Option<BarTarget> {
+        match &self.model.content {
+            Content::Markdown(_) => Some(BarTarget::Markdown),
+            Content::Text { .. } => Some(BarTarget::Text),
+            Content::NoFiles if !self.model.closed.is_empty() => Some(BarTarget::Closed),
+            _ => None,
+        }
+    }
+
+    /// How far the body's scrolling view is scrolled, once it has been laid out.
+    fn bar_extent(&self) -> Option<Extent> {
+        match self.bar_target()? {
+            BarTarget::Markdown => Extent::of_list(&self.md_list),
+            BarTarget::Text => Extent::of(&self.scroll),
+            BarTarget::Closed => Extent::of_handle(&self.closed_scroll),
+        }
+        .map(|extent| Extent { shared_corner: false, ..extent })
+    }
+
+    /// The scrollbars of the body's scrolling view (the ones that have something to scroll). `Markdown` and `Closed`
+    /// only get a vertical one; the text body also a horizontal one, below the list in the room kept for the bars.
+    fn bar_elements(&self, window: &mut Window, theme: &Theme, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let Some(extent) = self.bar_extent() else { return Vec::new() };
+        self.bars.see(extent.offset);
+        let animate = cx.global::<SettingsStore>().settings().animate_ui && window.is_window_active();
+        let level = if animate || self.bars.grab.is_some() { self.bars.level() } else { 0.0 };
+        if animate && level > 0.0 {
+            window.request_animation_frame();
+        }
+        let color = git_scrollbar::thumb_color(theme, level);
+        let (vertical, horizontal) = extent.thumbs(theme.ui_scale);
+        let corner = f32::from(theme.ui(git_scrollbar::WIDTH));
+        let mut bars = Vec::new();
+        if let Some(thumb) = vertical {
+            bars.push(
+                div()
+                    .id("preview-bar-v")
+                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                        this.wheel_on_bar(event, window, cx);
+                        cx.stop_propagation();
+                    }))
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .w(px(corner))
+                    .h(px(extent.viewport.1))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.press_bar(Bar::Vertical, event.position, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(git_scrollbar::thumb_div(Bar::Vertical, thumb, color, theme))
+                    .into_any_element(),
+            );
+        }
+        if let Some(thumb) = horizontal {
+            bars.push(
+                div()
+                    .id("preview-bar-h")
+                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                        this.wheel_on_bar(event, window, cx);
+                        cx.stop_propagation();
+                    }))
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .h(px(corner))
+                    .w(px(extent.viewport.0))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.press_bar(Bar::Horizontal, event.position, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(git_scrollbar::thumb_div(Bar::Horizontal, thumb, color, theme))
+                    .into_any_element(),
+            );
+        }
+        bars
+    }
+
+    /// A press on a scrollbar: grab its thumb, or move the thumb under the pointer when the press is on the track.
+    fn press_bar(&mut self, bar: Bar, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(extent) = self.bar_extent() else { return };
+        let (vertical, horizontal) = extent.thumbs(theme(cx).ui_scale);
+        let (thumb, along) = match bar {
+            Bar::Vertical => (vertical, f32::from(position.y - extent.bounds.origin.y)),
+            Bar::Horizontal => (horizontal, f32::from(position.x - extent.bounds.origin.x)),
+        };
+        let Some(thumb) = thumb else { return };
+        let on_thumb = along >= thumb.top && along <= thumb.top + thumb.len;
+        self.bars.grab = Some((bar, if on_thumb { along - thumb.top } else { thumb.len / 2.0 }));
+        if self.bar_target() == Some(BarTarget::Markdown) {
+            // The list's height may grow while rows are measured; the thumb keeps its scale during the drag.
+            self.md_list.scrollbar_drag_started();
+        }
+        self.drag_bar(position, cx);
+    }
+
+    /// Scroll so the grabbed thumb follows the pointer.
+    fn drag_bar(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some((bar, grab)) = self.bars.grab else { return };
+        let Some(extent) = self.bar_extent() else { return };
+        let scale = theme(cx).ui_scale;
+        let (vertical, horizontal) = extent.thumbs(scale);
+        let (thumb, along) = match bar {
+            Bar::Vertical => (vertical, f32::from(position.y - extent.bounds.origin.y)),
+            Bar::Horizontal => (horizontal, f32::from(position.x - extent.bounds.origin.x)),
+        };
+        let Some(thumb) = thumb else { return };
+        let offset = px(-extent.offset_for(bar, along - grab, thumb.len, scale));
+        match self.bar_target() {
+            // Rows measured during the drag can make the document taller than the list's frozen height, so a thumb
+            // dragged to the end of the track goes to the real end.
+            Some(BarTarget::Markdown) if -f32::from(offset) >= extent.contents.1 - extent.viewport.1 - 1.0 => {
+                self.md_list.scroll_to_end()
+            }
+            Some(BarTarget::Markdown) => self.md_list.set_offset_from_scrollbar(point(px(0.), offset)),
+            Some(BarTarget::Text) => {
+                let handle = self.scroll.0.borrow().base_handle.clone();
+                let current = handle.offset();
+                handle.set_offset(match bar {
+                    Bar::Vertical => point(current.x, offset),
+                    Bar::Horizontal => point(offset, current.y),
+                });
+            }
+            Some(BarTarget::Closed) => {
+                let current = self.closed_scroll.offset();
+                self.closed_scroll.set_offset(point(current.x, offset));
+            }
+            None => {}
+        }
+        cx.notify();
+    }
+
+    /// A wheel over a scrollbar scrolls the view it belongs to, as over the view itself.
+    fn wheel_on_bar(&mut self, event: &ScrollWheelEvent, window: &Window, cx: &mut Context<Self>) {
+        let Some(extent) = self.bar_extent() else { return };
+        let delta = event.delta.pixel_delta(window.line_height());
+        let clamp = |offset: f32, viewport: f32, contents: f32| offset.clamp(-(contents - viewport).max(0.0), 0.0);
+        match self.bar_target() {
+            Some(BarTarget::Markdown) => self.md_list.scroll_by(-delta.y),
+            Some(BarTarget::Text) => {
+                let handle = self.scroll.0.borrow().base_handle.clone();
+                let current = handle.offset();
+                handle.set_offset(point(
+                    px(clamp(f32::from(current.x + delta.x), extent.viewport.0, extent.contents.0)),
+                    px(clamp(f32::from(current.y + delta.y), extent.viewport.1, extent.contents.1)),
+                ));
+            }
+            Some(BarTarget::Closed) => {
+                let current = self.closed_scroll.offset();
+                let y = clamp(f32::from(current.y + delta.y), extent.viewport.1, extent.contents.1);
+                self.closed_scroll.set_offset(point(current.x, px(y)));
+            }
+            None => {}
+        }
+        cx.notify();
+    }
+
+    /// The thumb is let go.
+    fn release_bar(&mut self) {
+        if self.bars.grab.take().is_some() {
+            self.md_list.scrollbar_drag_ended();
+        }
     }
 
     /// The top and bottom of the body's scrolling list in the window, when it shows text that can be selected.
@@ -953,6 +1161,15 @@ impl PreviewView {
 
     /// The pointer moved over the pane: while a selection drag holds it in an edge zone of the body, scroll.
     fn pointer_moved(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bars.grab.is_some() {
+            if event.pressed_button == Some(MouseButton::Left) {
+                self.drag_bar(event.position, cx);
+            } else {
+                self.release_bar();
+                cx.notify();
+            }
+            return;
+        }
         if !self.dragging {
             return;
         }
@@ -1719,7 +1936,7 @@ impl PreviewView {
             .collect()
     }
 
-    fn body(&self, theme: &Theme, scaled: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn body(&self, theme: &Theme, scaled: &Theme, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let label_rtl = cx.global::<SettingsStore>().settings().window.right_to_left;
         let muted = |text: &'static str| div().text_sm().text_color(rgb(theme.tokens.muted)).child(text);
         let centered = |children: Vec<gpui::AnyElement>| {
@@ -1732,6 +1949,8 @@ impl PreviewView {
                 .child(card(theme).children(children))
                 .into_any_element()
         };
+        let bars = self.bar_elements(window, theme, cx);
+        let corner = theme.ui(git_scrollbar::WIDTH);
         let name = self.active_tab().map(|tab| file_name(&tab.path)).unwrap_or_default();
         let folder = self.active_tab().and_then(|tab| tab.path.parent().map(Path::to_path_buf));
         let file_card = |lines: Vec<gpui::AnyElement>| {
@@ -1789,16 +2008,24 @@ impl PreviewView {
                     )
                     .child(
                         div()
-                            .id("preview-closed-list")
+                            .relative()
                             .w_full()
                             .max_w(theme.ui(360.))
                             .flex_1()
                             .min_h_0()
-                            .overflow_y_scroll()
-                            .flex()
-                            .flex_col()
-                            .pb(theme.ui(BAR_ROOM + 12.))
-                            .children(rows),
+                            .child(
+                                div()
+                                    .id("preview-closed-list")
+                                    .size_full()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.closed_scroll)
+                                    .flex()
+                                    .flex_col()
+                                    .pr(corner)
+                                    .pb(theme.ui(BAR_ROOM + 12.))
+                                    .children(rows),
+                            )
+                            .children(bars),
                     )
                     .into_any_element()
             }
@@ -1810,14 +2037,17 @@ impl PreviewView {
                 let look = self.md_look.clone().unwrap_or_default();
                 let after = cx.entity();
                 div()
+                    .relative()
                     .size_full()
-                    .pb(room)
                     .child(
-                        list(self.md_list.clone(), move |ix, _, cx| {
-                            view.update(cx, |this, cx| this.md_row(ix, &theme, &look, cx))
-                        })
-                        .size_full(),
+                        div().size_full().pb(room).pr(corner).child(
+                            list(self.md_list.clone(), move |ix, _, cx| {
+                                view.update(cx, |this, cx| this.md_row(ix, &theme, &look, cx))
+                            })
+                            .size_full(),
+                        ),
                     )
+                    .children(bars)
                     // Paints after the list laid out its rows, so the frame's images are complete.
                     .child(
                         canvas(move |_, _, cx| after.update(cx, |this, cx| this.sync_images(cx)), |_, _, _, _| {})
@@ -1830,19 +2060,22 @@ impl PreviewView {
                 // Every row has its own `min_w`, so the width needs no scan of the document.
                 let longest = (doc.line_count() > 0).then_some(0);
                 div()
+                    .relative()
                     .size_full()
-                    .pb(theme.ui(BAR_ROOM))
                     .child(
-                        uniform_list(
-                            "preview-rows",
-                            doc.line_count(),
-                            cx.processor(|this, range: Range<usize>, window, cx| this.text_rows(range, window, cx)),
-                        )
-                        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-                        .with_width_from_item(longest)
-                        .track_scroll(&self.scroll)
-                        .size_full(),
+                        div().size_full().pb(theme.ui(BAR_ROOM)).pr(corner).child(
+                            uniform_list(
+                                "preview-rows",
+                                doc.line_count(),
+                                cx.processor(|this, range: Range<usize>, window, cx| this.text_rows(range, window, cx)),
+                            )
+                            .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+                            .with_width_from_item(longest)
+                            .track_scroll(&self.scroll)
+                            .size_full(),
+                        ),
                     )
+                    .children(bars)
                     .into_any_element()
             }
             Content::Image { image, natural } => self.image_body(image, *natural, theme, cx),
@@ -1938,7 +2171,7 @@ impl Render for PreviewView {
                 cx.listener(|_, _, _, cx| cx.emit(PreviewEvent::Close)),
             )
             .into_any_element(),
-            None => self.body(&theme, &scaled, cx),
+            None => self.body(&theme, &scaled, window, cx),
         };
         div()
             .key_context("Preview")
@@ -1981,8 +2214,20 @@ impl Render for PreviewView {
             .on_mouse_move(
                 cx.listener(|this, event: &MouseMoveEvent, window, cx| this.pointer_moved(event, window, cx)),
             )
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.end_drag();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.end_drag();
+                    cx.notify();
+                }),
+            )
             .on_mouse_up(MouseButton::Middle, cx.listener(|this, _: &MouseUpEvent, _, _| this.middle_pressed = None))
             .on_mouse_up_out(
                 MouseButton::Middle,

@@ -107,6 +107,9 @@ pub(crate) fn render(
             .when(entry.accent, |item| item.text_color(rgb(theme.tokens.accent)).font_weight(FontWeight::SEMIBOLD))
             .child(div().flex_1().whitespace_nowrap().child(entry.label.clone()))
             .when(entry.checked, |item| item.child(div().flex_none().text_color(rgb(theme.tokens.accent)).child("✓")))
+            .when_some(entry.detail.clone(), |item, detail| {
+                item.child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(detail))
+            })
             .when_some(entry.shortcut, |item, shortcut| {
                 item.child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(shortcut_text(shortcut, settings)))
             })
@@ -123,6 +126,9 @@ pub(crate) fn render(
     };
     let rows = menu.items.iter().enumerate().map(|(index, item)| match item {
         MenuItem::Separator => div().h(px(1.)).mx_2().my_1().bg(rgb(theme.tokens.line)).into_any_element(),
+        MenuItem::Heading(text) => {
+            div().px_3().pt_1().text_xs().text_color(rgb(theme.tokens.muted)).child(text.clone()).into_any_element()
+        }
         MenuItem::Entry(entry) => entry_row(("menu-item", index), entry, Some(menu.sub.clone())),
         MenuItem::Submenu { label, items } => {
             let (hover, click) = (menu.sub.clone(), menu.sub.clone());

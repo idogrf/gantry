@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use app_core::menus::{hidden_tabs_menu, preview_menu};
+use app_core::menus::{all_files_menu, preview_menu};
 use app_core::preview::{
     self, FileKind, ImageType, ItemsButton, MAX_UNKNOWN_TEXT, TextDoc, file_name, image_size, image_too_large, is_link,
     is_read, kind_of, newly_sent, row_title,
@@ -1099,7 +1099,8 @@ impl WorkspaceView {
             PreviewEvent::Hidden { position } => {
                 let Some(slot) = self.previews.get(&leaf) else { return };
                 let files = slot.view.read(cx).hidden_tabs(theme(cx));
-                self.open_preview_menu(hidden_tabs_menu(leaf, &files), *position, window, cx);
+                let open: Vec<_> = files.into_iter().map(|(id, name)| (id, name, String::new())).collect();
+                self.open_preview_menu(all_files_menu(leaf, &open, &[]), *position, window, cx);
             }
             PreviewEvent::OpenExternal => self.open_in_system_viewer(leaf, cx),
             PreviewEvent::Link(target) => self.follow_link(leaf, target, window, cx),

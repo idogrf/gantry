@@ -137,6 +137,8 @@ impl WorkspaceView {
             MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
             MenuAction::OpenPreview(leaf) => self.open_preview_for(leaf, window, cx),
             MenuAction::ActivateSentFile { leaf, id } => self.activate_file(leaf, &id, window, cx),
+            // Wired by the All files menu task.
+            MenuAction::ReopenSentFile { .. } => {}
             MenuAction::RemoveSentFile { leaf, id } => self.remove_file(leaf, &id, window, cx),
             MenuAction::ClearSentFiles(leaf) => self.clear_files(leaf, window, cx),
             MenuAction::CopyFileContents { leaf, id } => self.copy_file_contents(leaf, &id, cx),
@@ -236,6 +238,7 @@ impl WorkspaceView {
                 action: MenuAction::CloseTab(index),
                 swatch: None,
                 checked: false,
+                detail: None,
             })]
         } else {
             let Some(leaf) = self.workspace.leaves.get(&tab.focused) else { return };

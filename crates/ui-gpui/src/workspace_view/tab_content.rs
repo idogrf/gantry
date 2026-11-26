@@ -698,8 +698,8 @@ pub(super) enum ItemsLook {
 }
 
 /// The Items button: the file icon, with the word `Files` for [`ItemsLook::Chip`]. Lit (accent border and tint)
-/// while the preview is open; dimmed and inert when `state.enabled` is false; a dot at the top right when
-/// `state.dot`. `on_down` runs on a left press of an enabled button.
+/// while the preview is open; a dot at the top right when
+/// `state.dot`. `on_down` runs on a left press.
 pub(super) fn items_button_element(
     id: impl Into<gpui::ElementId>,
     state: ItemsButton,
@@ -709,7 +709,6 @@ pub(super) fn items_button_element(
     on_down: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<Div> {
     let accent = theme.tokens.accent;
-    let title = if state.enabled { title } else { "No files from this session yet".to_string() };
     let card = HoverCard { title, status: None, dir: None, container: false, host: None, folder: None, files: None };
     let button = div()
         .id(id)
@@ -745,15 +744,8 @@ pub(super) fn items_button_element(
             div().absolute().top(theme.ui(1.)).right(theme.ui(1.)).size(theme.ui(7.)).rounded_full().bg(rgb(accent)),
         )
     });
-    if state.enabled {
-        button
-            .cursor_pointer()
-            .when(!state.lit, |button| button.hover(|style| style.bg(rgb(theme.tokens.raised))))
-            .on_mouse_down(MouseButton::Left, on_down)
-    } else {
-        button.opacity(0.35).on_mouse_down(MouseButton::Left, |_, window, cx| {
-            window.prevent_default();
-            cx.stop_propagation();
-        })
-    }
+    button
+        .cursor_pointer()
+        .when(!state.lit, |button| button.hover(|style| style.bg(rgb(theme.tokens.raised))))
+        .on_mouse_down(MouseButton::Left, on_down)
 }

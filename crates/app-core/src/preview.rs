@@ -422,8 +422,6 @@ pub struct ItemsButton {
     pub lit: bool,
     /// A dot at the icon's corner: the session has a new file and the badge is on.
     pub dot: bool,
-    /// A click does something; dimmed and inert while closed and the session has sent no listed file.
-    pub enabled: bool,
 }
 
 /// The Items button for a Claude leaf: none when it cannot get a preview (`can_open` false) and none is open. The dot
@@ -432,7 +430,7 @@ pub fn items_button(can_open: bool, open: bool, counts: FileCounts, badge: bool)
     if !can_open && !open {
         return None;
     }
-    Some(ItemsButton { lit: open, dot: !open && badge && counts.new > 0, enabled: open || counts.total > 0 })
+    Some(ItemsButton { lit: open, dot: !open && badge && counts.new > 0 })
 }
 
 /// The default preview text size, in percent.
@@ -757,12 +755,12 @@ mod tests {
     #[test]
     fn items_button_states() {
         let counts = |new, total| FileCounts { new, total };
-        let button = |lit, dot, enabled| Some(ItemsButton { lit, dot, enabled });
+        let button = |lit, dot| Some(ItemsButton { lit, dot });
         assert_eq!(items_button(false, false, counts(1, 2), true), None);
-        assert_eq!(items_button(true, false, counts(0, 0), true), button(false, false, false));
-        assert_eq!(items_button(true, false, counts(1, 2), true), button(false, true, true));
-        assert_eq!(items_button(true, false, counts(1, 2), false), button(false, false, true));
-        assert_eq!(items_button(false, true, counts(0, 0), true), button(true, false, true));
+        assert_eq!(items_button(true, false, counts(0, 0), true), button(false, false));
+        assert_eq!(items_button(true, false, counts(1, 2), true), button(false, true));
+        assert_eq!(items_button(true, false, counts(1, 2), false), button(false, false));
+        assert_eq!(items_button(false, true, counts(0, 0), true), button(true, false));
     }
 
     #[test]

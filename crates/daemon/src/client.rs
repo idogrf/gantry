@@ -9,8 +9,8 @@ use std::time::Duration;
 use interprocess::local_socket::tokio::{Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
 use protocol::message::{
-    ClientMessage, ContainerChoice, DaemonMessage, DirEntry, ImageFormat, PROTOCOL_VERSION, PaletteColors, PaneId,
-    PaneInfo, SearchHit, SessionInfo, SpawnRequest, TakeOverOutcome,
+    ClientMessage, ContainerChoice, DaemonMessage, DirEntry, FileBody, ImageFormat, PROTOCOL_VERSION, PaletteColors,
+    PaneId, PaneInfo, SearchHit, SessionInfo, SpawnRequest, TakeOverOutcome,
 };
 use tokio::sync::mpsc;
 
@@ -117,6 +117,13 @@ pub enum ClientEvent {
         path: PathBuf,
         /// Its folders.
         dirs: Vec<DirEntry>,
+    },
+    /// The answer to `read_file`.
+    FileContents {
+        /// Echoed request id.
+        request: u64,
+        /// What was found.
+        body: FileBody,
     },
     /// `list_dir` failed.
     DirListingFailed {
@@ -299,6 +306,12 @@ impl DaemonClient {
         self.send(&ClientMessage::ListDir { request, path: path.into() });
     }
 
+    /// Read the file at `path` (absolute or starting with `~`); answered by `FileContents` with the same `request`.
+    /// The answer is `Unchanged` when the file's modification time is still `known_mtime_ms`.
+    pub fn read_file(&self, request: u64, path: &str, known_mtime_ms: Option<u64>) {
+        self.send(&ClientMessage::ReadFile { request, path: path.into(), known_mtime_ms });
+    }
+
     /// Ask for the git state of the repo containing `folder` (absolute or starting with `~`); answered by `GitStatus`
     /// or `GitUnavailable`. `known_head` is the `HEAD` whose commits the caller already has.
     pub fn git_status(&self, request: u64, folder: &str, known_head: Option<&str>) {
@@ -365,6 +378,12 @@ impl DaemonClient {
     /// Tell the daemon which Claude config dirs to index (empty = its own default dir).
     pub fn set_claude_dirs(&self, dirs: Vec<PathBuf>) {
         self.send(&ClientMessage::SetClaudeDirs { dirs });
+    }
+
+    /// Ask the daemon to watch these sessions' transcripts for files sent to the preview, replacing the earlier list;
+    /// the files arrive in `SessionInfo.sent_files`.
+    pub fn watch_sent_files(&self, sessions: &[String]) {
+        self.send(&ClientMessage::WatchSentFiles { sessions: sessions.to_vec() });
     }
 
     /// Mark the pane as most recently focused.
@@ -471,6 +490,7 @@ where
                 Some(Ok(DaemonMessage::DirListingFailed { request, reason })) => {
                     ClientEvent::DirListingFailed { request, reason }
                 }
+                Some(Ok(DaemonMessage::FileContents { request, body })) => ClientEvent::FileContents { request, body },
                 Some(Ok(DaemonMessage::GitStatus { request, state })) => ClientEvent::GitStatus { request, state },
                 Some(Ok(DaemonMessage::GitDiff { request, path, body })) => {
                     ClientEvent::GitDiff { request, path, body }

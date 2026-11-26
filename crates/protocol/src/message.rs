@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::host::HostId;
 
 /// Protocol version; bump on any incompatible change to non-frozen messages.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Daemon-assigned identifier of a pane (one PTY session).
 pub type PaneId = u64;
@@ -85,6 +85,9 @@ pub struct SpawnRequest {
     /// Scrollback lines for this pane (`None` = the default, 10,000).
     #[serde(default)]
     pub scrollback: Option<u32>,
+    /// The pane is a Claude pane with the preview tool on (`show_in_preview`).
+    #[serde(default)]
+    pub preview: bool,
 }
 
 /// A live pane as listed by the daemon.
@@ -176,6 +179,22 @@ pub enum TakeOverOutcome {
     },
 }
 
+/// A file Claude sent to the preview with `show_in_preview`, read from the session's transcript.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentFile {
+    /// `"<tool_use_id>:<index in the accepted list>"`.
+    pub id: String,
+    /// The absolute path the preview server resolved and accepted (not as Claude gave it).
+    pub path: PathBuf,
+    /// When Claude sent it, ms since the Unix epoch.
+    pub sent_ms: u64,
+    /// Claude's caption, when it gave one.
+    pub caption: Option<String>,
+    /// Found by the daemon's first read of this transcript, not sent since; the GUI raises no alert for it.
+    #[serde(default)]
+    pub backlog: bool,
+}
+
 /// One Claude session, from the daemon's index.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -204,6 +223,9 @@ pub struct SessionInfo {
     /// Your newest prompt in this session, on one line; `None` when unknown (or from an older daemon).
     #[serde(default)]
     pub last_prompt: Option<String>,
+    /// Files Claude sent to the preview in this session, oldest first.
+    #[serde(default)]
+    pub sent_files: Vec<SentFile>,
     /// The host whose daemon reported it. The GUI sets this when the session arrives; it never travels on the wire.
     #[serde(skip)]
     pub host: HostId,
@@ -234,6 +256,34 @@ pub struct PaletteColors {
     pub selection: u32,
     /// The 16 ANSI colors: 0-7 normal, 8-15 bright.
     pub ansi: [u32; 16],
+}
+
+/// The result of a `ReadFile`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FileBody {
+    /// The file's bytes (a base64 string on the wire) and modification time.
+    Bytes {
+        /// The file's contents.
+        #[serde(with = "base64_bytes")]
+        data: Vec<u8>,
+        /// Modification time, ms since the Unix epoch.
+        mtime_ms: u64,
+    },
+    /// The file still has the `known_mtime_ms` the client sent.
+    Unchanged,
+    /// The file is larger than the daemon sends.
+    TooLarge {
+        /// Its size in bytes.
+        size: u64,
+    },
+    /// No such file.
+    Missing,
+    /// It could not be read.
+    Failed {
+        /// Why, readable.
+        reason: String,
+    },
 }
 
 /// GUI → daemon.
@@ -318,6 +368,20 @@ pub enum ClientMessage {
         request: u64,
         /// The folder to list.
         path: String,
+    },
+    /// The daemon also watches these sessions' transcripts for sent files; each message replaces the set.
+    WatchSentFiles {
+        /// Session ids to watch.
+        sessions: Vec<String>,
+    },
+    /// Read a file on the daemon's host; answered by `FileContents`.
+    ReadFile {
+        /// Client-chosen id echoed in the reply.
+        request: u64,
+        /// Absolute path, or starting with `~`.
+        path: String,
+        /// The modification time the client already has; the reply is `Unchanged` when it still matches.
+        known_mtime_ms: Option<u64>,
     },
     /// Save a pasted image where `pane`'s Claude can read it; answered by `PasteImageSaved` or `PasteImageFailed`.
     /// Only sent to a daemon whose `Welcome.paste_image` is true (no protocol bump: older daemons never see it).
@@ -673,6 +737,13 @@ pub enum DaemonMessage {
         /// Why, readable.
         reason: String,
     },
+    /// The answer to `ReadFile`.
+    FileContents {
+        /// Echoed request id.
+        request: u64,
+        /// What was found.
+        body: FileBody,
+    },
     /// The answer to `SavePasteImage`: the image is saved at `path`, as the pane's Claude sees it.
     PasteImageSaved {
         /// The pane that asked.
@@ -753,6 +824,7 @@ mod tests {
             container: None,
             claude_dir: None,
             last_prompt: None,
+            sent_files: Vec::new(),
             host: HostId::named("devbox"),
         };
         let json = serde_json::to_string(&info).unwrap();
@@ -775,6 +847,7 @@ mod tests {
                 claude: true,
                 env: vec![("A".into(), "b".into())],
                 scrollback: Some(5000),
+                preview: false,
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -838,6 +911,7 @@ mod tests {
             container: None,
             claude_dir: Some("/home/me/.claude-work".into()),
             last_prompt: Some("Fix the build".into()),
+            sent_files: Vec::new(),
             host: HostId::local(),
         };
         let json = serde_json::to_string(&session).unwrap();
@@ -873,6 +947,7 @@ mod tests {
             container: None,
             claude_dir: None,
             last_prompt: Some("x".into()),
+            sent_files: Vec::new(),
             host: HostId::local(),
         };
         let mut json = serde_json::to_value(&session).unwrap();
@@ -964,7 +1039,49 @@ mod tests {
         assert_eq!((spec.claude, spec.env.len(), spec.scrollback), (false, 0, None));
         let pane = r#"{"pane":1,"program":"sh","args":[],"cwd":"/","last_focused":0}"#;
         assert!(!serde_json::from_str::<PaneInfo>(pane).unwrap().claude);
-        assert_eq!(PROTOCOL_VERSION, 10);
+        assert_eq!(PROTOCOL_VERSION, 11);
+    }
+
+    #[test]
+    fn protocol_is_eleven() {
+        assert_eq!(PROTOCOL_VERSION, 11);
+    }
+
+    #[test]
+    fn session_without_sent_files_parses() {
+        let json = r#"{"id":"a","cwd":"/","title":"t","last_active_ms":1,"state":{"kind":"closed"},"cwd_exists":true,"status":null,"status_since_ms":0}"#;
+        assert_eq!(serde_json::from_str::<SessionInfo>(json).unwrap().sent_files, vec![]);
+    }
+
+    #[test]
+    fn spawn_request_without_preview_is_false() {
+        let spawn = r#"{"program":"sh","args":[],"cwd":"/","cols":80,"rows":24}"#;
+        assert!(!serde_json::from_str::<SpawnRequest>(spawn).unwrap().preview);
+    }
+
+    #[test]
+    fn read_file_round_trips() {
+        let msg = ClientMessage::ReadFile { request: 3, path: "~/a b/ü.md".into(), known_mtime_ms: Some(5) };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), msg);
+        for body in [
+            FileBody::Bytes { data: vec![0, 255, 10], mtime_ms: 9 },
+            FileBody::Unchanged,
+            FileBody::TooLarge { size: 7 },
+            FileBody::Missing,
+            FileBody::Failed { reason: "denied".into() },
+        ] {
+            let reply = DaemonMessage::FileContents { request: 3, body };
+            let json = serde_json::to_string(&reply).unwrap();
+            assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), reply);
+        }
+    }
+
+    #[test]
+    fn watch_sent_files_round_trips() {
+        let msg = ClientMessage::WatchSentFiles { sessions: vec!["a".into(), "b".into()] };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), msg);
     }
 
     #[test]

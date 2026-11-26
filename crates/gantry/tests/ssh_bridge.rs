@@ -97,6 +97,7 @@ fn spec() -> SshHostSpec {
 
 fn sh(script: &str) -> SpawnRequest {
     SpawnRequest {
+        preview: false,
         program: "sh".into(),
         args: vec!["-c".into(), script.into()],
         cwd: std::env::temp_dir(),

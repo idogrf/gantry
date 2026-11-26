@@ -15,17 +15,19 @@ use claude_index::index::{IndexState, SessionRecord};
 use interprocess::local_socket::tokio::{Listener, Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
 use protocol::message::{
-    ClientMessage, ContainerChoice, DaemonMessage, ImageFormat, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo,
-    SpawnRequest, TakeOverOutcome, claude_session,
+    ClientMessage, ContainerChoice, DaemonMessage, ImageFormat, PROTOCOL_VERSION, PaneId, PaneInfo, SentFile,
+    SessionInfo, SpawnRequest, TakeOverOutcome, claude_session,
 };
 use tokio::sync::Notify;
 
 use crate::containers::{self, PANE_MARKER, Registry, marker};
 use crate::outbox::Outbox;
 use crate::paste_image;
+use crate::preview_plugin;
 use crate::process_tree;
 use crate::pty::{PtyProcess, SpawnSpec, drain_batch, spawn_output_reader};
 use crate::search::{Search, SearchEvent};
+use crate::sent_files::{self, SentFilesWatch};
 use crate::sessions::{ContainerView, Gone, PaneSession, diff, merge_records, resolve, spawn_indexer, still_claimed};
 use crate::take_over::{self, FORCE_WAIT, GRACE};
 
@@ -36,6 +38,8 @@ const RESYNC_TICK: Duration = Duration::from_millis(100);
 const EXIT_DRAIN: Duration = Duration::from_millis(300);
 /// After a failed Docker lookup, new panes skip Docker for this long (a hung Docker would delay every new pane).
 const DOCKER_RETRY: Duration = Duration::from_secs(30);
+/// How long `claude --version` may take before the preview flags are left out.
+const CLAUDE_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Least time between Docker lookups caused by container ids the registry does not know.
 const UNKNOWN_CONTAINER_REFRESH: Duration = Duration::from_secs(10);
 
@@ -57,6 +61,8 @@ pub struct ServerOptions {
     pub docker: Option<String>,
     /// Where pasted images are saved; `None` turns image paste off.
     pub paste_dir: Option<PathBuf>,
+    /// The Claude Code plugin folder preview panes load; `None` never adds the preview flags.
+    pub plugin_dir: Option<PathBuf>,
 }
 
 struct Pane {
@@ -77,6 +83,8 @@ struct Pane {
     container_id: Option<String>,
     /// The user it runs as in that container (`docker exec -u`).
     container_user: Option<String>,
+    /// Whether it was started with the preview plugin flags.
+    preview: bool,
     last_focused: u64,
     needs_resync: bool,
 }
@@ -113,6 +121,10 @@ struct State {
     sent: Vec<SessionInfo>,
     /// Processes seen exiting that the index still lists as running.
     gone: Vec<Gone>,
+    /// The files each session sent to the preview, from its transcript, until it leaves the session list.
+    sent_files: HashMap<String, Vec<SentFile>>,
+    /// The sessions the GUI asked to watch (its latest `WatchSentFiles`).
+    watch_requested: HashSet<String>,
     /// This daemon's instance id (the prefix of its panes' `GANTRY_PANE` markers).
     instance: String,
     /// Dev containers.
@@ -137,6 +149,9 @@ struct State {
     docker_failed_at: Option<Instant>,
 }
 
+/// What a probe of `claude --version` found: `None` = no version.
+type ClaudeVersion = Arc<tokio::sync::Mutex<Option<(u32, u32, u32)>>>;
+
 struct Shared {
     state: Mutex<State>,
     shutdown: Notify,
@@ -154,6 +169,11 @@ struct Shared {
     search: Option<Search>,
     /// Where pasted images are saved; `None` = image paste off.
     paste_dir: Option<PathBuf>,
+    /// The Claude Code plugin folder; `None` = no preview flags.
+    plugin_dir: Option<PathBuf>,
+    /// The version each Claude program printed for `--version`, by program (only a version is kept; each program's
+    /// slot is locked while its first probe runs).
+    claude_versions: Mutex<HashMap<String, ClaudeVersion>>,
 }
 
 impl Shared {
@@ -180,8 +200,13 @@ impl State {
     }
 
     fn control(&self, message: &DaemonMessage) {
+        self.send_frame(Frame::control(message));
+    }
+
+    /// Queue a frame built earlier, so a large message is not serialized while the state is locked.
+    fn send_frame(&self, frame: Frame) {
         if let Some(client) = &self.client {
-            client.outbox.push_control(Frame::control(message));
+            client.outbox.push_control(frame);
         }
     }
 
@@ -228,7 +253,8 @@ impl State {
             dir_exists: &|dir: &Path| dir.is_dir(),
             checks_processes: cfg!(target_os = "linux"),
         };
-        let sessions = resolve(&records, &panes, &self.gone, &view);
+        let sessions = resolve(&records, &panes, &self.gone, &view, &self.sent_files);
+        self.sent_files.retain(|id, _| sessions.iter().any(|session| &session.id == id));
         if full {
             self.control(&DaemonMessage::Sessions { sessions: sessions.clone() });
         } else {
@@ -371,13 +397,16 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
     let shared = Arc::new(Shared {
         state: Mutex::new(state),
         shutdown: Notify::new(),
-        base_env: options.base_env,
+        // A pane is no child session of a Claude that happens to have started the daemon.
+        base_env: options.base_env.into_iter().filter(|(name, _)| name != "CLAUDE_CODE_CHILD_SESSION").collect(),
         owner_uid: options.owner_uid,
         instance,
         docker: options.docker,
         claude_dir: claude_dir.clone(),
         search,
         paste_dir: options.paste_dir,
+        plugin_dir: options.plugin_dir,
+        claude_versions: Mutex::new(HashMap::new()),
     });
     refresh_containers(&shared);
     let probes = shared.docker.is_some().then(|| {
@@ -414,6 +443,7 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
             }
         })
     };
+    let sent_files_task = tokio::spawn(watch_sent_files(shared.clone()));
     let search_task = {
         let shared = shared.clone();
         tokio::spawn(async move {
@@ -439,6 +469,7 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
     idle.abort();
     ticker.abort();
     search_task.abort();
+    sent_files_task.abort();
     for task in shared.lock().indexers.values() {
         task.abort();
     }
@@ -754,6 +785,12 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
         }
         ClientMessage::ListDir { request, path } => list_dir_request(shared, request, path),
         ClientMessage::SavePasteImage { pane, format, data } => paste_image_request(shared, pane, format, data),
+        ClientMessage::WatchSentFiles { sessions } => {
+            shared.lock().watch_requested = sessions.into_iter().collect();
+        }
+        ClientMessage::ReadFile { request, path, known_mtime_ms } => {
+            read_file_request(shared, request, path, known_mtime_ms)
+        }
         ClientMessage::GitStatus { request, folder, known_head } => {
             git_status_request(shared, request, folder, known_head)
         }
@@ -775,6 +812,44 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
             if let Some(p) = state.panes.get_mut(&pane) {
                 let _ = p.pty.kill();
             }
+        }
+    }
+}
+
+/// Every second, read the transcripts of the watched sessions (see `sent_files::watched`) off the async threads and
+/// publish the lists that changed. Does nothing while nothing is watched.
+async fn watch_sent_files(shared: Arc<Shared>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut watch = SentFilesWatch::default();
+    loop {
+        interval.tick().await;
+        let (ids, dirs) = {
+            let state = shared.lock();
+            let preview_panes: HashSet<PaneId> =
+                state.panes.iter().filter(|(_, pane)| pane.preview).map(|(id, _)| *id).collect();
+            let ids = sent_files::watched(&state.sent, &preview_panes, &state.watch_requested);
+            (ids, state.indexers.keys().cloned().collect::<Vec<PathBuf>>())
+        };
+        if ids.is_empty() {
+            watch = SentFilesWatch::default();
+            continue;
+        }
+        let read = tokio::task::spawn_blocking(move || {
+            let changes = watch.tick(&ids, &dirs);
+            (watch, ids, changes)
+        })
+        .await;
+        let Ok((back, ids, mut changes)) = read else {
+            watch = SentFilesWatch::default();
+            continue;
+        };
+        watch = back;
+        let mut state = shared.lock();
+        changes.extend(watch.missing(&ids, &state.sent_files));
+        if !changes.is_empty() {
+            state.sent_files.extend(changes);
+            state.publish_sessions(false);
         }
     }
 }
@@ -855,7 +930,48 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
         .unwrap_or_else(|| spec.cwd.clone());
     let cwd = app_core::settings::expand_home(&cwd, std::env::home_dir().as_deref());
     let command = (spec.program.clone(), spec.args.clone());
-    start_pane(shared, client_id, request, spec, cwd, |_| command, None);
+    let Some(plugin_dir) = shared.plugin_dir.clone().filter(|_| spec.preview && spec.claude) else {
+        start_pane(shared, client_id, request, spec, cwd, |_| command, None, false);
+        return;
+    };
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        let version = claude_version(&shared, &spec).await;
+        let preview = version.is_some_and(|version| version >= preview_plugin::MIN_CLAUDE);
+        let (program, mut args) = command;
+        if preview {
+            args.extend(preview_plugin::preview_args(&plugin_dir));
+        }
+        start_pane(&shared, client_id, request, spec, cwd, |_| (program, args), None, preview);
+    });
+}
+
+/// The version `spec.program` reports, from the cache or by running it (off the async threads) with the pane's
+/// environment. Only a version is cached, so a failed probe is tried again at the next spawn; spawns of one program
+/// that arrive together wait for the first probe instead of each running one.
+async fn claude_version(shared: &Arc<Shared>, spec: &SpawnRequest) -> Option<(u32, u32, u32)> {
+    let mut env = shared.base_env.clone();
+    env.retain(|(name, _)| !spec.env.iter().any(|(set, _)| set == name));
+    env.extend(spec.env.iter().cloned());
+    let program = spec.program.clone();
+    cached_version(&shared.claude_versions, &spec.program, move || {
+        preview_plugin::probe_version(&program, &env, CLAUDE_PROBE_TIMEOUT)
+    })
+    .await
+}
+
+/// The cached version of `program`, else what `probe` finds (run off the async threads); only `Some` is cached.
+async fn cached_version(
+    versions: &Mutex<HashMap<String, ClaudeVersion>>,
+    program: &str,
+    probe: impl FnOnce() -> Option<(u32, u32, u32)> + Send + 'static,
+) -> Option<(u32, u32, u32)> {
+    let slot = versions.lock().unwrap_or_else(PoisonError::into_inner).entry(program.to_string()).or_default().clone();
+    let mut known = slot.lock().await;
+    if known.is_none() {
+        *known = tokio::task::spawn_blocking(probe).await.ok().flatten();
+    }
+    *known
 }
 
 /// The answer to `FindContainer` without asking Docker, when there is one: the container the last lookup found for
@@ -908,6 +1024,16 @@ fn list_dir_request(shared: &Arc<Shared>, request: u64, path: String) {
             Err(reason) => DaemonMessage::DirListingFailed { request, reason },
         };
         shared.lock().control(&reply);
+    });
+}
+
+/// Answer `ReadFile` off the async threads.
+fn read_file_request(shared: &Arc<Shared>, request: u64, path: String, known_mtime_ms: Option<u64>) {
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || {
+        let body = crate::read_file::read_file(&path, known_mtime_ms, std::env::home_dir().as_deref());
+        let frame = Frame::control(&DaemonMessage::FileContents { request, body });
+        shared.lock().send_frame(frame);
     });
 }
 
@@ -1060,11 +1186,14 @@ fn spawn_in_container(shared: Arc<Shared>, client_id: u64, request: u64, spec: S
             cwd,
             |id| containers::exec_command(&container, &inner_cwd, &program, &args, &marker(&instance, id)),
             Some((folder, container.id.clone(), container.remote_user.clone())),
+            false,
         );
     });
 }
 
-/// Start a pane for `spec` in `cwd`, running the command `command` builds from the new pane's id.
+/// Start a pane for `spec` in `cwd`, running the command `command` builds from the new pane's id. `preview` = the
+/// command carries the preview plugin flags.
+#[allow(clippy::too_many_arguments)]
 fn start_pane(
     shared: &Arc<Shared>,
     client_id: u64,
@@ -1073,6 +1202,7 @@ fn start_pane(
     cwd: PathBuf,
     command: impl FnOnce(PaneId) -> (String, Vec<String>),
     container: Option<(PathBuf, String, Option<String>)>,
+    preview: bool,
 ) {
     let session_arg = claude_session(spec.claude, &spec.program, &spec.args).map(String::from);
     let mut state = shared.lock();
@@ -1116,6 +1246,7 @@ fn start_pane(
         container_id: container.as_ref().map(|(_, id, _)| id.clone()),
         container_user: container.as_ref().and_then(|(_, _, user)| user.clone()),
         container: container.map(|(folder, _, _)| folder),
+        preview,
         last_focused: state.focus_seq,
         needs_resync: false,
     };
@@ -1196,6 +1327,49 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn a_failed_version_probe_is_not_cached_but_a_version_is() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let versions = Mutex::new(HashMap::new());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = |answer| {
+            let runs = runs.clone();
+            move || {
+                runs.fetch_add(1, Ordering::SeqCst);
+                answer
+            }
+        };
+        assert_eq!(cached_version(&versions, "claude", counted(None)).await, None);
+        assert_eq!(cached_version(&versions, "claude", counted(Some((2, 1, 332)))).await, Some((2, 1, 332)));
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(cached_version(&versions, "claude", counted(None)).await, Some((2, 1, 332)));
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn spawns_arriving_together_share_one_version_probe() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let versions = Arc::new(Mutex::new(HashMap::new()));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let (versions, runs) = (versions.clone(), runs.clone());
+                tokio::spawn(async move {
+                    cached_version(&versions, "claude", move || {
+                        runs.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(100));
+                        Some((2, 1, 332))
+                    })
+                    .await
+                })
+            })
+            .collect();
+        for task in tasks {
+            assert_eq!(task.await.unwrap(), Some((2, 1, 332)));
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn sessions_are_sent_only_once_the_first_scan_is_done() {
         use claude_index::index::IndexState;
         let outbox = Outbox::new(1 << 20);
@@ -1263,8 +1437,11 @@ mod tests {
             claude_dir: None,
             search: None,
             paste_dir: None,
+            plugin_dir: None,
+            claude_versions: Mutex::new(HashMap::new()),
         });
         let spec = || SpawnRequest {
+            preview: false,
             program: "sleep".into(),
             args: vec!["30".into()],
             cwd: "/".into(),
@@ -1304,8 +1481,11 @@ mod tests {
             claude_dir: None,
             search: None,
             paste_dir: None,
+            plugin_dir: None,
+            claude_versions: Mutex::new(HashMap::new()),
         });
         let spec = SpawnRequest {
+            preview: false,
             program: "sh".into(),
             args: vec!["-c".into(), "seq 1 500; sleep 5".into()],
             cwd: "/".into(),
@@ -1353,8 +1533,11 @@ mod tests {
             claude_dir: None,
             search: None,
             paste_dir: None,
+            plugin_dir: None,
+            claude_versions: Mutex::new(HashMap::new()),
         });
         let spec = SpawnRequest {
+            preview: false,
             program: "sh".into(),
             args: Vec::new(),
             cwd: "/".into(),
@@ -1369,7 +1552,7 @@ mod tests {
         let script = "trap 'echo winch' WINCH; echo up; while :; do sleep 0.05; done";
         let command = |_| ("sh".to_string(), vec!["-c".to_string(), script.to_string()]);
         let container = container.then(|| (PathBuf::from("/"), "abc".to_string(), None));
-        start_pane(&shared, 1, 1, spec, "/".into(), command, container);
+        start_pane(&shared, 1, 1, spec, "/".into(), command, container, false);
         tokio::time::sleep(Duration::from_millis(1500)).await;
         let text = {
             let state = shared.lock();
@@ -1411,6 +1594,8 @@ mod tests {
             claude_dir: None,
             search: None,
             paste_dir: None,
+            plugin_dir: None,
+            claude_versions: Mutex::new(HashMap::new()),
         });
         let poisoner = shared.clone();
         let _ = std::thread::spawn(move || {

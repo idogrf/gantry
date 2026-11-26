@@ -78,12 +78,14 @@ fn shortcut_text(shortcut: Shortcut, settings: &Settings) -> String {
 }
 
 /// Draw `menu` floating above everything; a pick or a click outside calls back, `Esc` dismisses. A submenu opens beside
-/// its row on hover or `Right`, and closes on `Left` or `Esc`.
+/// its row on hover or `Right`, and closes on `Left` or `Esc`. A menu without submenus taller than `max_height`
+/// scrolls.
 pub(crate) fn render(
     id: &'static str,
     menu: &OpenMenu,
     theme: &Theme,
     settings: &Settings,
+    max_height: Pixels,
     on_pick: impl Fn(&MenuAction, &mut Window, &mut App) + 'static,
     on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -107,6 +109,9 @@ pub(crate) fn render(
             .when(entry.accent, |item| item.text_color(rgb(theme.tokens.accent)).font_weight(FontWeight::SEMIBOLD))
             .child(div().flex_1().whitespace_nowrap().child(entry.label.clone()))
             .when(entry.checked, |item| item.child(div().flex_none().text_color(rgb(theme.tokens.accent)).child("✓")))
+            .when_some(entry.detail.clone(), |item, detail| {
+                item.child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(detail))
+            })
             .when_some(entry.shortcut, |item, shortcut| {
                 item.child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(shortcut_text(shortcut, settings)))
             })
@@ -123,6 +128,9 @@ pub(crate) fn render(
     };
     let rows = menu.items.iter().enumerate().map(|(index, item)| match item {
         MenuItem::Separator => div().h(px(1.)).mx_2().my_1().bg(rgb(theme.tokens.line)).into_any_element(),
+        MenuItem::Heading(text) => {
+            div().px_3().pt_1().text_xs().text_color(rgb(theme.tokens.muted)).child(text.clone()).into_any_element()
+        }
         MenuItem::Entry(entry) => entry_row(("menu-item", index), entry, Some(menu.sub.clone())),
         MenuItem::Submenu { label, items } => {
             let (hover, click) = (menu.sub.clone(), menu.sub.clone());
@@ -257,6 +265,8 @@ pub(crate) fn render(
         .border_color(rgb(theme.tokens.line))
         .rounded(px(RADIUS))
         .shadow_lg()
+        // A menu with submenus keeps its overflow visible, since a submenu is drawn outside the card.
+        .when(first_submenu.is_none(), |card| card.max_h(max_height).overflow_y_scroll())
         .children(rows);
     deferred(anchored().position(menu.position).snap_to_window().child(fade_in(
         card,

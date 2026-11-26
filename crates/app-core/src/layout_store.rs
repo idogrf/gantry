@@ -65,7 +65,7 @@ pub fn save(path: &Path, workspace: &Workspace) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::PaneLaunch;
+    use crate::workspace::{PaneLaunch, PreviewLeaf};
     use protocol::host::HostId;
 
     fn sample() -> Workspace {
@@ -242,6 +242,188 @@ mod tests {
             .host_folders
             .insert(devbox.clone(), vec![crate::launcher::HostFolder { path: "/srv".into(), last_active_ms: 4 }]);
         save(&path, &workspace).unwrap();
+        assert_eq!(load(&path).unwrap(), Some(workspace));
+    }
+
+    #[test]
+    fn a_layout_from_before_previews_loads_and_saves_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        let mut workspace = sample();
+        workspace.set_leaf_project(1, Some("Billing"));
+        workspace.session_projects.insert("s1".into(), "Billing".into());
+        save(&path, &workspace).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let text = String::from_utf8(before.clone()).unwrap();
+        for key in ["preview", "sent_seen", "sent_removed", "linked"] {
+            assert!(!text.contains(key), "{key} must not be written: {text}");
+        }
+        let loaded = load(&path).unwrap().unwrap();
+        save(&path, &loaded).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_preview_leaf_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        let mut workspace = sample();
+        let claude = workspace.focused().unwrap();
+        workspace.leaves.get_mut(&claude).unwrap().session = Some("s1".into());
+        let preview =
+            workspace.split(crate::split_tree::Axis::Horizontal, PaneLaunch::preview("/repo".into())).unwrap();
+        workspace.leaves.get_mut(&preview).unwrap().preview = Some(PreviewLeaf {
+            follows: Some(claude),
+            held: None,
+            session: Some("s1".into()),
+            active: Some("t:0".into()),
+            linked: Vec::new(),
+        });
+        workspace.mark_seen("s1", "t:0");
+        workspace.sent_removed.entry("s1".into()).or_default().insert("t:1".into());
+        save(&path, &workspace).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("sent_seen") && text.contains("sent_removed"), "{text}");
+        assert_eq!(load(&path).unwrap(), Some(workspace));
+    }
+
+    #[test]
+    fn a_preview_with_linked_tabs_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        let mut workspace = sample();
+        let claude = workspace.focused().unwrap();
+        let preview =
+            workspace.split(crate::split_tree::Axis::Horizontal, PaneLaunch::preview("/repo".into())).unwrap();
+        let linked = protocol::message::SentFile {
+            id: "link:/repo/docs/a.md".into(),
+            path: "/repo/docs/a.md".into(),
+            sent_ms: 7,
+            caption: None,
+            backlog: true,
+        };
+        workspace.leaves.get_mut(&preview).unwrap().preview = Some(PreviewLeaf {
+            follows: Some(claude),
+            held: None,
+            session: Some("s1".into()),
+            active: Some(linked.id.clone()),
+            linked: vec![linked],
+        });
+        save(&path, &workspace).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("linked") && text.contains("link:/repo/docs/a.md"), "{text}");
+        assert_eq!(load(&path).unwrap(), Some(workspace));
+    }
+
+    #[test]
+    fn a_preview_following_a_missing_leaf_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        let mut workspace = sample();
+        let leaf = workspace.new_tab(PaneLaunch::preview("/repo".into()));
+        workspace.leaves.get_mut(&leaf).unwrap().preview = Some(PreviewLeaf {
+            follows: Some(999),
+            held: None,
+            session: Some("gone".into()),
+            active: None,
+            linked: Vec::new(),
+        });
+        save(&path, &workspace).unwrap();
+        assert_eq!(load(&path).unwrap(), Some(workspace));
+    }
+
+    /// A layout file exactly as PR 3 wrote it (a following preview, no `held`, `active` or `linked`).
+    const PR3_LAYOUT: &str = r#"{
+  "version": 2,
+  "workspace": {
+    "instances": {
+      "local": "i"
+    },
+    "tabs": [
+      {
+        "root": {
+          "Split": {
+            "id": 2,
+            "axis": "Vertical",
+            "ratio": 0.5,
+            "first": {
+              "Leaf": 1
+            },
+            "second": {
+              "Leaf": 3
+            }
+          }
+        },
+        "focused": 3
+      }
+    ],
+    "active": 0,
+    "leaves": {
+      "1": {
+        "pane": 3,
+        "launch": {
+          "program": "claude",
+          "args": [
+            "--session-id",
+            "s1"
+          ],
+          "cwd": "/repo",
+          "claude": true
+        },
+        "session": "s1"
+      },
+      "3": {
+        "pane": null,
+        "launch": {
+          "program": "",
+          "args": [],
+          "cwd": "/repo"
+        },
+        "session": null,
+        "preview": {
+          "follows": 1,
+          "session": "s1"
+        }
+      }
+    },
+    "sidebar": {
+      "width": 280.0
+    },
+    "next_id": 3
+  }
+}"#;
+
+    #[test]
+    fn a_pr3_preview_layout_saves_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        std::fs::write(&path, PR3_LAYOUT).unwrap();
+        let loaded = load(&path).unwrap().unwrap();
+        let preview = loaded.leaves.values().find_map(|leaf| leaf.preview.as_ref()).unwrap();
+        assert_eq!((preview.follows, preview.session.as_deref()), (Some(1), Some("s1")));
+        assert!(preview.held.is_none() && preview.active.is_none() && preview.linked.is_empty());
+        save(&path, &loaded).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), PR3_LAYOUT);
+    }
+
+    #[test]
+    fn a_holding_pane_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        let mut workspace = sample();
+        let leaf = workspace.new_tab(PaneLaunch::preview("/repo".into()));
+        let held = protocol::message::SentFile {
+            id: "a".into(),
+            path: "/repo/a.md".into(),
+            sent_ms: 3,
+            caption: None,
+            backlog: true,
+        };
+        workspace.leaves.get_mut(&leaf).unwrap().preview =
+            Some(PreviewLeaf { follows: None, held: Some(held), session: None, active: None, linked: Vec::new() });
+        save(&path, &workspace).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("held") && !text.contains("follows"), "{text}");
         assert_eq!(load(&path).unwrap(), Some(workspace));
     }
 }

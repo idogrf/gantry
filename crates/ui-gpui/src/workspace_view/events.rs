@@ -26,7 +26,16 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         for event in events {
+            // By value: a file's bytes can be 25 MB, so they are moved to the cache, never cloned.
+            let event = match event {
+                ClientEvent::FileContents { request, body } => {
+                    self.on_file_contents(host, request, body, window, cx);
+                    continue;
+                }
+                event => event,
+            };
             match &event {
+                ClientEvent::FileContents { .. } => {} // taken above
                 ClientEvent::Output { pane, .. }
                 | ClientEvent::Resync { pane, .. }
                 | ClientEvent::PasteImageSaved { pane, .. }
@@ -93,6 +102,11 @@ impl WorkspaceView {
                     self.attention.reset(host, sessions);
                     let sessions = sessions.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, sessions, cx));
+                    // A fresh connection (a new daemon): what to watch is sent again.
+                    self.watch_sent.remove(host);
+                    self.watch_fresh.insert(host.clone());
+                    self.update_previews(cx);
+                    self.previews_in_view(window, cx);
                     self.remember_folders(host, cx);
                     self.push_recents(cx);
                     self.resume_finished(window, cx);
@@ -109,6 +123,8 @@ impl WorkspaceView {
                     let alerts = self.attention.update(host, upserted, removed);
                     let upserted = upserted.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.apply(host, upserted, removed, cx));
+                    self.update_previews(cx);
+                    self.previews_in_view(window, cx);
                     self.remember_folders(host, cx);
                     self.restart_drained(host, window, cx);
                     for alert in alerts {
@@ -211,6 +227,7 @@ impl WorkspaceView {
                     if let Some(conn) = self.hosts.get_mut(host) {
                         conn.connected = false;
                     }
+                    self.forget_host_reads(host);
                     let leaves: Vec<NodeId> = self
                         .workspace
                         .leaves
@@ -238,6 +255,20 @@ impl WorkspaceView {
             }
         }
         if changed {
+            let stale: Vec<NodeId> = self
+                .preview_undo
+                .iter()
+                .filter(|(leaf, (closed_in, _))| {
+                    self.workspace.preview_session(**leaf).is_none_or(|(_, session)| session != closed_in)
+                })
+                .map(|(leaf, _)| *leaf)
+                .collect();
+            for leaf in stale {
+                self.preview_undo.remove(&leaf);
+                if let Some(slot) = self.previews.get(&leaf) {
+                    slot.view.update(cx, |view, cx| view.hide_undo(cx));
+                }
+            }
             self.save(cx);
         }
     }
@@ -280,11 +311,20 @@ impl WorkspaceView {
         let Some(leaf) = self.workspace.leaf_for_pane(&alert.pane) else { return };
         let settings = cx.global::<SettingsStore>().settings().clone();
         let visible = self.workspace.is_visible(leaf);
-        let channels = alert_channels(&settings.alerts, &alert.kind, visible, window.is_window_active());
-        if channels.badge {
+        let channels = alert_channels(
+            &settings.alerts,
+            &alert.kind,
+            visible,
+            window.is_window_active(),
+            self.alert_preview_in_view(&alert),
+        );
+        if channels.badge && alert.kind.marks_unseen() {
             self.unseen.insert(leaf, alert.kind.clone());
             self.sync_unseen(cx);
             self.clear_seen(window, cx);
+        }
+        if channels.popup {
+            self.push_toast(leaf, alert.clone(), window, cx);
         }
         if !channels.notification && channels.sound.is_none() {
             return;
@@ -321,6 +361,7 @@ impl WorkspaceView {
         if self.unseen.len() != before {
             self.sync_unseen(cx);
         }
+        self.previews_in_view(window, cx);
         if active {
             cx.notify();
         }

@@ -63,12 +63,16 @@ impl WorkspaceView {
             return;
         };
         let (cols, rows) = view.read(cx).grid_size();
-        let scrollback = cx.global::<SettingsStore>().settings().window.scrollback;
+        let settings = cx.global::<SettingsStore>().settings();
+        let (scrollback, preview) = (settings.window.scrollback, settings.preview.enabled);
         // Pane ids belong to one daemon: only a pane of the same host can lend its directory.
         let cwd_from = cwd_from.filter(|key| key.host == host).map(|key| key.pane);
         self.next_request += 1;
         self.pending.insert(self.next_request, leaf);
-        client.spawn(self.next_request, self.workspace.leaves[&leaf].launch.request(cwd_from, cols, rows, scrollback));
+        client.spawn(
+            self.next_request,
+            self.workspace.leaves[&leaf].launch.request(cwd_from, cols, rows, scrollback, preview),
+        );
     }
 
     /// The badge of the Claude config dir `leaf` runs in, when two or more are configured (never on an SSH host).
@@ -295,6 +299,12 @@ impl WorkspaceView {
     }
 
     pub(super) fn close_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
+        // A session has to be open to see its files: closing a Claude pane closes the preview that follows it.
+        if let Some(follower) = self.workspace.preview_of(leaf) {
+            self.close_leaf(follower, window, cx);
+        }
+        self.toasts.remove_leaf(leaf);
+        self.reschedule_toasts(window, cx);
         let from = self.drawn_rects();
         // A pane of the visible tab that keeps other panes: the survivors grow into its space.
         let swipe = from.len() > 1 && from.iter().any(|(drawn, _)| *drawn == leaf);
@@ -313,6 +323,13 @@ impl WorkspaceView {
             }
         }
         self.slots.remove(&leaf);
+        self.previews.remove(&leaf);
+        self.preview_known.remove(&leaf);
+        self.preview_undo.remove(&leaf);
+        self.preview_rows.remove(&leaf);
+        self.release_unlisted_previews(cx);
+        self.flush_releases(window, cx);
+        self.sync_watch(cx);
         self.renames.remove(&leaf);
         if self.unseen.remove(&leaf).is_some() {
             self.sync_unseen(cx);
@@ -376,7 +393,13 @@ impl WorkspaceView {
             self.clear_seen(window, cx);
             return;
         }
+        let preview = self.workspace.focused().and_then(|leaf| self.previews.get(&leaf));
         match self.workspace.focused().and_then(|leaf| self.slots.get(&leaf).map(|slot| (leaf, slot))) {
+            _ if preview.is_some() => {
+                if let Some(slot) = preview {
+                    slot.view.focus_handle(cx).focus(window, cx);
+                }
+            }
             Some((leaf, slot)) => {
                 slot.view.focus_handle(cx).focus(window, cx);
                 if let Some(key) = self.workspace.leaves[&leaf].key()
@@ -408,6 +431,9 @@ impl WorkspaceView {
         if tab.settings {
             return "Settings".to_string();
         }
+        if self.workspace.is_preview(tab.focused) {
+            return self.leaf_title(tab.focused, cx);
+        }
         let title = self.slots.get(&tab.focused).map_or_else(String::new, |slot| slot.view.read(cx).title());
         if self.workspace.tab_status(index, self.sidebar.read(cx).sessions()).is_some() {
             without_claude_glyph(&title).to_string()
@@ -426,16 +452,22 @@ impl WorkspaceView {
             .filter(|(id, _)| !unlisted.contains(id))
             .map(|(id, leaf)| {
                 let view = self.slots.get(id).map(|slot| slot.view.read(cx));
+                let is_preview = leaf.preview.is_some();
+                // A preview sits in the project of the session it shows.
+                let cwd = if is_preview { self.preview_cwd(*id, cx) } else { leaf.launch.cwd.clone() };
                 PaneEntry {
                     leaf: *id,
                     host: leaf.host.clone(),
-                    cwd: leaf.launch.cwd.clone(),
-                    title: leaf
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| view.map_or_else(|| leaf.launch.label(), |view| view.title())),
-                    session: leaf.session.clone(),
-                    claude: leaf.launch.is_claude(),
+                    cwd,
+                    title: if is_preview {
+                        self.leaf_title(*id, cx)
+                    } else {
+                        leaf.name
+                            .clone()
+                            .unwrap_or_else(|| view.map_or_else(|| leaf.launch.label(), |view| view.title()))
+                    },
+                    session: if is_preview { None } else { leaf.session.clone() },
+                    claude: !is_preview && leaf.launch.is_claude(),
                     ended: view.is_some_and(|view| view.has_ended()),
                     offline: self.leaf_offline(*id),
                     alone: self
@@ -445,6 +477,7 @@ impl WorkspaceView {
                     container: leaf.launch.container.clone(),
                     color: leaf.color,
                     project: leaf.project.clone(),
+                    preview: leaf.preview.is_some(),
                 }
             })
             .collect();

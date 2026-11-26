@@ -331,6 +331,7 @@ mod tests {
 
     fn info(host: &HostId, cwd: &str, last_active_ms: u64, cwd_exists: bool) -> SessionInfo {
         SessionInfo {
+            sent_files: Vec::new(),
             id: format!("{host:?}{cwd}{last_active_ms}"),
             cwd: cwd.into(),
             title: String::new(),

@@ -5,6 +5,29 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Preview pane** - Claude can show you files: a document, a screenshot, a chart opens in a pane beside its session (right-click a running Claude session > Open preview, or the "Open preview for focused session" shortcut, unbound by default).
+  - File tabs: the newest file is active, × removes a file from the list (the file on disk is never touched), `+N` stands for the rest.
+  - Images: fit, zoom, pan and a map.
+  - Markdown, GitHub style: tables, task lists, alerts, footnotes and code colors with Copy. Links to other `.md` files open as tabs, and images in documents show.
+  - Text and code with syntax colors. Select and copy.
+  - Right-to-left documents are laid out from the right with Settings > Terminal > Right-to-left display on; ⇄ flips one.
+  - Open in system viewer on every file. Files reload while shown.
+  - Works on SSH hosts.
+  - Needs Claude Code 2.1.332 or newer. Needs a daemon restart; SSH hosts need the new `gantryd` (Install… / Update and restart).
+- **File chip and pop-ups** - A chip on a session's row shows while Claude has sent a file you have not looked at; click it for the preview.
+  - A pop-up at the bottom right says Claude sent a file (Preview, Go to session; drag it onto a pane).
+  - Pop-ups can also be turned on for Needs input and Finished in Settings > Alerts (new Pop-up column and File sent row).
+- **Drag files onto panes** - Drag a file tab or a pop-up onto a pane's edge for a pane that holds that one file, or onto a preview to show it there.
+- **Preview setting** - Settings > Sessions > Preview > Let Claude show you files (on by default; applies to sessions started or resumed after the change).
+- **Files button** - A Files chip in the title bar (beside the Git chip) and a file icon in the header of each pane of a split tab open the preview of that session and close it again. A dot shows a file you have not seen. The preview opens even before the session has sent a file.
+- **All files** - The end of the preview's tab row lists every file the session sent, open and closed; click a closed one to bring it back. A preview with every file closed lists them too, and closing a file offers Undo for a few seconds.
+- **Text size in the preview** - Markdown and text files have − / + at the bottom of the preview (Ctrl+wheel works too, Cmd+wheel on macOS); one size for every file, kept in settings.json as preview.textSize.
+- **Close file tabs with a middle click** - A middle click on a file tab of the preview removes it from the list, like its ×.
+
+### Fixed
+- **Claude started from a Claude session** - A Claude pane of a Gantry that was started from inside a Claude Code session saves its transcript again. Needs a daemon restart.
+
 ## [0.15.0] - 2026-11-22
 
 **TL;DR** Gantry can now install new versions by itself (turn it on in Settings > Window > Updates), and you finish with one click on Restart and update. You can also rename a Claude session from the side panel and change how unread sessions look.

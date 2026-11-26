@@ -13,10 +13,11 @@ use crate::theme::{RADIUS_SMALL, Theme};
 pub(super) enum Event {
     NeedsInput,
     Finished,
+    FileSent,
 }
 
 impl Event {
-    const ALL: [Event; 2] = [Event::NeedsInput, Event::Finished];
+    const ALL: [Event; 3] = [Event::NeedsInput, Event::Finished, Event::FileSent];
 
     fn index(self) -> usize {
         self as usize
@@ -26,6 +27,7 @@ impl Event {
         match self {
             Event::NeedsInput => "Needs input",
             Event::Finished => "Finished",
+            Event::FileSent => "File sent",
         }
     }
 
@@ -33,13 +35,16 @@ impl Event {
         match self {
             Event::NeedsInput => "Claude asks for permission or a reply.",
             Event::Finished => "Busy, then idle.",
+            Event::FileSent => "Claude sends you a file to look at. Its badge is the file chip.",
         }
     }
 
-    fn tone(self) -> Tone {
+    /// The color of the event's dot: its status tone, or the accent for a sent file.
+    fn dot(self, theme: &Theme) -> u32 {
         match self {
-            Event::NeedsInput => Tone::NeedsInput,
-            Event::Finished => Tone::Done,
+            Event::NeedsInput => theme.tone(Tone::NeedsInput).dot,
+            Event::Finished => theme.tone(Tone::Done).dot,
+            Event::FileSent => theme.tokens.accent,
         }
     }
 
@@ -47,6 +52,7 @@ impl Event {
         match self {
             Event::NeedsInput => AlertTone::NEEDS_INPUT,
             Event::Finished => AlertTone::FINISHED,
+            Event::FileSent => AlertTone::FILE_SENT,
         }
     }
 
@@ -54,6 +60,7 @@ impl Event {
         match self {
             Event::NeedsInput => &mut alerts.needs_input,
             Event::Finished => &mut alerts.finished,
+            Event::FileSent => &mut alerts.file_sent,
         }
     }
 }
@@ -144,6 +151,17 @@ impl SettingsView {
                         e.badge = !e.badge;
                     }),
                 );
+                let popup = self.switch(
+                    "popup",
+                    index,
+                    channels.popup,
+                    window,
+                    cx,
+                    change(move |s| {
+                        let e = event.alerts(&mut s.alerts);
+                        e.popup = !e.popup;
+                    }),
+                );
                 let notification = self.switch(
                     "notification",
                     index,
@@ -198,6 +216,7 @@ impl SettingsView {
                     .items_end()
                     .gap(theme.ui(14.))
                     .child(labelled("Badge", badge))
+                    .child(labelled("Pop-up", popup))
                     .child(labelled("Notification", notification))
                     .child(labelled("Sound", sound))
                     .child(picker)
@@ -218,7 +237,7 @@ impl SettingsView {
                     .flex()
                     .items_center()
                     .gap(theme.ui(10.))
-                    .child(div().flex_none().size(theme.ui(10.)).rounded_full().bg(rgb(theme.tone(event.tone()).dot)))
+                    .child(div().flex_none().size(theme.ui(10.)).rounded_full().bg(rgb(event.dot(theme))))
                     .child(row_label(event.label(), muted(theme, event.description())));
                 row_shell(theme, label, control, reset)
             })
@@ -250,7 +269,7 @@ impl SettingsView {
                 ),
             ));
         }
-        group(theme, "Events", Some("Badge, notification and sound for each event."), rows)
+        group(theme, "Events", Some("Badge, pop-up, notification and sound for each event."), rows)
     }
 
     fn visibility_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -486,6 +505,27 @@ impl SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn three_events_in_order() {
+        let labels: Vec<_> = Event::ALL.into_iter().map(Event::label).collect();
+        assert_eq!(labels, ["Needs input", "Finished", "File sent"]);
+    }
+
+    #[test]
+    fn each_event_edits_its_own_settings() {
+        let mut a = Settings::default().alerts;
+        let before = a;
+        Event::FileSent.alerts(&mut a).popup = false;
+        assert_ne!(a.file_sent, before.file_sent);
+        assert_eq!(a.needs_input, before.needs_input);
+        assert_eq!(a.finished, before.finished);
+    }
+
+    #[test]
+    fn file_sent_offers_its_tones() {
+        assert_eq!(Event::FileSent.tones(), AlertTone::FILE_SENT);
+    }
 
     #[test]
     fn the_slider_value_follows_the_pointer_in_whole_percents() {

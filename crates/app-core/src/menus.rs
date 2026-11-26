@@ -63,6 +63,38 @@ pub enum MenuAction {
     RenameTab(usize),
     /// Close one pane.
     ClosePane(NodeId),
+    /// Open (or show) the preview pane that follows the Claude pane `leaf`.
+    OpenPreview(NodeId),
+    /// Make a sent file the active tab of the preview pane `leaf`.
+    ActivateSentFile {
+        /// The preview pane.
+        leaf: NodeId,
+        /// The file's id.
+        id: String,
+    },
+    /// Bring a closed sent file back as a tab of the preview pane `leaf` and show it.
+    ReopenSentFile {
+        /// The preview pane.
+        leaf: NodeId,
+        /// The file's id.
+        id: String,
+    },
+    /// Hide a sent file from the preview pane `leaf` (the file itself is untouched).
+    RemoveSentFile {
+        /// The preview pane.
+        leaf: NodeId,
+        /// The file's id.
+        id: String,
+    },
+    /// Hide every sent file of the session the preview pane follows.
+    ClearSentFiles(NodeId),
+    /// Copy the contents of file `id` of the preview pane `leaf`.
+    CopyFileContents {
+        /// The preview pane.
+        leaf: NodeId,
+        /// The file's id.
+        id: String,
+    },
     /// Close every pane of a tab.
     CloseTab(usize),
     /// Start a new Claude session in a folder with the named config dir (and remember it for the folder).
@@ -152,6 +184,8 @@ pub struct MenuEntry {
     pub swatch: Option<ProjectColor>,
     /// Marked as the current choice.
     pub checked: bool,
+    /// A muted note drawn on the right (an age).
+    pub detail: Option<String>,
 }
 
 /// A menu line.
@@ -168,6 +202,8 @@ pub enum MenuItem {
     },
     /// A line between groups.
     Separator,
+    /// A muted caption above a group; not pickable.
+    Heading(String),
 }
 
 /// What the menus need to know beyond the row: the Claude config dirs and the colors.
@@ -215,6 +251,7 @@ fn entry(label: &str, action: MenuAction) -> MenuItem {
         action,
         swatch: None,
         checked: false,
+        detail: None,
     })
 }
 
@@ -226,6 +263,7 @@ fn with_shortcut(label: &str, shortcut: Shortcut, action: MenuAction) -> MenuIte
         action,
         swatch: None,
         checked: false,
+        detail: None,
     })
 }
 
@@ -237,6 +275,7 @@ fn accented(label: &str, action: MenuAction) -> MenuItem {
         action,
         swatch: None,
         checked: false,
+        detail: None,
     })
 }
 
@@ -255,6 +294,7 @@ fn color_menu(root: &Path, current: Option<Tint>) -> MenuItem {
                 action,
                 swatch: Some(color),
                 checked: current == Some(Tint::Palette(color)),
+                detail: None,
             })
         })
         .collect();
@@ -266,6 +306,7 @@ fn color_menu(root: &Path, current: Option<Tint>) -> MenuItem {
         action: MenuAction::SetProjectColor { root: root.to_path_buf(), color: None },
         swatch: None,
         checked: current.is_none(),
+        detail: None,
     }));
     MenuItem::Submenu { label: "Color".into(), items }
 }
@@ -284,6 +325,7 @@ fn pane_color_menu(context: &MenuContext) -> Option<MenuItem> {
                 action: MenuAction::SetPaneColor { leaf, color: Some(Tint::Palette(color)) },
                 swatch: Some(color),
                 checked: current == Some(Tint::Palette(color)),
+                detail: None,
             })
         })
         .collect();
@@ -295,6 +337,7 @@ fn pane_color_menu(context: &MenuContext) -> Option<MenuItem> {
         action: MenuAction::SetPaneColor { leaf, color: None },
         swatch: None,
         checked: current.is_none(),
+        detail: None,
     }));
     Some(MenuItem::Submenu { label: "Tab color".into(), items })
 }
@@ -478,6 +521,14 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
             if let (Tone::Idle | Tone::Done | Tone::Unread, Some(leaf)) = (tone, leaf) {
                 items.push(read_mark_item(*leaf, *tone != Tone::Idle));
             }
+            // Only a live Gantry Claude pane: never Closed, External or a dev container row.
+            if let (Some(leaf), None, true) = (
+                leaf,
+                &session.container,
+                matches!(session.state, SessionState::Managed { .. }) && *tone != Tone::Closed,
+            ) {
+                items.push(entry("Open preview", MenuAction::OpenPreview(*leaf)));
+            }
             items.extend(pane_color_menu(context));
             items.push(entry("Copy session id", MenuAction::Copy(session.id.clone())));
             items.extend(folder_items(&session.cwd, vscode, &session.host));
@@ -490,6 +541,12 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
                 items.push(MenuItem::Separator);
                 items.push(close_item(*leaf, alone));
             }
+        }
+        RowKind::Pane { entry: pane, .. } if pane.preview => {
+            items.extend(pane_color_menu(context));
+            items.extend(remove_from_project_item(row, pane.leaf));
+            items.push(MenuItem::Separator);
+            items.push(close_item(pane.leaf, alone));
         }
         RowKind::Pane { entry: pane, .. } => {
             let vscode = vscode_args(&pane.cwd, None, pane.container.as_deref());
@@ -517,6 +574,53 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
         }
     }
     Some(tidy(items))
+}
+
+/// The menu of a preview pane's file tab or body: `file` = the file's id when a tab was clicked, `copy` = the id of
+/// the file whose text can be copied (the clicked tab's, else the shown file's), if it is text. A `holding` pane has
+/// no list to edit, so only Copy is offered.
+pub fn preview_menu(leaf: NodeId, file: Option<&str>, copy: Option<&str>, holding: bool) -> Vec<MenuItem> {
+    let mut items = Vec::new();
+    if let Some(id) = copy {
+        items.push(entry("Copy file contents", MenuAction::CopyFileContents { leaf, id: id.to_string() }));
+        items.push(MenuItem::Separator);
+    }
+    if holding {
+        return tidy(items);
+    }
+    if let Some(id) = file {
+        items.push(entry("Remove from list", MenuAction::RemoveSentFile { leaf, id: id.to_string() }));
+    }
+    items.push(entry("Clear all files from this session", MenuAction::ClearSentFiles(leaf)));
+    tidy(items)
+}
+
+/// The menu of the `All files` button: heading `Open` and the listed tabs, then (when there are any) a separator,
+/// heading `Closed` and the closed files. Each is `(id, name, age)`; the age is drawn on the right.
+pub fn all_files_menu(
+    leaf: NodeId,
+    open: &[(String, String, String)],
+    closed: &[(String, String, String)],
+) -> Vec<MenuItem> {
+    let file = |(_, name, age): &(String, String, String), action| {
+        MenuItem::Entry(MenuEntry {
+            label: name.clone(),
+            shortcut: None,
+            accent: false,
+            action,
+            swatch: None,
+            checked: false,
+            detail: Some(age.clone()),
+        })
+    };
+    let mut items = vec![MenuItem::Heading("Open".into())];
+    items.extend(open.iter().map(|f| file(f, MenuAction::ActivateSentFile { leaf, id: f.0.clone() })));
+    if !closed.is_empty() {
+        items.push(MenuItem::Separator);
+        items.push(MenuItem::Heading("Closed".into()));
+        items.extend(closed.iter().map(|f| file(f, MenuAction::ReopenSentFile { leaf, id: f.0.clone() })));
+    }
+    items
 }
 
 /// A project heading's menu; `path` = the project key (see `protocol::host::project_key`), `container` = the dev
@@ -571,6 +675,7 @@ mod tests {
                 MenuItem::Entry(entry) => entry.label.clone(),
                 MenuItem::Submenu { label, .. } => format!("{label} ▸"),
                 MenuItem::Separator => "│".into(),
+                MenuItem::Heading(text) => text.clone(),
             })
             .collect()
     }
@@ -594,6 +699,7 @@ mod tests {
 
     fn session(state: SessionState) -> SessionInfo {
         SessionInfo {
+            sent_files: Vec::new(),
             id: "s1".into(),
             cwd: "/r/app".into(),
             title: "t".into(),
@@ -627,11 +733,96 @@ mod tests {
             container: None,
             color: None,
             project: None,
+            preview: false,
         };
         Row::new(RowKind::Pane { entry, tone: if ended { Tone::Closed } else { Tone::Idle }, note: String::new() })
     }
 
     const ALONE: &dyn Fn(NodeId) -> bool = &|_| true;
+
+    #[test]
+    fn a_gantry_claude_row_offers_open_preview() {
+        let ctx = two_dirs(None);
+        let offers = |row: &Row| {
+            let items = row_menu(row, ALONE, &ctx).unwrap();
+            labels(&items).contains(&"Open preview".to_string())
+        };
+        let running = SessionState::Managed { pane: 1 };
+        let row = session_row(running, Tone::Idle, Some(4));
+        assert!(offers(&row));
+        let items = row_menu(&row, ALONE, &ctx).unwrap();
+        assert!(items.iter().any(|item| matches!(item, MenuItem::Entry(e) if e.action == MenuAction::OpenPreview(4))));
+        let labels_all = labels(&items);
+        let mark = labels_all.iter().position(|l| l.starts_with("Mark ")).unwrap();
+        assert_eq!(labels_all[mark + 1], "Open preview");
+        assert!(!offers(&session_row(SessionState::External { pid: Some(9) }, Tone::Elsewhere, Some(4))));
+        assert!(!offers(&session_row(running, Tone::Idle, None)));
+        assert!(!offers(&session_row(SessionState::Closed, Tone::Closed, Some(4))), "an exited row");
+        assert!(!offers(&session_row(running, Tone::Closed, Some(4))), "a Closed tone");
+        let Row { kind: RowKind::Session { mut session, tone, note, leaf }, .. } =
+            session_row(running, Tone::Idle, Some(4))
+        else {
+            unreachable!()
+        };
+        session.container = Some(protocol::message::ContainerPlace { host_folder: None, path: "/w".into() });
+        assert!(!offers(&Row::new(RowKind::Session { session, tone, note, leaf })));
+    }
+
+    #[test]
+    fn a_preview_row_offers_only_close_and_color() {
+        let Row { kind: RowKind::Pane { mut entry, tone, note }, .. } = pane_row(false, false) else { unreachable!() };
+        entry.preview = true;
+        let row = Row::new(RowKind::Pane { entry, tone, note });
+        let items = labels(&row_menu(&row, &|_| false, &two_dirs(None)).unwrap());
+        assert_eq!(items.last().map(String::as_str), Some("Close pane"));
+        for banned in ["Rename…", "Copy session id", "Copy folder path", "Open folder", "Open in VS Code"] {
+            assert!(!items.iter().any(|l| l == banned), "{banned}");
+        }
+    }
+
+    #[test]
+    fn preview_menu_offers_copy_only_for_text() {
+        assert_eq!(
+            labels(&preview_menu(3, Some("f1"), Some("f1"), false)),
+            ["Copy file contents", "│", "Remove from list", "Clear all files from this session"]
+        );
+        assert_eq!(labels(&preview_menu(3, None, None, false)), ["Clear all files from this session"]);
+        assert_eq!(
+            labels(&preview_menu(3, Some("f1"), None, false)),
+            ["Remove from list", "Clear all files from this session"]
+        );
+        let items = preview_menu(3, Some("f2"), Some("f2"), false);
+        assert!(matches!(
+            &items[0],
+            MenuItem::Entry(e) if e.action == MenuAction::CopyFileContents { leaf: 3, id: "f2".into() }
+        ));
+    }
+
+    #[test]
+    fn holding_menus_have_no_list_entries() {
+        assert_eq!(labels(&preview_menu(3, Some("f1"), Some("f1"), true)), ["Copy file contents"]);
+        assert!(preview_menu(3, Some("f1"), None, true).is_empty());
+    }
+
+    #[test]
+    fn all_files_menu_has_open_then_closed() {
+        let open = [("a".to_string(), "one.png".to_string(), "1m".to_string())];
+        let closed = [("b".to_string(), "two.md".to_string(), "2h".to_string())];
+        let items = all_files_menu(3, &open, &closed);
+        assert_eq!(labels(&items), ["Open", "one.png", "│", "Closed", "two.md"]);
+        assert!(matches!(&items[0], MenuItem::Heading(text) if text == "Open"));
+        assert!(matches!(
+            &items[1],
+            MenuItem::Entry(e) if e.action == MenuAction::ActivateSentFile { leaf: 3, id: "a".into() }
+                && e.detail.as_deref() == Some("1m")
+        ));
+        assert!(matches!(
+            &items[4],
+            MenuItem::Entry(e) if e.action == MenuAction::ReopenSentFile { leaf: 3, id: "b".into() }
+                && e.detail.as_deref() == Some("2h")
+        ));
+        assert_eq!(labels(&all_files_menu(3, &open, &[])), ["Open", "one.png"]);
+    }
 
     #[test]
     fn a_middle_click_closes_the_pane_or_tab_a_row_stands_for() {
@@ -811,6 +1002,7 @@ mod tests {
             labels(&items),
             [
                 "Mark as unread",
+                "Open preview",
                 "Copy session id",
                 "Copy folder path",
                 "Open folder",
@@ -820,7 +1012,7 @@ mod tests {
                 "Close tab"
             ]
         );
-        let MenuItem::Entry(copy) = &items[1] else { panic!() };
+        let MenuItem::Entry(copy) = &items[2] else { panic!() };
         assert_eq!(copy.action, MenuAction::Copy("s1".into()));
     }
 

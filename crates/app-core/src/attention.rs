@@ -1,10 +1,11 @@
 //! Attention: which status changes of Gantry's own sessions deserve the user's notice (spec §5.7).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use protocol::host::{HostId, PaneKey};
-use protocol::message::{SessionInfo, SessionState, SessionStatus};
+use protocol::message::{SentFile, SessionInfo, SessionState, SessionStatus};
 
+use crate::preview::fresh_sends;
 use crate::settings::{AlertSettings, AlertTone};
 
 /// A turn counts as finished only after this much busy time unless the settings say otherwise.
@@ -20,6 +21,18 @@ pub enum AlertKind {
     },
     /// It finished a turn.
     Finished,
+    /// Claude sent files to the preview.
+    FileSent {
+        /// The new files, oldest first; never empty.
+        files: Vec<SentFile>,
+    },
+}
+
+impl AlertKind {
+    /// Whether the alert's badge marks the session's pane unseen. A sent file does not: its badge is the file chip.
+    pub fn marks_unseen(&self) -> bool {
+        !matches!(self, AlertKind::FileSent { .. })
+    }
 }
 
 /// One status change worth telling the user about.
@@ -49,6 +62,8 @@ struct Seen {
     status: Option<SessionStatus>,
     /// When the current busy run started (first Busy seen), while busy.
     busy_since_ms: Option<u64>,
+    /// Ids of every file the session had sent.
+    files: HashSet<String>,
 }
 
 impl AttentionTracker {
@@ -77,6 +92,18 @@ impl AttentionTracker {
             if let Some(alert) = alert(host, before, session, self.finished_after_ms) {
                 alerts.push(alert);
             }
+            if let SessionState::Managed { pane } = session.state {
+                let empty = HashSet::new();
+                let known = before.map_or(&empty, |seen| &seen.files);
+                let files: Vec<SentFile> = fresh_sends(known, &session.sent_files).into_iter().cloned().collect();
+                if !files.is_empty() {
+                    alerts.push(Alert {
+                        session: session.id.clone(),
+                        pane: PaneKey::new(host.clone(), pane),
+                        kind: AlertKind::FileSent { files },
+                    });
+                }
+            }
             self.observe(host, session);
         }
         alerts
@@ -91,7 +118,14 @@ impl AttentionTracker {
             }
             _ => None,
         };
-        self.seen.insert(key, Seen { status: session.status.clone(), busy_since_ms });
+        self.seen.insert(
+            key,
+            Seen {
+                status: session.status.clone(),
+                busy_since_ms,
+                files: session.sent_files.iter().map(|f| f.id.clone()).collect(),
+            },
+        );
     }
 }
 
@@ -117,6 +151,8 @@ fn alert(host: &HostId, before: Option<&Seen>, now: &SessionInfo, finished_after
 pub struct Channels {
     /// Show the unseen badge.
     pub badge: bool,
+    /// Show an in-app pop-up.
+    pub popup: bool,
     /// Raise a native notification.
     pub notification: bool,
     /// Play this sound.
@@ -124,17 +160,31 @@ pub struct Channels {
 }
 
 /// Decide the channels for `kind`. `visible`: the pane is in the visible tab of its window; `window_active`:
-/// that window is the active one.
-pub fn alert_channels(alerts: &AlertSettings, kind: &AlertKind, visible: bool, window_active: bool) -> Channels {
-    if !alerts.when_visible && visible && window_active {
+/// that window is the active one; `preview_in_view`: a following preview of the session is in the visible tab
+/// (only meaningful for a file alert). A file alert is quiet while that preview is on screen in the active window.
+pub fn alert_channels(
+    alerts: &AlertSettings,
+    kind: &AlertKind,
+    visible: bool,
+    window_active: bool,
+    preview_in_view: bool,
+) -> Channels {
+    let (event, quiet) = match kind {
+        AlertKind::NeedsInput { .. } => (&alerts.needs_input, false),
+        AlertKind::Finished => (&alerts.finished, false),
+        AlertKind::FileSent { .. } => (&alerts.file_sent, preview_in_view && window_active),
+    };
+    let is_file = matches!(kind, AlertKind::FileSent { .. });
+    if quiet || (!is_file && !alerts.when_visible && visible && window_active) {
         return Channels::default();
     }
-    let event = match kind {
-        AlertKind::NeedsInput { .. } => &alerts.needs_input,
-        AlertKind::Finished => &alerts.finished,
-    };
+    if is_file && !alerts.when_visible && visible && window_active {
+        // The Claude pane being on screen does not hide a file: only the preview does.
+        return Channels { badge: false, popup: event.popup, notification: false, sound: None };
+    }
     Channels {
         badge: event.badge,
+        popup: event.popup,
         notification: event.notification && !(alerts.only_when_unfocused && window_active),
         sound: (event.sound && alerts.play_sounds).then_some(event.tone),
     }
@@ -192,12 +242,24 @@ pub fn describe(kind: &AlertKind, title: &str, last_prompt: Option<&str>) -> (St
     let (status, reason) = match kind {
         AlertKind::NeedsInput { reason } => ("Needs input", reason.as_deref()),
         AlertKind::Finished => ("Finished", None),
+        AlertKind::FileSent { files } => {
+            let body = match files.as_slice() {
+                [one] => crate::preview::file_name(&one.path),
+                many => format!("{} files", many.len()),
+            };
+            return (format!("File sent · {title}"), body);
+        }
     };
     let body = reason.map(str::to_string).unwrap_or_else(|| {
         let snippet = last_prompt.map(prompt_snippet).unwrap_or_default();
         if snippet.is_empty() { snippet } else { format!("You: {snippet}") }
     });
     (format!("{status} · {title}"), body)
+}
+
+/// The pop-up heading for `count` new files.
+pub fn file_sent_heading(count: usize) -> String {
+    if count == 1 { "Claude sent a file".to_string() } else { format!("Claude sent {count} files") }
 }
 
 #[cfg(test)]
@@ -208,6 +270,7 @@ mod tests {
 
     fn at(id: &str, state: SessionState, status: Option<SessionStatus>, since: u64) -> SessionInfo {
         SessionInfo {
+            sent_files: Vec::new(),
             id: id.into(),
             cwd: "/r".into(),
             title: String::new(),
@@ -376,13 +439,14 @@ mod tests {
     }
 
     fn all_on() -> EventAlerts {
-        EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::FallingBlip }
+        EventAlerts { badge: true, popup: false, notification: true, sound: true, tone: AlertTone::FallingBlip }
     }
 
     fn settings() -> AlertSettings {
         AlertSettings {
             needs_input: all_on(),
             finished: all_on(),
+            file_sent: all_on(),
             finished_after_seconds: 3,
             read_after_seconds: 2,
             when_visible: false,
@@ -398,17 +462,17 @@ mod tests {
 
     #[test]
     fn visible_pane_is_quiet_by_default() {
-        assert_eq!(alert_channels(&settings(), &finished(), true, true), Channels::default());
+        assert_eq!(alert_channels(&settings(), &finished(), true, true, false), Channels::default());
         // Visible tab of a window that is not active still alerts.
-        assert!(alert_channels(&settings(), &finished(), true, false).badge);
+        assert!(alert_channels(&settings(), &finished(), true, false, false).badge);
     }
 
     #[test]
     fn when_visible_alerts_a_visible_pane() {
         let alerts = AlertSettings { when_visible: true, ..settings() };
         assert_eq!(
-            alert_channels(&alerts, &finished(), true, true),
-            Channels { badge: true, notification: true, sound: Some(AlertTone::FallingBlip) }
+            alert_channels(&alerts, &finished(), true, true, false),
+            Channels { badge: true, popup: false, notification: true, sound: Some(AlertTone::FallingBlip) }
         );
     }
 
@@ -416,33 +480,45 @@ mod tests {
     fn only_when_unfocused_drops_notification_but_keeps_badge_and_sound() {
         let alerts = AlertSettings { only_when_unfocused: true, ..settings() };
         assert_eq!(
-            alert_channels(&alerts, &finished(), false, true),
-            Channels { badge: true, notification: false, sound: Some(AlertTone::FallingBlip) }
+            alert_channels(&alerts, &finished(), false, true, false),
+            Channels { badge: true, popup: false, notification: false, sound: Some(AlertTone::FallingBlip) }
         );
-        assert!(alert_channels(&alerts, &finished(), false, false).notification);
+        assert!(alert_channels(&alerts, &finished(), false, false, false).notification);
     }
 
     #[test]
     fn play_sounds_off_mutes_every_event() {
         let alerts = AlertSettings { play_sounds: false, ..settings() };
-        assert_eq!(alert_channels(&alerts, &finished(), false, false).sound, None);
-        assert_eq!(alert_channels(&alerts, &AlertKind::NeedsInput { reason: None }, false, false).sound, None);
+        assert_eq!(alert_channels(&alerts, &finished(), false, false, false).sound, None);
+        assert_eq!(alert_channels(&alerts, &AlertKind::NeedsInput { reason: None }, false, false, false).sound, None);
     }
 
     #[test]
     fn grid_cells_are_independent() {
         let alerts = AlertSettings {
-            needs_input: EventAlerts { badge: false, notification: false, sound: true, tone: AlertTone::FallingBlip },
-            finished: EventAlerts { badge: false, notification: true, sound: false, tone: AlertTone::ClassicBlip },
+            needs_input: EventAlerts {
+                badge: false,
+                popup: false,
+                notification: false,
+                sound: true,
+                tone: AlertTone::FallingBlip,
+            },
+            finished: EventAlerts {
+                badge: false,
+                popup: false,
+                notification: true,
+                sound: false,
+                tone: AlertTone::ClassicBlip,
+            },
             ..settings()
         };
         assert_eq!(
-            alert_channels(&alerts, &AlertKind::NeedsInput { reason: None }, false, false),
-            Channels { badge: false, notification: false, sound: Some(AlertTone::FallingBlip) }
+            alert_channels(&alerts, &AlertKind::NeedsInput { reason: None }, false, false, false),
+            Channels { badge: false, popup: false, notification: false, sound: Some(AlertTone::FallingBlip) }
         );
         assert_eq!(
-            alert_channels(&alerts, &finished(), false, false),
-            Channels { badge: false, notification: true, sound: None }
+            alert_channels(&alerts, &finished(), false, false, false),
+            Channels { badge: false, popup: false, notification: true, sound: None }
         );
     }
 
@@ -460,5 +536,108 @@ mod tests {
         tracker.reset(&devbox, &[]);
         let alerts = tracker.update(&local, &[mine(asks(), 3)], &[]);
         assert_eq!(alerts[0].pane, PaneKey::local(7));
+    }
+
+    fn sent(id: &str, ms: u64, backlog: bool) -> SentFile {
+        SentFile { id: id.into(), path: format!("/r/{id}.md").into(), sent_ms: ms, caption: None, backlog }
+    }
+
+    fn with_files(state: SessionState, files: Vec<SentFile>) -> SessionInfo {
+        SessionInfo { sent_files: files, ..at("s", state, None, 0) }
+    }
+
+    fn managed_files(files: Vec<SentFile>) -> SessionInfo {
+        with_files(SessionState::Managed { pane: 7 }, files)
+    }
+
+    #[test]
+    fn twenty_files_in_one_update_are_one_alert() {
+        let mut tracker = AttentionTracker::default();
+        tracker.reset(&HostId::local(), &[managed_files(Vec::new())]);
+        let files: Vec<_> = (0..20).rev().map(|i| sent(&format!("f{i}"), i, false)).collect();
+        let alerts = tracker.update(&HostId::local(), &[managed_files(files)], &[]);
+        assert_eq!(alerts.len(), 1);
+        let AlertKind::FileSent { files } = &alerts[0].kind else { panic!("not a file alert") };
+        assert_eq!(files.len(), 20);
+        assert!(files.windows(2).all(|w| w[0].sent_ms <= w[1].sent_ms));
+    }
+
+    #[test]
+    fn backlog_and_known_files_raise_nothing() {
+        let mut tracker = AttentionTracker::default();
+        tracker.reset(&HostId::local(), &[managed_files(Vec::new())]);
+        let files = vec![sent("a", 1, true), sent("b", 2, true)];
+        assert!(tracker.update(&HostId::local(), &[managed_files(files.clone())], &[]).is_empty());
+        assert!(tracker.update(&HostId::local(), &[managed_files(files)], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_session_new_since_the_baseline_alerts_on_non_backlog_files() {
+        let mut tracker = AttentionTracker::default();
+        tracker.reset(&HostId::local(), &[]);
+        let files = vec![sent("a", 1, true), sent("b", 2, false)];
+        let alerts = tracker.update(&HostId::local(), &[managed_files(files)], &[]);
+        let [alert] = alerts.as_slice() else { panic!("expected one alert") };
+        let AlertKind::FileSent { files } = &alert.kind else { panic!("not a file alert") };
+        assert_eq!(files.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["b"]);
+    }
+
+    #[test]
+    fn external_sessions_never_alert_for_files() {
+        let mut tracker = AttentionTracker::default();
+        let outside = |files| with_files(SessionState::External { pid: Some(9) }, files);
+        tracker.reset(&HostId::local(), &[outside(Vec::new())]);
+        assert!(tracker.update(&HostId::local(), &[outside(vec![sent("a", 1, false)])], &[]).is_empty());
+    }
+
+    #[test]
+    fn file_sent_popup_ignores_the_claude_pane_but_not_the_preview() {
+        let alerts = settings();
+        let kind = AlertKind::FileSent { files: vec![sent("a", 1, false)] };
+        let file_alerts =
+            AlertSettings { file_sent: EventAlerts { popup: true, notification: false, ..all_on() }, ..alerts };
+        let c = alert_channels(&file_alerts, &kind, true, true, false);
+        assert!(c.popup && !c.notification);
+        assert_eq!(alert_channels(&file_alerts, &kind, false, true, true), Channels::default());
+        assert!(alert_channels(&file_alerts, &kind, false, false, true).popup);
+    }
+
+    #[test]
+    fn status_popups_follow_the_visibility_rule() {
+        let alerts = AlertSettings { finished: EventAlerts { popup: true, ..all_on() }, ..settings() };
+        assert!(!alert_channels(&alerts, &finished(), true, true, false).popup);
+        assert!(alert_channels(&alerts, &finished(), false, true, false).popup);
+        assert!(!alert_channels(&settings(), &finished(), false, true, false).popup);
+    }
+
+    #[test]
+    fn describe_file_sent() {
+        let one = AlertKind::FileSent { files: vec![SentFile { path: "/r/plan.md".into(), ..sent("a", 1, false) }] };
+        assert_eq!(describe(&one, "api", None), ("File sent · api".into(), "plan.md".into()));
+        let three = AlertKind::FileSent { files: vec![sent("a", 1, false), sent("b", 2, false), sent("c", 3, false)] };
+        assert_eq!(describe(&three, "api", None).1, "3 files");
+    }
+
+    #[test]
+    fn a_sent_file_never_marks_a_pane_unseen() {
+        assert!(AlertKind::Finished.marks_unseen());
+        assert!(AlertKind::NeedsInput { reason: None }.marks_unseen());
+        assert!(!AlertKind::FileSent { files: vec![sent("a", 1, false)] }.marks_unseen());
+    }
+
+    #[test]
+    fn popup_off_and_claude_pane_visible_leaves_a_file_alert_silent() {
+        let kind = AlertKind::FileSent { files: vec![sent("a", 1, false)] };
+        let alerts = AlertSettings { file_sent: EventAlerts { popup: false, ..all_on() }, ..settings() };
+        assert_eq!(alert_channels(&alerts, &kind, true, true, false), Channels::default());
+        let loud = EventAlerts { popup: true, ..all_on() };
+        let c = alert_channels(&AlertSettings { file_sent: loud, ..settings() }, &kind, true, true, false);
+        assert!(c.popup && !c.notification && c.sound.is_none());
+    }
+
+    #[test]
+    fn file_sent_heading_counts() {
+        assert_eq!(file_sent_heading(1), "Claude sent a file");
+        assert_eq!(file_sent_heading(4), "Claude sent 4 files");
     }
 }

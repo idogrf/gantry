@@ -69,6 +69,13 @@ pub const ACTIONS: &[Action] = &[
     action("splitDownClaude", Group::Panes, "Split down (Claude)", "ctrl-shift-e", "cmd-e"),
     action("splitDownShell", Group::Panes, "Split down (terminal)", "ctrl-shift-alt-e", "cmd-alt-e"),
     action("closePane", Group::Panes, "Close pane", "ctrl-shift-w", "cmd-w"),
+    Action {
+        id: "openPreview",
+        group: Group::Panes,
+        label: "Open preview for focused session",
+        linux: None,
+        macos: None,
+    },
     action("focusLeft", Group::Focus, "Focus left", "ctrl-shift-left", "cmd-alt-left"),
     action("focusRight", Group::Focus, "Focus right", "ctrl-shift-right", "cmd-alt-right"),
     action("focusUp", Group::Focus, "Focus up", "ctrl-shift-up", "cmd-alt-up"),
@@ -504,6 +511,14 @@ mod tests {
     }
 
     #[test]
+    fn open_preview_has_no_default_key() {
+        assert!(ACTIONS.iter().any(|a| a.id == "openPreview"));
+        for platform in [Platform::Linux, Platform::MacOs] {
+            assert_eq!(current("openPreview", &Default::default(), platform), None);
+        }
+    }
+
+    #[test]
     fn labels_linux_and_macos() {
         assert_eq!(label(Some("ctrl-shift-r"), Platform::Linux), "Ctrl+Shift+R");
         assert_eq!(label(Some("ctrl-shift-alt-t"), Platform::Linux), "Ctrl+Shift+Alt+T");
@@ -526,7 +541,10 @@ mod tests {
         for platform in [Platform::Linux, Platform::MacOs] {
             let list = bindings(&none(), platform);
             for entry in ACTIONS {
-                let key = current(entry.id, &none(), platform).unwrap();
+                let Some(key) = current(entry.id, &none(), platform) else {
+                    assert_eq!(entry.id, "openPreview", "only openPreview has no default");
+                    continue;
+                };
                 assert_eq!(check(&key, entry.id, &list), Check::Ok, "{} {key}", entry.id);
             }
             let unique: std::collections::BTreeSet<_> = list.iter().map(|(_, key)| key.clone()).collect();

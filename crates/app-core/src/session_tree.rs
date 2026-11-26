@@ -59,6 +59,8 @@ pub struct PaneEntry {
     pub color: Option<Tint>,
     /// The Gantry project the user put the pane in (display name).
     pub project: Option<String>,
+    /// A preview pane: it follows a Claude pane and runs nothing.
+    pub preview: bool,
 }
 
 /// What keeps an Active entry's place in the list: its leaf, or (outside Gantry) its session.
@@ -1322,6 +1324,7 @@ mod tests {
 
     fn session(id: &str, cwd: &str, state: SessionState, last_active_ms: u64) -> SessionInfo {
         SessionInfo {
+            sent_files: Vec::new(),
             id: id.into(),
             cwd: cwd.into(),
             title: format!("title {id}"),
@@ -1374,6 +1377,7 @@ mod tests {
             container: None,
             color: None,
             project: None,
+            preview: false,
         }
     }
 
@@ -2406,6 +2410,21 @@ mod tests {
         let labels = labels(&paths, None, &[]);
         assert_eq!(labels[&paths[0]], "devbox - /srv/a/app");
         assert_eq!(labels[&paths[1]], "devbox - /srv/b/app");
+    }
+
+    #[test]
+    fn a_preview_pane_lists_under_its_sessions_project() {
+        let preview = PaneEntry { preview: true, session: None, claude: false, ..pane(9, "/r/app", None) };
+        let mut fixture = Fixture::of(
+            vec![with(managed("s1", "/r/app", NOW - 60_000), SessionStatus::Idle)],
+            vec![pane(1, "/r/app", Some("s1")), preview],
+        );
+        let rows = fixture.rows();
+        let projects = rows.iter().filter(|r| matches!(r.kind, RowKind::Project { .. })).count();
+        assert_eq!(projects, 1, "one project: {rows:?}");
+        assert!(
+            rows.iter().any(|r| matches!(&r.kind, RowKind::Pane { entry, .. } if entry.preview && entry.leaf == 9))
+        );
     }
 
     fn gantry_pane(leaf: NodeId, cwd: &str, project: &str) -> PaneEntry {

@@ -70,6 +70,7 @@ fn wait_for(conn: &Connection, id: &str, check: impl Fn(&SessionInfo) -> bool) -
 /// Spawn `program args` in `cwd`; returns the pane and the output seen until `needle`.
 fn spawn(conn: &Connection, program: &str, args: &[&str], cwd: &Path, needle: &str) -> (PaneId, String) {
     let spec = SpawnRequest {
+        preview: false,
         program: program.into(),
         args: args.iter().map(|a| a.to_string()).collect(),
         cwd: cwd.into(),
@@ -115,6 +116,35 @@ fn new_transcripts_arrive_as_changes() {
     wait_for(&s.conn, "s1", |_| true);
     transcript(&s.config, "s2", &s.work, "second");
     wait_for(&s.conn, "s2", |s| s.title == "second");
+}
+
+/// Transcript lines for one `show_in_preview` call and its result.
+fn sent_lines(id: &str, path: &str) -> String {
+    let call = serde_json::json!({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": id, "name": claude_index::sent_files::TOOL_NAME,
+         "input": {"paths": [path]}}]}});
+    let result = serde_json::json!({"type": "user", "timestamp": "2026-11-25T10:00:00.250Z", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": id,
+         "content": [{"type": "text", "text": format!("Shown in preview:\n- {path}")}]}]}});
+    format!("{call}\n{result}\n")
+}
+
+#[test]
+fn requested_session_reports_its_sent_files() {
+    use std::io::Write;
+    let s = start(|config, work| transcript(config, "s1", work, "hello"));
+    let file = s.config.join("projects/-work/s1.jsonl");
+    let append = |data: String| {
+        let mut file = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        file.write_all(data.as_bytes()).unwrap();
+    };
+    append(sent_lines("toolu_1", "/w/a.md"));
+    wait_for(&s.conn, "s1", |_| true);
+    s.conn.client.watch_sent_files(&["s1".to_string()]);
+    let found = wait_for(&s.conn, "s1", |info| info.sent_files.len() == 1);
+    assert_eq!(found.sent_files[0].path, Path::new("/w/a.md"));
+    append(sent_lines("toolu_2", "/w/b.md"));
+    wait_for(&s.conn, "s1", |info| info.sent_files.len() == 2);
 }
 
 #[test]
@@ -298,6 +328,7 @@ fn removing_a_dir_removes_its_sessions() {
 fn spawn_env_reaches_child() {
     let s = start(|_, _| {});
     let spec = SpawnRequest {
+        preview: false,
         program: "sh".into(),
         args: vec!["-c".into(), "echo GOT:$FOO; sleep 5".into()],
         cwd: s.work.clone(),

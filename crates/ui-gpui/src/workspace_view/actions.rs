@@ -1,7 +1,7 @@
 use super::{
     ClosePane, FindSession, FocusDown, FocusLeft, FocusRight, FocusUp, HistoryBack, HistoryForward, NewClaudeTab,
-    NewShellTab, NextTab, OpenLauncher, OpenRecents, OpenSettings, PreviousTab, SplitDownClaude, SplitDownShell,
-    SplitRightClaude, SplitRightShell, ToggleGitPanel, ToggleSidebar, WorkspaceView,
+    NewShellTab, NextTab, OpenLauncher, OpenPreview, OpenRecents, OpenSettings, PreviousTab, SplitDownClaude,
+    SplitDownShell, SplitRightClaude, SplitRightShell, ToggleGitPanel, ToggleSidebar, WorkspaceView,
 };
 
 use app_core::split_tree::{Axis, Direction};
@@ -43,6 +43,13 @@ impl WorkspaceView {
             self.close_settings(window, cx);
         } else if let Some(leaf) = self.workspace.focused() {
             self.confirm_close(vec![leaf], window, cx);
+        }
+    }
+
+    /// Open the preview pane for the focused Claude session.
+    pub(super) fn open_preview_action(&mut self, _: &OpenPreview, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(leaf) = self.workspace.focused() {
+            self.open_preview_for(leaf, window, cx);
         }
     }
 
@@ -129,6 +136,7 @@ fn workspace_binding(id: &str, key: &str) -> Option<gpui::KeyBinding> {
         "splitDownClaude" => KeyBinding::new(key, SplitDownClaude, context),
         "splitDownShell" => KeyBinding::new(key, SplitDownShell, context),
         "closePane" => KeyBinding::new(key, ClosePane, context),
+        "openPreview" => KeyBinding::new(key, OpenPreview, context),
         "focusLeft" => KeyBinding::new(key, FocusLeft, context),
         "focusRight" => KeyBinding::new(key, FocusRight, context),
         "focusUp" => KeyBinding::new(key, FocusUp, context),
@@ -217,6 +225,16 @@ mod tests {
         assert_eq!(action_in(&bindings, "ctrl-alt-s"), Some("workspace::ToggleSidebar"));
         assert_eq!(action_in(&bindings, "ctrl-shift-b"), None);
         assert_eq!(action_in(&bindings, "ctrl-shift-f"), Some("workspace::FindSession"), "others keep theirs");
+    }
+
+    #[test]
+    fn open_preview_is_unbound_until_the_user_binds_it() {
+        let bindings = all_bindings(&Settings::default(), Platform::Linux);
+        assert!(!bindings.iter().any(|b| b.action().name() == "workspace::OpenPreview"));
+        let mut settings = Settings::default();
+        settings.shortcuts.insert("openPreview".into(), Some("ctrl-alt-p".into()));
+        let bindings = all_bindings(&settings, Platform::Linux);
+        assert_eq!(action_in(&bindings, "ctrl-alt-p"), Some("workspace::OpenPreview"));
     }
 
     #[test]

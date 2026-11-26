@@ -301,6 +301,7 @@ impl SettingsView {
                     container: false,
                     host: None,
                     folder: None,
+                    files: None,
                 };
                 key.tooltip(hover_card::tooltip(card)).child(warn_mark(theme))
             })

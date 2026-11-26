@@ -8,6 +8,7 @@ use interprocess::local_socket::ListenerOptions;
 use interprocess::local_socket::tokio::{Stream, prelude::*};
 
 use crate::paths::Paths;
+use crate::preview_plugin::write_plugin;
 use crate::server::{ServerOptions, serve};
 #[cfg(target_os = "macos")]
 use crate::shell_env::{fallback_path, parse_path_helper};
@@ -76,6 +77,13 @@ pub fn run_daemon(options: DaemonOptions) -> anyhow::Result<DaemonOutcome> {
         };
         let claude_dir = claude_dir.or_else(|| claude_index::config::config_dir(&base_env));
         let containers_file = Some(paths.containers_file.clone());
+        let plugin_dir = match std::env::current_exe().and_then(|exe| write_plugin(&paths.plugin_dir, &exe)) {
+            Ok(()) => Some(paths.plugin_dir.clone()),
+            Err(err) => {
+                tracing::warn!("the preview plugin was not written: {err}");
+                None
+            }
+        };
         serve(
             listener,
             ServerOptions {
@@ -87,6 +95,7 @@ pub fn run_daemon(options: DaemonOptions) -> anyhow::Result<DaemonOutcome> {
                 search_dir: Some(paths.search_dir.clone()),
                 docker,
                 paste_dir: Some(paths.paste_dir.clone()),
+                plugin_dir,
             },
         )
         .await

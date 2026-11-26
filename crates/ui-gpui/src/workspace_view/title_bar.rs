@@ -443,6 +443,7 @@ impl WorkspaceView {
             container,
             host: remote.clone(),
             folder: cwd.as_deref().map(|cwd| display_path(cwd, std::env::home_dir().as_deref())),
+            files: None,
         };
         let marker = self.workspace.leaf_color(leaf).map(|tint| tint.value(theme.preset));
         let sidebar = self.sidebar.read(cx);
@@ -508,6 +509,7 @@ impl WorkspaceView {
                     ),
             )
             .children(self.git_chip_of(leaf, "git-chip-title", &theme, cx))
+            .children(self.items_button_of(leaf, "items-title", true, &theme, cx))
     }
 }
 

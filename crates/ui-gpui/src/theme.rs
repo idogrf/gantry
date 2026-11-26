@@ -8,12 +8,14 @@ use app_core::session_tree::Tone;
 use std::path::Path;
 
 use app_core::settings::{ProjectColors, StatusFills};
-use app_core::theme_colors::{Preset, Tokens, ToneColors, tone_colors};
+use app_core::theme_colors::{Preset, Tokens, ToneColors, terminal_palette, tone_colors};
 use app_core::workspace::DirBadge;
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Div, ElementId, FontWeight, Global, Hsla, IntoElement, ParentElement,
     Pixels, Styled, Svg, div, hsla, linear_color_stop, linear_gradient, px, relative, rgb, rgba, svg,
 };
+
+use preview_doc::highlight::Token;
 
 use crate::assets::{CONTAINER_ICON, PIN_ICON, SSH_ICON};
 
@@ -58,6 +60,28 @@ impl Theme {
     }
 }
 
+/// The color of a syntax token: plain text and comments from the app colors, the rest from the terminal's ANSI colors
+/// of the preset (keyword 5, string 2, number 3, function 4, type 6, tag 1), as `0xRRGGBB`.
+pub(crate) fn token_color(token: Token, theme: &Theme) -> u32 {
+    let ansi = |i: usize| ansi_color(i, theme);
+    match token {
+        Token::Plain => theme.tokens.text,
+        Token::Comment => theme.tokens.muted,
+        Token::Keyword => ansi(5),
+        Token::String => ansi(2),
+        Token::Number => ansi(3),
+        Token::Function => ansi(4),
+        Token::Type => ansi(6),
+        Token::Tag => ansi(1),
+    }
+}
+
+/// ANSI color `i` of the preset's terminal palette, as `0xRRGGBB`.
+pub(crate) fn ansi_color(i: usize, theme: &Theme) -> u32 {
+    let c = terminal_palette(theme.preset).ansi[i];
+    (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)
+}
+
 /// A project's side line: 4 px wide, rounded, inset 4 px from the left edge and 6 px from the top and bottom of
 /// the (relatively positioned) row, tab or header it is a child of.
 pub(crate) fn side_line(color: u32, theme: &Theme) -> Div {
@@ -89,7 +113,8 @@ pub(crate) fn theme(cx: &App) -> &Theme {
     cx.global::<Theme>()
 }
 
-/// Corner radii, in pixels: chips and small buttons, rows and tabs, panels and panes.
+/// Corner radii, in pixels: check boxes, chips and small buttons, rows and tabs, panels and panes.
+pub(crate) const RADIUS_TINY: f32 = 3.0;
 pub(crate) const RADIUS_SMALL: f32 = 8.0;
 pub(crate) const RADIUS: f32 = 12.0;
 pub(crate) const RADIUS_LARGE: f32 = 16.0;
@@ -419,6 +444,30 @@ mod tests {
             assert!(contrast(theme.tone(tone).fill.unwrap(), theme.tokens.surface) >= 7.0, "{tone:?}");
         }
         assert!(contrast(theme.tone(Tone::Idle).fill.unwrap(), theme.tokens.surface) < 1.5);
+    }
+
+    #[test]
+    fn syntax_colors_are_readable() {
+        use preview_doc::highlight::Token::*;
+        for preset in PRESETS {
+            let theme = theme(preset);
+            for token in [Plain, Comment, Keyword, String, Number, Function, Type, Tag] {
+                let ratio = contrast(token_color(token, &theme), theme.tokens.terminal);
+                assert!(ratio >= 3.0, "{preset:?} {token:?}: {ratio:.2}");
+            }
+        }
+    }
+
+    #[test]
+    fn syntax_colors_are_readable_on_markdown_code_blocks() {
+        use preview_doc::highlight::Token::*;
+        for preset in PRESETS {
+            let theme = theme(preset);
+            for token in [Plain, Comment, Keyword, String, Number, Function, Type, Tag] {
+                let ratio = contrast(token_color(token, &theme), theme.tokens.raised);
+                assert!(ratio >= 3.0, "{preset:?} {token:?} on raised: {ratio:.2}");
+            }
+        }
     }
 
     #[test]

@@ -15,7 +15,7 @@ use app_core::sidebar_compact;
 use crate::color_picker_view::ColorPickerEvent;
 use crate::context_menu::{self};
 use crate::dialog_view::dialog_overlay;
-use crate::pane_drag::DraggedPane;
+use crate::pane_drag::{DraggedFile, DraggedPane};
 use crate::settings_store::SettingsStore;
 use crate::theme::{FadeKind, RADIUS, RADIUS_SMALL, Theme, UI_FONT, fade_in, theme};
 use crate::window_frame;
@@ -167,6 +167,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::split_down_claude))
             .on_action(cx.listener(Self::split_down_shell))
             .on_action(cx.listener(Self::close_pane))
+            .on_action(cx.listener(Self::open_preview_action))
             .on_action(cx.listener(Self::focus_left))
             .on_action(cx.listener(Self::focus_right))
             .on_action(cx.listener(Self::focus_up))
@@ -198,8 +199,13 @@ impl Render for WorkspaceView {
                 }
             }))
             .on_mouse_move(cx.listener(Self::drag_sidebar))
-            // Only a pane drag reports here; a file dragged in from the OS is a drag too, but not this type.
+            // Each dragged type reports to its own handler (a pane, then a file chip or pop-up); an OS file drag is neither.
             .on_drag_move(cx.listener(|this, _: &DragMoveEvent<DraggedPane>, _, cx| {
+                if !std::mem::replace(&mut this.pane_dragging, true) {
+                    cx.notify();
+                }
+            }))
+            .on_drag_move(cx.listener(|this, _: &DragMoveEvent<DraggedFile>, _, cx| {
                 if !std::mem::replace(&mut this.pane_dragging, true) {
                     cx.notify();
                 }
@@ -221,6 +227,8 @@ impl Render for WorkspaceView {
             .font_family(UI_FONT)
             .child(self.render_title_bar(window, cx))
             .child(body)
+            // Below the launcher, recents, setup, wizard, menus and dialog: they never cover or block those.
+            .children(self.render_toasts(&theme, window, cx))
             .when_some(self.launcher.as_ref().map(|(view, _)| view.clone()), |root, view| {
                 root.child(
                     div()
@@ -457,6 +465,7 @@ impl Render for WorkspaceView {
                     menu,
                     &theme,
                     cx.global::<SettingsStore>().settings(),
+                    window.viewport_size().height - gpui::px(16.),
                     move |action, window, cx| pick(action, window, cx),
                     move |window, cx| dismiss(&(), window, cx),
                 ))
@@ -478,6 +487,7 @@ impl Render for WorkspaceView {
                     menu,
                     &theme,
                     cx.global::<SettingsStore>().settings(),
+                    window.viewport_size().height - gpui::px(16.),
                     move |action, window, cx| pick(action, window, cx),
                     move |window, cx| dismiss(&(), window, cx),
                 ))

@@ -76,6 +76,7 @@ impl WorkspaceView {
                 container: false,
                 host: None,
                 folder: None,
+                files: None,
             }))
             .on_click(
                 cx.listener(|this, _, window, cx| {
@@ -134,6 +135,12 @@ impl WorkspaceView {
                 self.start_rename(RenameTarget::Tab(index), name, window, cx);
             }
             MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
+            MenuAction::OpenPreview(leaf) => self.open_preview_for(leaf, window, cx),
+            MenuAction::ActivateSentFile { leaf, id } => self.activate_file(leaf, &id, window, cx),
+            MenuAction::ReopenSentFile { leaf, id } => self.reopen_file(leaf, &id, window, cx),
+            MenuAction::RemoveSentFile { leaf, id } => self.remove_file(leaf, &id, window, cx),
+            MenuAction::ClearSentFiles(leaf) => self.clear_files(leaf, window, cx),
+            MenuAction::CopyFileContents { leaf, id } => self.copy_file_contents(leaf, &id, cx),
             MenuAction::CloseTab(index) => self.close_tab_at(index, window, cx),
             MenuAction::NewHere { dir, claude, host } if host.is_local() => {
                 self.open_new(claude, dir, None, None, host, None, None)
@@ -230,6 +237,7 @@ impl WorkspaceView {
                 action: MenuAction::CloseTab(index),
                 swatch: None,
                 checked: false,
+                detail: None,
             })]
         } else {
             let Some(leaf) = self.workspace.leaves.get(&tab.focused) else { return };

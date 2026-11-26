@@ -39,6 +39,7 @@ use crate::git_scrollbar::{self};
 use crate::git_state::GitRepos;
 use crate::launcher_view::LauncherView;
 use crate::pane_drag::PaneDrop;
+use crate::preview_view::PreviewView;
 use crate::recents_view::RecentsView;
 use crate::release_check::CheckRow;
 use crate::self_update::UpdateRow;
@@ -69,6 +70,7 @@ mod workspace_actions {
             SplitDownClaude,
             SplitDownShell,
             ClosePane,
+            OpenPreview,
             FocusLeft,
             FocusRight,
             FocusUp,
@@ -95,17 +97,25 @@ mod hosts;
 mod layout;
 mod overlays;
 mod panes;
+mod preview;
 mod render;
 mod resume;
 mod sidebar_menus;
 mod tab_content;
 mod title_bar;
+mod toasts;
 mod updates;
 
 pub(crate) use actions::all_bindings;
 
 struct Slot {
     view: Entity<TerminalView>,
+    _subscription: Subscription,
+}
+
+/// One preview pane's view and the subscription that routes its events.
+struct PreviewSlot {
+    view: Entity<PreviewView>,
     _subscription: Subscription,
 }
 
@@ -283,7 +293,8 @@ enum UpdatePhase {
     Restarting,
 }
 
-/// A running update of one SSH host's daemon. The entry exists only while the update runs: a failure or a drop removes it.
+/// A running update of one SSH host's daemon. The entry exists only while the update runs: a failure or a drop
+/// removes it.
 struct HostUpdate {
     phase: UpdatePhase,
     /// Cancels the upload.
@@ -327,6 +338,39 @@ pub struct WorkspaceView {
     /// its list may miss the sessions of dirs it has not scanned, and resuming one of those would start it afresh.
     local_dirs_indexed: bool,
     slots: HashMap<NodeId, Slot>,
+    /// The preview panes' views (a preview leaf has no `Slot`: it runs nothing).
+    previews: HashMap<NodeId, PreviewSlot>,
+    /// The file ids each preview pane has seen listed, to tell a newly sent file from the first list.
+    preview_known: HashMap<NodeId, HashSet<String>>,
+    /// The session and files each preview pane's last close hid, for its Undo bar (memory only, one close per pane).
+    preview_undo: HashMap<NodeId, (String, Vec<protocol::message::SentFile>)>,
+    /// The sessions last sent to each host's daemon with `WatchSentFiles`.
+    watch_sent: HashMap<HostId, Vec<String>>,
+    /// Hosts whose session list just arrived: their daemon is told what to watch again, even an empty list.
+    watch_fresh: HashSet<HostId>,
+    /// The bookkeeping and byte cache of the preview files' reads.
+    reads: app_core::preview_reads::Reads,
+    /// Each shown file's decoded content (an image decoded, a text parsed), made once per reply that changed it.
+    decoded: HashMap<app_core::preview_reads::FileKey, crate::preview_view::Content>,
+    /// The running parse of each file. A task is kept until its work ends, so a second parse of the file never runs
+    /// beside it; a cancelled one only loses its generation in `parse_gen` and its result is dropped.
+    parsing: HashMap<app_core::preview_reads::FileKey, Task<()>>,
+    /// The generation of the parse of each file whose result is still wanted.
+    parse_gen: HashMap<app_core::preview_reads::FileKey, u64>,
+    /// The last generation handed out.
+    parse_counter: u64,
+    /// The newest job of a file whose parse is still running; it starts when that one is done.
+    parse_queued: HashMap<app_core::preview_reads::FileKey, preview::ParseJob>,
+    /// Images that were replaced or dropped, whose GPUI bitmap and atlas tile are freed at the next chance with a
+    /// window.
+    pending_release: Vec<Arc<gpui::Image>>,
+    /// Remote files an Open in system viewer waits for, with the sent file's id: the reply writes the copy and opens
+    /// it.
+    open_after_read: HashMap<app_core::preview_reads::FileKey, String>,
+    /// The timer that asks for the shown files again every `preview_reads::POLL`.
+    preview_task: Option<Task<()>>,
+    /// What each preview's sidebar entry last got (title, directory), to refresh it when it changes.
+    preview_rows: HashMap<NodeId, (String, PathBuf)>,
     /// Spawn request id → leaf waiting for it.
     pending: HashMap<u64, NodeId>,
     next_request: u64,
@@ -495,6 +539,12 @@ pub struct WorkspaceView {
     seen_since: HashMap<NodeId, Instant>,
     /// Looks at `unseen` again when the next leaf in view has been seen long enough.
     read_timer: Option<Task<()>>,
+    /// The in-app pop-ups.
+    toasts: app_core::toasts::Toasts,
+    /// Zero of the pop-ups' clock.
+    toast_epoch: Instant,
+    /// The one timer to the pop-ups' next change.
+    toast_timer: Option<Task<()>>,
     _activation: Subscription,
     /// The theme whose terminal colors the daemon was last told.
     sent_palette: Option<Preset>,
@@ -598,6 +648,7 @@ impl WorkspaceView {
             if window.is_window_active() {
                 this.git.refresh_now();
             }
+            this.toasts_running(window.is_window_active(), window, cx);
             this.clear_seen(window, cx);
             this.sidebar.update(cx, |_, cx| cx.notify());
         });
@@ -632,6 +683,21 @@ impl WorkspaceView {
             to_resume: Vec::new(),
             local_dirs_indexed: false,
             slots: HashMap::new(),
+            previews: HashMap::new(),
+            preview_known: HashMap::new(),
+            preview_undo: HashMap::new(),
+            watch_sent: HashMap::new(),
+            watch_fresh: HashSet::new(),
+            preview_rows: HashMap::new(),
+            reads: Default::default(),
+            decoded: HashMap::new(),
+            parsing: HashMap::new(),
+            parse_gen: HashMap::new(),
+            parse_counter: 0,
+            parse_queued: HashMap::new(),
+            pending_release: Vec::new(),
+            open_after_read: HashMap::new(),
+            preview_task: None,
             pending: HashMap::new(),
             next_request: 0,
             search_answers: HashMap::new(),
@@ -725,6 +791,9 @@ impl WorkspaceView {
             unseen: HashMap::new(),
             seen_since: HashMap::new(),
             read_timer: None,
+            toasts: app_core::toasts::Toasts::default(),
+            toast_epoch: Instant::now(),
+            toast_timer: None,
             _activation: activation,
             sent_palette: None,
             _theme: theme_changed,
@@ -743,9 +812,14 @@ impl WorkspaceView {
         this.publish_update_row(cx);
         this.release_task = Some(this.start_release_timer(cx));
         this.git_task = Some(Self::start_git_timer(window, cx));
+        this.preview_task = Some(Self::start_preview_timer(window, cx));
         let leaves: Vec<NodeId> = this.workspace.leaves.keys().copied().collect();
         for leaf in leaves {
-            this.add_slot(leaf, window, cx);
+            if this.workspace.is_preview(leaf) {
+                this.add_preview(leaf, window, cx);
+            } else {
+                this.add_slot(leaf, window, cx);
+            }
         }
         // A mark made by hand (`Leaf.unread`) outlives a restart, and so does the alert it stands on.
         this.unseen = this.workspace.unread_leaves().map(|leaf| (leaf, AlertKind::Finished)).collect();
@@ -756,7 +830,11 @@ impl WorkspaceView {
             this.hosts[&key.host].client.attach(key.pane);
         }
         for (leaf, slot) in &this.slots {
-            if this.workspace.leaves[leaf].pane.is_none() && !restored.spawn.contains(leaf) {
+            // A preview leaf has no pane by design and no slot: it never gets the ended terminal's bar.
+            if this.workspace.leaves[leaf].pane.is_none()
+                && !this.workspace.is_preview(*leaf)
+                && !restored.spawn.contains(leaf)
+            {
                 slot.view.update(cx, |view, cx| view.exited(None, cx));
             }
         }
@@ -777,6 +855,7 @@ impl WorkspaceView {
             this.host_states.entry(host.clone()).or_insert(HostState::NotConnected);
             this.refresh_host_cards(&host, cx);
         }
+        this.update_previews(cx);
         this.focus_current(window, cx);
         // A tab of a host that is not connected has no sidebar row: start on another one.
         this.leave_off_screen_tab(window, cx);

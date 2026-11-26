@@ -3,6 +3,7 @@ use super::{PANE_GAP, WorkspaceView};
 
 use app_core::attention::without_claude_glyph;
 use app_core::launcher::{self, LauncherItem};
+use app_core::preview::ItemsButton;
 use app_core::split_tree::{self, Axis, NodeId};
 use app_core::theme_colors::mix;
 use app_core::workspace::{DirBadge, MAX_PANES_PER_TAB};
@@ -17,11 +18,11 @@ use app_core::menus::{self, MenuAction, MenuEntry, MenuItem};
 use app_core::session_tree::{Tone, Unseen, display_path, leaf_tone, status_tone, tone_word};
 use app_core::shortcuts::{self, Platform};
 
-use crate::assets::{CLOSE_ICON, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
+use crate::assets::{CLOSE_ICON, FILE_ICON, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
 use crate::context_menu::OpenMenu;
 use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{FolderRow, star};
-use crate::pane_drag::DraggedPane;
+use crate::pane_drag::{DraggedFile, DraggedPane};
 use crate::settings_store::SettingsStore;
 use crate::theme::{
     RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, container_icon, dir_badge, pane_marker, pin_icon, side_line, ssh_icon,
@@ -55,7 +56,8 @@ impl WorkspaceView {
                 None => label.to_string(),
             };
             let title = if can_split { title } else { format!("{title} ({MAX_PANES_PER_TAB} panes max)") };
-            let card = HoverCard { title, status: None, dir: None, container: false, host: None, folder: None };
+            let card =
+                HoverCard { title, status: None, dir: None, container: false, host: None, folder: None, files: None };
             div()
                 .id((label, index))
                 .flex_none()
@@ -90,8 +92,15 @@ impl WorkspaceView {
                 None => "Close pane".to_string(),
             }
         };
-        let close_card =
-            HoverCard { title: close_title, status: None, dir: None, container: false, host: None, folder: None };
+        let close_card = HoverCard {
+            title: close_title,
+            status: None,
+            dir: None,
+            container: false,
+            host: None,
+            folder: None,
+            files: None,
+        };
         let danger = theme.tokens.danger;
         div()
             .absolute()
@@ -130,6 +139,40 @@ impl WorkspaceView {
                         }),
                     ),
             )
+    }
+
+    /// The Items button of `leaf` (the `Files` chip when `title_bar`, else the icon alone for a pane header), or none
+    /// when `items_state` has none. A click opens or closes the preview of its Claude pane.
+    pub(super) fn items_button_of(
+        &self,
+        leaf: NodeId,
+        id: impl Into<gpui::ElementId>,
+        title_bar: bool,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> Option<gpui::Stateful<Div>> {
+        let (claude, state) = self.items_state(leaf, cx)?;
+        let open = self.workspace.preview_of(claude).is_some();
+        let settings = cx.global::<SettingsStore>().settings();
+        let platform = Platform::current();
+        let title = match shortcuts::current("openPreview", &settings.shortcuts, platform) {
+            _ if open => "Close preview".to_string(),
+            Some(keystroke) => format!("Open preview ({})", shortcuts::label(Some(&keystroke), platform)),
+            None => "Open preview".to_string(),
+        };
+        let look = if title_bar { ItemsLook::Chip } else { ItemsLook::Icon };
+        Some(items_button_element(
+            id,
+            state,
+            title,
+            look,
+            theme,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.toggle_preview_for(claude, window, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            }),
+        ))
     }
 
     /// Open the Claude / Terminal popup of pane `leaf`'s split button at `position`.
@@ -357,9 +400,17 @@ impl WorkspaceView {
                 canvas(resized, |_, _, _, _| {}).absolute().size_full()
             })
             .children(layout.into_iter().zip(drawn).enumerate().filter_map(|(index, ((leaf, end), (_, rect)))| {
-                let view = self.slots.get(&leaf)?.view.clone();
+                // A preview leaf draws its own view; every other leaf its terminal.
+                let preview = self.previews.get(&leaf).map(|slot| slot.view.clone());
+                let view = match &preview {
+                    Some(_) => None,
+                    None => Some(self.slots.get(&leaf)?.view.clone()),
+                };
                 let focused = leaf == tab.focused;
-                let title = self.workspace.leaf_name(leaf).map_or_else(|| view.read(cx).title(), String::from);
+                let title = self
+                    .workspace
+                    .leaf_name(leaf)
+                    .map_or_else(|| view.as_ref().map_or_else(String::new, |view| view.read(cx).title()), String::from);
                 let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
                 let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
                 let unseen = self.unseen_of(leaf);
@@ -370,13 +421,17 @@ impl WorkspaceView {
                 let project = self.leaf_project_color(leaf, cx);
                 let marker = self.workspace.leaf_color(leaf).map(|tint| tint.value(theme.preset));
                 let git_chip = self.git_chip_of(leaf, ("git-chip-pane", index), &theme, cx);
+                // Only a split tab's pane has a header to put it in.
+                let items_button = (multiple && preview.is_none())
+                    .then(|| self.items_button_of(leaf, ("items-pane", index), false, &theme, cx))
+                    .flatten();
                 let folder = self
                     .workspace
                     .leaves
                     .get(&leaf)
                     .map(|entry| display_path(&entry.launch.cwd, std::env::home_dir().as_deref()));
                 let last_prompt_settings = cx.global::<SettingsStore>().settings().last_prompt;
-                let last_prompt = if last_prompt_settings.enabled {
+                let last_prompt = if last_prompt_settings.enabled && preview.is_none() {
                     self.workspace.leaf_last_prompt(leaf, self.sidebar.read(cx).sessions()).map(str::to_string)
                 } else {
                     None
@@ -393,6 +448,12 @@ impl WorkspaceView {
                         }))
                         .on_drop(cx.listener(move |this, dragged: &DraggedPane, window, cx| {
                             this.drop_pane(dragged.leaf, leaf, window, cx)
+                        }))
+                        .on_drag_move(cx.listener(move |this, event: &DragMoveEvent<DraggedFile>, _, cx| {
+                            this.drag_file_over_pane(leaf, event, cx)
+                        }))
+                        .on_drop(cx.listener(move |this, dragged: &DraggedFile, window, cx| {
+                            this.drop_file(&dragged.file, leaf, window, cx)
                         }))
                 });
                 // The entering pane keeps its final size and moves; every other pane's card follows its drawn rectangle.
@@ -433,10 +494,24 @@ impl WorkspaceView {
                                         content.size_full()
                                     };
                                     content
-                                        .when(multiple, |pane| {
+                                        .when(multiple && preview.is_none(), |pane| {
                                             pane.child(pane_header(
-                                                index, leaf, title, status, unseen, offline, animate, container, host,
-                                                dir, folder, project, marker, git_chip, &theme,
+                                                index,
+                                                leaf,
+                                                title,
+                                                status,
+                                                unseen,
+                                                offline,
+                                                animate,
+                                                container,
+                                                host,
+                                                dir,
+                                                folder,
+                                                project,
+                                                marker,
+                                                items_button,
+                                                git_chip,
+                                                &theme,
                                             ))
                                         })
                                         .when_some(last_prompt, |pane, text| {
@@ -448,14 +523,15 @@ impl WorkspaceView {
                                                 &theme,
                                             ))
                                         })
-                                        .child(
-                                            div()
+                                        .child(match (preview, view) {
+                                            (Some(preview), _) => div().relative().flex_1().min_h_0().child(preview),
+                                            (None, view) => div()
                                                 .relative()
                                                 .flex_1()
                                                 .min_h_0()
-                                                .child(view)
+                                                .children(view)
                                                 .child(self.split_buttons(leaf, index, focused, &theme, cx)),
-                                        )
+                                        })
                                 }),
                         )
                         .children(overlay),
@@ -555,6 +631,7 @@ fn pane_header(
     folder: Option<String>,
     project: Option<u32>,
     marker: Option<u32>,
+    items_button: Option<gpui::Stateful<Div>>,
     git_chip: Option<gpui::Stateful<Div>>,
     theme: &Theme,
 ) -> impl IntoElement {
@@ -570,6 +647,7 @@ fn pane_header(
         container,
         host: host.clone(),
         folder,
+        files: None,
     };
     div()
         .id(("pane-header", index))
@@ -599,6 +677,7 @@ fn pane_header(
         })
         .children(pin)
         .child(div().flex_1().min_w_0().truncate().child(title))
+        .children(items_button)
         .children(git_chip)
         .when(container, |header| {
             header.child(container_icon(colors.map_or(theme.tokens.text, |colors| colors.ink), theme))
@@ -607,4 +686,65 @@ fn pane_header(
             header.child(ssh_icon(colors.map_or(theme.tokens.text, |colors| colors.ink), theme))
         })
         .children(dir.map(|badge| dir_badge(&badge, theme)))
+}
+
+/// How the Items button is drawn.
+#[derive(Clone, Copy)]
+pub(super) enum ItemsLook {
+    /// The icon alone in a square box (the pane header).
+    Icon,
+    /// The icon and the word `Files` in the git chip's look (the title bar).
+    Chip,
+}
+
+/// The Items button: the file icon, with the word `Files` for [`ItemsLook::Chip`]. Lit (accent border and tint)
+/// while the preview is open; a dot at the top right when `state.dot`. `on_down` runs on a left press.
+pub(super) fn items_button_element(
+    id: impl Into<gpui::ElementId>,
+    state: ItemsButton,
+    title: String,
+    look: ItemsLook,
+    theme: &Theme,
+    on_down: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<Div> {
+    let accent = theme.tokens.accent;
+    let card = HoverCard { title, status: None, dir: None, container: false, host: None, folder: None, files: None };
+    let button = div()
+        .id(id)
+        .relative()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .border_1()
+        .when(state.lit, |button| button.bg(rgba((accent << 8) | 0x24)))
+        .tooltip(hover_card::tooltip(card));
+    let ink = if state.lit { accent } else { theme.tokens.muted };
+    let button = match look {
+        ItemsLook::Icon => button
+            .size(theme.ui(22.))
+            .rounded(px(RADIUS_SMALL - 2.))
+            .border_color(if state.lit { rgb(accent) } else { rgba(0) })
+            .child(svg().path(FILE_ICON).size(theme.ui(14.)).text_color(rgb(ink))),
+        ItemsLook::Chip => button
+            .h(theme.ui(20.))
+            .px(theme.ui(8.))
+            .gap(theme.ui(5.))
+            .rounded(px(RADIUS_SMALL))
+            .border_color(if state.lit { rgb(accent) } else { rgb(theme.tokens.line) })
+            .text_xs()
+            .font_weight(FontWeight::NORMAL)
+            .text_color(rgb(if state.lit { accent } else { theme.tokens.text }))
+            .child(svg().path(FILE_ICON).flex_none().size(theme.ui(12.)).text_color(rgb(ink)))
+            .child("Files"),
+    };
+    let button = button.when(state.dot, |button| {
+        button.child(
+            div().absolute().top(theme.ui(1.)).right(theme.ui(1.)).size(theme.ui(7.)).rounded_full().bg(rgb(accent)),
+        )
+    });
+    button
+        .cursor_pointer()
+        .when(!state.lit, |button| button.hover(|style| style.bg(rgb(theme.tokens.raised))))
+        .on_mouse_down(MouseButton::Left, on_down)
 }

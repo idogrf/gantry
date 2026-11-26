@@ -2,12 +2,13 @@ use super::{PANE_GAP, PaneAnim, SIDEBAR_EDGE, WorkspaceView};
 use std::time::{Duration, Instant};
 
 use app_core::split_tree::{self, Axis, NodeId, PANE_ANIM_MS, Rect, drop_zone};
+use app_core::workspace::DropFile;
 use gpui::{
     App, Context, Div, DragMoveEvent, FontWeight, MouseButton, MouseMoveEvent, Pixels, Size, Window, div, prelude::*,
     px, relative, rgb, rgba,
 };
 
-use crate::pane_drag::{DraggedPane, PaneDrop, preview_for, preview_label};
+use crate::pane_drag::{DraggedFile, DraggedPane, PaneDrop, file_drop_label, preview_for, preview_label};
 use crate::settings_store::SettingsStore;
 use crate::theme::{RADIUS_LARGE, Theme};
 
@@ -91,12 +92,15 @@ impl WorkspaceView {
             let zone = drop_zone(area, f32::from(position.x), f32::from(position.y));
             let check = self.workspace.drop_check(src, leaf, zone);
             let same_tab = self.workspace.tab_of(src) == Some(self.workspace.active);
-            let title = self
-                .workspace
-                .leaf_name(leaf)
-                .map(String::from)
-                .or_else(|| self.slots.get(&leaf).map(|slot| slot.view.read(cx).title()))
-                .unwrap_or_default();
+            let title = if self.workspace.is_preview(leaf) {
+                self.leaf_title(leaf, cx)
+            } else {
+                self.workspace
+                    .leaf_name(leaf)
+                    .map(String::from)
+                    .or_else(|| self.slots.get(&leaf).map(|slot| slot.view.read(cx).title()))
+                    .unwrap_or_default()
+            };
             PaneDrop { target: leaf, zone, check, label: preview_label(zone, check, same_tab, &title) }
         });
         match next {
@@ -116,6 +120,57 @@ impl WorkspaceView {
     pub(super) fn drop_pane(&mut self, src: NodeId, target: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(drop) = self.pane_drop.take().filter(|drop| drop.target == target) else { return };
         if self.workspace.move_leaf(src, drop.target, drop.zone) {
+            self.focus_current(window, cx);
+            self.save(cx);
+        }
+        cx.notify();
+    }
+
+    /// The pointer moved while a file is dragged over `leaf`'s overlay: work out where the drop would land.
+    pub(super) fn drag_file_over_pane(
+        &mut self,
+        leaf: NodeId,
+        event: &DragMoveEvent<DraggedFile>,
+        cx: &mut Context<Self>,
+    ) {
+        let (bounds, position) = (event.bounds, event.event.position);
+        let file = event.drag(cx).file.clone();
+        let next = bounds.contains(&position).then(|| {
+            let area = Rect {
+                x: f32::from(bounds.origin.x),
+                y: f32::from(bounds.origin.y),
+                w: f32::from(bounds.size.width),
+                h: f32::from(bounds.size.height),
+            };
+            let zone = drop_zone(area, f32::from(position.x), f32::from(position.y));
+            let check = self.workspace.file_drop_check(&file, leaf, zone, self.sidebar.read(cx).sessions());
+            let label = file_drop_label(zone, check, self.workspace.is_holding(leaf));
+            PaneDrop { target: leaf, zone, check, label }
+        });
+        match next {
+            Some(drop) if self.pane_drop.as_ref() != Some(&drop) => {
+                self.pane_drop = Some(drop);
+                cx.notify();
+            }
+            None if self.pane_drop.as_ref().is_some_and(|drop| drop.target == leaf) => {
+                self.pane_drop = None;
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    /// The button was released over `target`'s overlay with `file`: do what the cue showed. An edge makes a new
+    /// holding pane (given a view here); the middle switches the pane to the file.
+    pub(super) fn drop_file(&mut self, file: &DropFile, target: NodeId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(drop) = self.pane_drop.take().filter(|drop| drop.target == target) else { return };
+        let shown = self.workspace.drop_file(file, target, drop.zone, self.sidebar.read(cx).sessions());
+        if let Some(leaf) = shown {
+            if !self.previews.contains_key(&leaf) {
+                self.add_preview(leaf, window, cx);
+            }
+            self.update_previews(cx);
+            self.previews_in_view(window, cx);
             self.focus_current(window, cx);
             self.save(cx);
         }

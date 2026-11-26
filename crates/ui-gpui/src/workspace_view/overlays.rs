@@ -65,6 +65,7 @@ impl WorkspaceView {
         }
         let settings = cx.global::<SettingsStore>().settings().clone();
         self.ssh_hosts = settings.ssh_hosts.clone();
+        self.sync_file_chips(cx);
         self.welcome_items.take();
         if settings.check_for_updates != self.check_updates {
             self.check_updates = settings.check_for_updates;

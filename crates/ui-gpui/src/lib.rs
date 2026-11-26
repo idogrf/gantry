@@ -15,6 +15,9 @@ mod git_state;
 mod hover_card;
 pub mod launcher_view;
 mod pane_drag;
+mod preview_dir;
+mod preview_markdown;
+mod preview_view;
 pub mod recents_view;
 mod release_check;
 mod self_update;
@@ -95,6 +98,9 @@ pub fn run(launch: Launch, resume_sessions: bool) {
         }
         theme::load_fonts(cx);
         let paths = Paths::for_profile(&current_profile());
+        if let Some(root) = preview_dir::root(&current_profile()) {
+            preview_dir::clear(&root);
+        }
         SettingsStore::init(paths.settings_file.clone(), cx);
         let (width, height, maximized) = match window_state::load(&window_state::file_beside(&paths.layout_file)) {
             Some(state) => (state.width, state.height, state.maximized),

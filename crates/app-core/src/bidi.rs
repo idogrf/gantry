@@ -125,8 +125,19 @@ fn order_segment(row: &[CellView], cols: Range<usize>, to_logical: &mut [usize],
     }
 }
 
-fn is_rtl_letter(ch: char) -> bool {
+/// Whether `ch` is a letter written right to left (Hebrew, Arabic and the like).
+pub fn is_rtl_letter(ch: char) -> bool {
     matches!(bidi_class(ch), BidiClass::R | BidiClass::AL)
+}
+
+/// Whether the first strong character of `text` (bidi class L, R or AL) is right to left; `None` with no strong
+/// character. This is the base direction `display_line` uses.
+pub fn first_strong_rtl(text: &str) -> Option<bool> {
+    text.chars().find_map(|ch| match bidi_class(ch) {
+        BidiClass::L => Some(false),
+        BidiClass::R | BidiClass::AL => Some(true),
+        _ => None,
+    })
 }
 
 /// Box drawing and block elements: Claude's frames and logo.

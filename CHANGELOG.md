@@ -21,7 +21,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Drag files onto panes** - Drag a file tab or a pop-up onto a pane's edge for a pane that holds that one file, or onto a preview to show it there.
 - **Preview setting** - Settings > Sessions > Preview > Let Claude show you files (on by default; applies to sessions started or resumed after the change).
 - **Items button** - A file button in the title bar (beside the Git chip) and on every Claude pane opens the preview of that session and closes it again. A dot shows a file you have not seen; it is dimmed while the session has sent nothing.
-- **Text size in the preview** - Markdown and text files have − / + at the bottom of the preview (Ctrl+wheel works too); one size for every file, kept in settings.json as preview.textSize.
+- **Text size in the preview** - Markdown and text files have − / + at the bottom of the preview (Ctrl+wheel works too, Cmd+wheel on macOS); one size for every file, kept in settings.json as preview.textSize.
 - **Close file tabs with a middle click** - A middle click on a file tab of the preview removes it from the list, like its ×.
 
 ### Fixed

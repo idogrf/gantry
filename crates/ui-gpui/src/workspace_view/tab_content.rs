@@ -159,10 +159,10 @@ impl WorkspaceView {
         let open = self.workspace.preview_of(claude).is_some();
         let settings = cx.global::<SettingsStore>().settings();
         let platform = Platform::current();
-        let label = if open { "Close preview" } else { "Open preview" };
         let title = match shortcuts::current("openPreview", &settings.shortcuts, platform) {
-            Some(keystroke) => format!("{label} ({})", shortcuts::label(Some(&keystroke), platform)),
-            None => label.to_string(),
+            _ if open => "Close preview".to_string(),
+            Some(keystroke) => format!("Open preview ({})", shortcuts::label(Some(&keystroke), platform)),
+            None => "Open preview".to_string(),
         };
         let (frame, icon) = if title_bar { (26., 15.) } else { (22., 14.) };
         Some(items_button_element(
@@ -701,7 +701,15 @@ pub(super) fn items_button_element(
         .tooltip(hover_card::tooltip(card))
         .child(svg().path(FILE_ICON).size(icon).text_color(rgb(if state.lit { accent } else { theme.tokens.muted })))
         .when(state.dot, |button| {
-            button.child(div().absolute().top(px(1.)).right(px(1.)).size(theme.ui(7.)).rounded_full().bg(rgb(accent)))
+            button.child(
+                div()
+                    .absolute()
+                    .top(theme.ui(1.))
+                    .right(theme.ui(1.))
+                    .size(theme.ui(7.))
+                    .rounded_full()
+                    .bg(rgb(accent)),
+            )
         });
     if state.enabled {
         button

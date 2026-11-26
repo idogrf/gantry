@@ -663,17 +663,16 @@ impl PreviewView {
 
     /// Measure the settings markdown rows depend on once per frame; a change remeasures the list, so the heights of
     /// rows out of view do not go stale.
-    fn sync_md(&mut self, window: &Window, cx: &App) {
+    fn sync_md(&mut self, scaled: &Theme, window: &Window, cx: &App) {
         let Content::Markdown(doc) = &self.model.content else { return };
         let settings = cx.global::<SettingsStore>().settings();
         let mirror = doc_rtl(settings.window.right_to_left, doc.rtl, self.flipped);
         let metrics = Self::metrics(window, cx);
-        let scaled = Self::scaled_theme(cx);
         let key = (scaled.ui_scale.to_bits(), metrics.family.clone(), metrics.size.to_bits());
         let char_px = match &self.char_px_cache {
             Some((cached, px)) if *cached == key => *px,
             _ => {
-                let px = preview_markdown::char_px(window, &scaled);
+                let px = preview_markdown::char_px(window, scaled);
                 self.char_px_cache = Some((key, px));
                 px
             }
@@ -1635,7 +1634,7 @@ impl PreviewView {
             .collect()
     }
 
-    fn body(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn body(&self, theme: &Theme, scaled: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let label_rtl = cx.global::<SettingsStore>().settings().window.right_to_left;
         let muted = |text: &'static str| div().text_sm().text_color(rgb(theme.tokens.muted)).child(text);
         let centered = |children: Vec<gpui::AnyElement>| {
@@ -1666,7 +1665,7 @@ impl PreviewView {
             Content::Markdown(_) => {
                 let view = cx.entity();
                 let room = theme.ui(BAR_ROOM);
-                let theme = Self::scaled_theme(cx);
+                let theme = scaled.clone();
                 let look = self.md_look.clone().unwrap_or_default();
                 let after = cx.entity();
                 div()
@@ -1778,7 +1777,8 @@ impl Render for PreviewView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.drawn = Instant::now();
         self.sync_zoom();
-        self.sync_md(window, cx);
+        let scaled = Self::scaled_theme(cx);
+        self.sync_md(&scaled, window, cx);
         self.frame_images.clear();
         if matches!(self.model.content, Content::Markdown(_)) {
             self.md_width = f32::from(self.md_list.viewport_bounds().size.width);
@@ -1796,7 +1796,7 @@ impl Render for PreviewView {
                 cx.listener(|_, _, _, cx| cx.emit(PreviewEvent::Close)),
             )
             .into_any_element(),
-            None => self.body(&theme, cx),
+            None => self.body(&theme, &scaled, cx),
         };
         div()
             .key_context("Preview")

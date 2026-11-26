@@ -369,11 +369,66 @@ pub fn after_remove(listed: &[&SentFile], removed: &str) -> Option<String> {
     listed.iter().rev().find(|f| f.id != removed).map(|f| f.id.clone())
 }
 
-/// The file to jump to after a new list: the newest one that is not backlog and not in `known`.
+/// The files of a new list that are new: not backlog, not opened from a link, not in `known`; oldest first (ties
+/// keep list order). The one rule for "new": the pane's jump, the pop-up and the alert all read it.
+pub fn fresh_sends<'a>(known: &HashSet<String>, files: &'a [SentFile]) -> Vec<&'a SentFile> {
+    let mut out: Vec<&SentFile> =
+        files.iter().filter(|f| !f.backlog && !is_link(&f.id) && !known.contains(&f.id)).collect();
+    out.sort_by_key(|f| f.sent_ms);
+    out
+}
+
+/// The file to jump to after a new list: the newest of [`fresh_sends`].
 /// `None` when `known` is `None`, since the first list a pane sees only fills.
 pub fn newly_sent(known: Option<&HashSet<String>>, files: &[SentFile]) -> Option<String> {
-    let known = known?;
-    files.iter().rev().find(|f| !f.backlog && !known.contains(&f.id)).map(|f| f.id.clone())
+    known.and_then(|k| fresh_sends(k, files).last().map(|f| f.id.clone()))
+}
+
+/// What the sidebar chip counts for one session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileCounts {
+    /// Listed files not seen yet (backlog included).
+    pub new: usize,
+    /// Files listed: not removed, not opened from a link.
+    pub total: usize,
+}
+
+/// Count the files of a session: `removed` ids are not listed, links are never counted, `seen` ids are not new.
+pub fn file_counts(
+    files: &[SentFile],
+    removed: Option<&BTreeSet<String>>,
+    seen: Option<&BTreeSet<String>>,
+) -> FileCounts {
+    let mut counts = FileCounts::default();
+    for f in listed(files, removed).into_iter().filter(|f| !is_link(&f.id)) {
+        counts.total += 1;
+        if !seen.is_some_and(|s| s.contains(&f.id)) {
+            counts.new += 1;
+        }
+    }
+    counts
+}
+
+/// The sidebar file chip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chip {
+    /// Filled, with the number of unseen files.
+    New(usize),
+    /// Outlined, no count: every file is seen (or the badge is off).
+    Seen,
+}
+
+/// The chip for `counts`: none for a closed session or no files; `New` while `badge` is on and files are unseen.
+pub fn chip(counts: FileCounts, closed: bool, badge: bool) -> Option<Chip> {
+    if closed || counts.total == 0 {
+        return None;
+    }
+    Some(if badge && counts.new > 0 { Chip::New(counts.new) } else { Chip::Seen })
+}
+
+/// The hover card line: `Files: <new> new, <total> in all`.
+pub fn files_line(counts: FileCounts) -> String {
+    format!("Files: {} new, {} in all", counts.new, counts.total)
 }
 
 /// Which file tabs are drawn and which go under the `+N` button.
@@ -624,6 +679,49 @@ mod tests {
         assert_eq!(after_remove(&l, "c"), Some("b".to_string()));
         assert_eq!(after_remove(&l, "a"), Some("c".to_string()));
         assert_eq!(after_remove(&l[..1], "a"), None);
+    }
+
+    #[test]
+    fn fresh_sends_skips_backlog_links_and_known() {
+        let files = [file("a", true), file("b", false), file("link:/x", false), file("c", false)];
+        let known: HashSet<String> = ["b".to_string()].into();
+        let ids: Vec<_> = fresh_sends(&known, &files).iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, ["c"]);
+    }
+
+    #[test]
+    fn a_resend_of_the_same_path_is_new() {
+        let mut first = file("t1:0", false);
+        let mut second = file("t2:0", false);
+        first.path = "/r/a.md".into();
+        second.path = "/r/a.md".into();
+        let files = [first, second];
+        let known: HashSet<String> = ["t1:0".to_string()].into();
+        let ids: Vec<_> = fresh_sends(&known, &files).iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, ["t2:0"]);
+    }
+
+    #[test]
+    fn file_counts_follow_removed_and_seen() {
+        let files = [file("a", true), file("b", false), file("c", false), file("d", false), file("link:/x", false)];
+        let removed: BTreeSet<String> = ["d".to_string()].into();
+        let seen: BTreeSet<String> = ["b".to_string()].into();
+        assert_eq!(file_counts(&files, Some(&removed), Some(&seen)), FileCounts { new: 2, total: 3 });
+    }
+
+    #[test]
+    fn chip_rules() {
+        let two = FileCounts { new: 2, total: 3 };
+        assert_eq!(chip(two, true, true), None);
+        assert_eq!(chip(FileCounts::default(), false, true), None);
+        assert_eq!(chip(two, false, false), Some(Chip::Seen));
+        assert_eq!(chip(FileCounts { new: 0, total: 3 }, false, true), Some(Chip::Seen));
+        assert_eq!(chip(two, false, true), Some(Chip::New(2)));
+    }
+
+    #[test]
+    fn files_line_reads_new_and_total() {
+        assert_eq!(files_line(FileCounts { new: 2, total: 3 }), "Files: 2 new, 3 in all");
     }
 
     #[test]

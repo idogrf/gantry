@@ -50,6 +50,19 @@ fn watch_changes(
         .collect()
 }
 
+/// The model's title and followed session: a holding pane is titled with its file's name and follows nothing; a
+/// following pane takes its session's title and id.
+fn title_and_session(
+    holding: bool,
+    held_name: Option<String>,
+    session: Option<(&str, &str)>,
+) -> (String, Option<String>) {
+    if holding {
+        return (held_name.unwrap_or_default(), None);
+    }
+    session.map_or((String::new(), None), |(title, id)| (title.to_string(), Some(id.to_string())))
+}
+
 /// Whether two models draw the same thing, so the view need not be given the new one.
 fn same_model(a: &PreviewModel, b: &PreviewModel) -> bool {
     (&a.title, a.holding, &a.host, &a.session) == (&b.title, b.holding, &b.host, &b.session)
@@ -836,11 +849,9 @@ impl WorkspaceView {
         let seen_in = info.map(|info| info.id.as_str());
         let holding = self.workspace.is_holding(leaf);
         // A holding pane holds one file: no tab row.
-        let tabs: Vec<PreviewTab> = self
-            .workspace
-            .preview_files(leaf, sessions)
+        let listed = if holding { Vec::new() } else { self.workspace.preview_files(leaf, sessions) };
+        let tabs: Vec<PreviewTab> = listed
             .into_iter()
-            .filter(|_| !holding)
             .map(|file| PreviewTab {
                 id: file.id.clone(),
                 name: file_name(&file.path),
@@ -883,15 +894,16 @@ impl WorkspaceView {
             }
             _ => false,
         };
-        let title = match (holding, file) {
-            (true, Some(file)) => file_name(&file.path),
-            _ => info.map(|info| session_title(info).to_string()).unwrap_or_default(),
-        };
+        let (title, session) = title_and_session(
+            holding,
+            file.map(|file| file_name(&file.path)),
+            info.map(|info| (session_title(info), info.id.as_str())),
+        );
         PreviewModel {
             title,
             holding,
             host: host.clone(),
-            session: info.map(|info| info.id.clone()),
+            session,
             tabs,
             active,
             content,
@@ -1122,6 +1134,14 @@ mod tests {
             host_card: None,
             can_open: false,
         }
+    }
+
+    #[test]
+    fn holding_models_are_named_by_their_file_and_follow_nothing() {
+        assert_eq!(title_and_session(true, Some("plan.md".into()), Some(("api", "s1"))), ("plan.md".into(), None));
+        assert_eq!(title_and_session(true, None, None), (String::new(), None));
+        assert_eq!(title_and_session(false, Some("x".into()), Some(("api", "s1"))), ("api".into(), Some("s1".into())));
+        assert_eq!(title_and_session(false, None, None), (String::new(), None));
     }
 
     #[test]

@@ -1126,6 +1126,9 @@ impl PreviewView {
         let leaf = self.leaf;
         let holding = self.model.holding;
         let (title, tag) = header_text(holding, &self.model.title);
+        // The part of the label before the title: drawn as text, while the title goes through `bidi_label`.
+        let prefix = title.strip_suffix(self.model.title.as_str()).unwrap_or("").trim_end().to_string();
+        let has_title = !self.model.title.is_empty();
         let can_open = self.model.can_open;
         let can_flip = matches!(self.model.content, Content::Markdown(_))
             && cx.global::<SettingsStore>().settings().window.right_to_left;
@@ -1165,12 +1168,8 @@ impl PreviewView {
                     .min_w_0()
                     .flex()
                     .truncate()
-                    .when(!holding, |label| {
-                        label.child(if self.model.title.is_empty() {
-                            div().child("Preview")
-                        } else {
-                            div().flex_none().mr(theme.ui(4.)).child("Preview ·")
-                        })
+                    .when(!prefix.is_empty(), |label| {
+                        label.child(div().flex_none().when(has_title, |d| d.mr(theme.ui(4.))).child(prefix))
                     })
                     .child(bidi_label(&self.model.title, label_rtl)),
             )
@@ -1623,14 +1622,14 @@ impl Render for PreviewView {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn header_text_depends_on_the_mode() {
         assert_eq!(header_text(true, "plan.md"), ("plan.md".to_string(), "Holds this file"));
         assert_eq!(header_text(false, "api"), ("Preview · api".to_string(), "Follows session"));
         assert_eq!(header_text(false, ""), ("Preview".to_string(), "Follows session"));
     }
-
-    use super::*;
 
     #[test]
     fn labels_with_hebrew_are_split_per_character() {

@@ -1310,6 +1310,16 @@ impl Workspace {
         }
     }
 
+    /// The folder a holding pane dropped beside `target` sits under in the sidebar: the target's session folder when
+    /// known, else the target's own, so it joins the target's project and not the file's folder.
+    fn drop_folder(&self, target: NodeId, sessions: &SessionStore) -> PathBuf {
+        let Some(leaf) = self.leaves.get(&target) else { return PathBuf::new() };
+        let session = leaf.session.as_deref().or_else(|| leaf.preview.as_ref().and_then(|v| v.session.as_deref()));
+        session
+            .and_then(|id| sessions.get(&leaf.host, id))
+            .map_or_else(|| leaf.launch.cwd.clone(), |info| info.cwd.clone())
+    }
+
     /// Drop `file` on `zone` of leaf `target`. An edge makes a holding pane on the file's host beside `target`, in
     /// `target`'s Gantry project, focused; the middle of a holding pane makes it hold the file and takes the file's
     /// host, the middle of a following pane makes the file its active tab. Returns the pane that shows the file;
@@ -1324,9 +1334,9 @@ impl Workspace {
         if self.file_drop_check(file, target, zone, sessions) != DropCheck::Allowed {
             return None;
         }
-        let folder = file.file.path.parent().map(Path::to_path_buf).unwrap_or_default();
         match zone {
             DropZone::Edge(side) => {
+                let folder = self.drop_folder(target, sessions);
                 let project = self.leaves.get(&target).and_then(|leaf| leaf.project.clone());
                 let (split, id) = (self.alloc(), self.alloc());
                 let view = PreviewLeaf {
@@ -1352,7 +1362,6 @@ impl Workspace {
                     Some(held) => {
                         *held = file.file.clone();
                         leaf.host = file.host.clone();
-                        leaf.launch.cwd = folder;
                     }
                     None => {
                         self.set_preview_active(target, &file.file.id);
@@ -4863,6 +4872,22 @@ mod tests {
         let sent_to_terminal = drop_of(HostId::local(), Some("s1"), "b");
         assert_eq!(ws.file_drop_check(&sent_to_terminal, claude, mid, &store), DropCheck::Nothing);
         assert_eq!(ws.drop_file(&sent_to_terminal, claude, mid, &store), None);
+    }
+
+    #[test]
+    fn a_holding_pane_sits_in_the_targets_folder_not_the_files() {
+        let mut ws = Workspace::default();
+        let target = ws.new_tab(shell("/b"));
+        let store = SessionStore::default();
+        let mut file = drop_of(HostId::local(), None, "a");
+        file.file.path = "/elsewhere/doc.md".into();
+        let held = ws.drop_file(&file, target, right(), &store).unwrap();
+        assert_eq!(ws.leaves[&held].launch.cwd, PathBuf::from("/b"));
+        // Dropping another file on its middle keeps the folder.
+        let mut second = drop_of(HostId::local(), None, "b");
+        second.file.path = "/other/x.md".into();
+        ws.drop_file(&second, held, DropZone::Center, &store).unwrap();
+        assert_eq!(ws.leaves[&held].launch.cwd, PathBuf::from("/b"));
     }
 
     #[test]

@@ -37,6 +37,7 @@ use crate::field;
 use crate::git_scrollbar::Extent;
 use crate::hover_card::{self, HostsCard, HoverCard, Lead, lead, line_width};
 use crate::pane_drag::DraggedPane;
+use crate::preview_view::bidi_label;
 use crate::settings_store::{SettingsStore, dir_badge_for, shortcut_label};
 use crate::theme::{
     RADIUS, Theme, UI_FONT, container_icon, dir_badge, group_tint, pane_marker, pill_sweep, pin_icon, side_line,
@@ -1677,7 +1678,8 @@ impl SidebarView {
         // What a row says in words (marks, title, notes, badge); it fades out as the column closes.
         let line_content =
             |faded: f32| div().flex_1().min_w_0().flex().flex_row().items_center().gap_2().opacity(faded);
-        let title = |text: String| div().flex_1().min_w_0().truncate().child(text);
+        let label_rtl = cx.global::<SettingsStore>().settings().window.right_to_left;
+        let title = |text: String| div().flex_1().min_w_0().truncate().child(bidi_label(&text, label_rtl));
         let aside =
             |text: String, ink: u32| div().flex_none().text_xs().text_color(rgba((ink << 8) | 0xcc)).child(text);
         let guide = row.in_tab.then(|| {

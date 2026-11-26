@@ -4,6 +4,8 @@ use app_core::split_tree::{Direction, DropZone, NodeId, Rect, zone_rect};
 use app_core::workspace::{DropCheck, MAX_PANES_PER_TAB};
 use gpui::{Context, FontWeight, IntoElement, Render, Window, div, prelude::*, px, rgb};
 
+use crate::preview_view::bidi_label;
+use crate::settings_store::SettingsStore;
 use crate::theme::{RADIUS, UI_FONT, theme};
 
 /// Where a dragged pane would land: the part of the target pane (`pane`, in fractions of the tab) that `zone` covers,
@@ -56,6 +58,7 @@ pub struct DraggedPane {
 impl Render for DraggedPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
+        let rtl = cx.global::<SettingsStore>().settings().window.right_to_left;
         div()
             .px(theme.ui(12.))
             .py(theme.ui(6.))
@@ -67,7 +70,7 @@ impl Render for DraggedPane {
             .text_sm()
             .font_family(UI_FONT)
             .font_weight(FontWeight::SEMIBOLD)
-            .child(self.title.clone())
+            .child(bidi_label(&self.title, rtl))
     }
 }
 

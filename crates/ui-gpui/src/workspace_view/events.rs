@@ -298,7 +298,7 @@ impl WorkspaceView {
         let settings = cx.global::<SettingsStore>().settings().clone();
         let visible = self.workspace.is_visible(leaf);
         let channels = alert_channels(&settings.alerts, &alert.kind, visible, window.is_window_active(), false);
-        if channels.badge {
+        if channels.badge && alert.kind.marks_unseen() {
             self.unseen.insert(leaf, alert.kind.clone());
             self.sync_unseen(cx);
             self.clear_seen(window, cx);

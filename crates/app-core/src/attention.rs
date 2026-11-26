@@ -28,6 +28,13 @@ pub enum AlertKind {
     },
 }
 
+impl AlertKind {
+    /// Whether the alert's badge marks the session's pane unseen. A sent file does not: its badge is the file chip.
+    pub fn marks_unseen(&self) -> bool {
+        !matches!(self, AlertKind::FileSent { .. })
+    }
+}
+
 /// One status change worth telling the user about.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alert {
@@ -609,6 +616,23 @@ mod tests {
         assert_eq!(describe(&one, "api", None), ("File sent · api".into(), "plan.md".into()));
         let three = AlertKind::FileSent { files: vec![sent("a", 1, false), sent("b", 2, false), sent("c", 3, false)] };
         assert_eq!(describe(&three, "api", None).1, "3 files");
+    }
+
+    #[test]
+    fn a_sent_file_never_marks_a_pane_unseen() {
+        assert!(AlertKind::Finished.marks_unseen());
+        assert!(AlertKind::NeedsInput { reason: None }.marks_unseen());
+        assert!(!AlertKind::FileSent { files: vec![sent("a", 1, false)] }.marks_unseen());
+    }
+
+    #[test]
+    fn popup_off_and_claude_pane_visible_leaves_a_file_alert_silent() {
+        let kind = AlertKind::FileSent { files: vec![sent("a", 1, false)] };
+        let alerts = AlertSettings { file_sent: EventAlerts { popup: false, ..all_on() }, ..settings() };
+        assert_eq!(alert_channels(&alerts, &kind, true, true, false), Channels::default());
+        let loud = EventAlerts { popup: true, ..all_on() };
+        let c = alert_channels(&AlertSettings { file_sent: loud, ..settings() }, &kind, true, true, false);
+        assert!(c.popup && !c.notification && c.sound.is_none());
     }
 
     #[test]

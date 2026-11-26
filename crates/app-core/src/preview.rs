@@ -710,6 +710,13 @@ mod tests {
     }
 
     #[test]
+    fn file_counts_ignore_links_even_when_seen() {
+        let files = [file("a", false), file("link:/x", false)];
+        let seen: BTreeSet<String> = ["link:/x".to_string()].into();
+        assert_eq!(file_counts(&files, None, Some(&seen)), FileCounts { new: 1, total: 1 });
+    }
+
+    #[test]
     fn chip_rules() {
         let two = FileCounts { new: 2, total: 3 };
         assert_eq!(chip(two, true, true), None);

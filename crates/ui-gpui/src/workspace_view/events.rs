@@ -297,11 +297,20 @@ impl WorkspaceView {
         let Some(leaf) = self.workspace.leaf_for_pane(&alert.pane) else { return };
         let settings = cx.global::<SettingsStore>().settings().clone();
         let visible = self.workspace.is_visible(leaf);
-        let channels = alert_channels(&settings.alerts, &alert.kind, visible, window.is_window_active(), false);
+        let channels = alert_channels(
+            &settings.alerts,
+            &alert.kind,
+            visible,
+            window.is_window_active(),
+            self.alert_preview_in_view(&alert),
+        );
         if channels.badge && alert.kind.marks_unseen() {
             self.unseen.insert(leaf, alert.kind.clone());
             self.sync_unseen(cx);
             self.clear_seen(window, cx);
+        }
+        if channels.popup {
+            self.push_toast(leaf, alert.clone(), window, cx);
         }
         if !channels.notification && channels.sound.is_none() {
             return;

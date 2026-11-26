@@ -808,6 +808,14 @@ impl WorkspaceView {
         self.save(cx);
     }
 
+    /// Open (or focus) the preview that follows Claude pane `claude` and show file `id` in it.
+    pub(super) fn preview_file_for(&mut self, claude: NodeId, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_preview_for(claude, window, cx);
+        if let Some(preview) = self.workspace.preview_of(claude) {
+            self.activate_file(preview, id, window, cx);
+        }
+    }
+
     /// A preview pane's row title (and the title bar's): `Preview · <file>`, else a terminal's title.
     pub(super) fn leaf_title(&self, leaf: NodeId, cx: &App) -> String {
         let Some(entry) = self.workspace.leaves.get(&leaf) else { return String::new() };

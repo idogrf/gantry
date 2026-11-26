@@ -303,6 +303,8 @@ impl WorkspaceView {
         if let Some(follower) = self.workspace.preview_of(leaf) {
             self.close_leaf(follower, window, cx);
         }
+        self.toasts.remove_leaf(leaf);
+        self.reschedule_toasts(window, cx);
         let from = self.drawn_rects();
         // A pane of the visible tab that keeps other panes: the survivors grow into its space.
         let swipe = from.len() > 1 && from.iter().any(|(drawn, _)| *drawn == leaf);

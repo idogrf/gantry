@@ -483,6 +483,7 @@ impl Render for WorkspaceView {
                     move |window, cx| dismiss(&(), window, cx),
                 ))
             })
+            .children(self.render_toasts(&theme, cx))
             // Last, so nothing above the workspace draws over its scrim.
             .when_some(self.dialog.as_ref().map(|open| open.view.clone()), |root, view| {
                 root.child(dialog_overlay(view, &theme, fade))

@@ -103,6 +103,7 @@ mod resume;
 mod sidebar_menus;
 mod tab_content;
 mod title_bar;
+mod toasts;
 mod updates;
 
 pub(crate) use actions::all_bindings;
@@ -536,6 +537,12 @@ pub struct WorkspaceView {
     seen_since: HashMap<NodeId, Instant>,
     /// Looks at `unseen` again when the next leaf in view has been seen long enough.
     read_timer: Option<Task<()>>,
+    /// The in-app pop-ups.
+    toasts: app_core::toasts::Toasts,
+    /// Zero of the pop-ups' clock.
+    toast_epoch: Instant,
+    /// The one timer to the pop-ups' next change.
+    toast_timer: Option<Task<()>>,
     _activation: Subscription,
     /// The theme whose terminal colors the daemon was last told.
     sent_palette: Option<Preset>,
@@ -639,6 +646,7 @@ impl WorkspaceView {
             if window.is_window_active() {
                 this.git.refresh_now();
             }
+            this.toasts_running(window.is_window_active(), window, cx);
             this.clear_seen(window, cx);
             this.sidebar.update(cx, |_, cx| cx.notify());
         });
@@ -780,6 +788,9 @@ impl WorkspaceView {
             unseen: HashMap::new(),
             seen_since: HashMap::new(),
             read_timer: None,
+            toasts: app_core::toasts::Toasts::default(),
+            toast_epoch: Instant::now(),
+            toast_timer: None,
             _activation: activation,
             sent_palette: None,
             _theme: theme_changed,

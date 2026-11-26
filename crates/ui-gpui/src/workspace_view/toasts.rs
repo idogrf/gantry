@@ -159,42 +159,51 @@ impl WorkspaceView {
                 let names: Vec<&str> = names.iter().map(String::as_str).collect();
                 (
                     file_sent_heading(files.len()),
-                    vec![
+                    [
+                        (!place.is_empty()).then(|| {
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme.tokens.muted))
+                                .child(bidi_label(&place, rtl))
+                                .into_any_element()
+                        }),
+                        Some(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(theme.ui(6.))
+                                .text_sm()
+                                .child(div().min_w_0().truncate().child(bidi_label(&file_line(&names), rtl)))
+                                .into_any_element(),
+                        ),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+                )
+            }
+            kind => {
+                let (summary, body) = describe(kind, &title, info.and_then(|info| info.last_prompt.as_deref()));
+                let summary = summary.split(" · ").next().unwrap_or_default().to_string();
+                let tone = if matches!(kind, AlertKind::NeedsInput { .. }) { Tone::NeedsInput } else { Tone::Done };
+                let mut lines = Vec::new();
+                if !place.is_empty() {
+                    lines.push(
                         div()
                             .text_xs()
                             .text_color(rgb(theme.tokens.muted))
                             .child(bidi_label(&place, rtl))
                             .into_any_element(),
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(theme.ui(6.))
-                            .text_sm()
-                            .child(
-                                svg()
-                                    .path(FILE_ICON)
-                                    .flex_none()
-                                    .size(theme.ui(13.))
-                                    .text_color(rgb(theme.tokens.muted)),
-                            )
-                            .child(div().min_w_0().truncate().child(bidi_label(&file_line(&names), rtl)))
-                            .into_any_element(),
-                    ],
-                )
-            }
-            kind => {
-                let (summary, body) = describe(kind, &title, None);
-                let summary = summary.split(" · ").next().unwrap_or_default().to_string();
-                let tone = if matches!(kind, AlertKind::NeedsInput { .. }) { Tone::NeedsInput } else { Tone::Done };
-                let mut lines = vec![
-                    div()
-                        .text_xs()
-                        .text_color(rgb(theme.tokens.muted))
-                        .child(bidi_label(&place, rtl))
-                        .into_any_element(),
-                ];
+                    );
+                }
                 if !body.is_empty() {
-                    lines.push(div().text_sm().truncate().child(body).into_any_element());
+                    lines.push(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(theme.tokens.muted))
+                            .child(bidi_label(&body, rtl))
+                            .into_any_element(),
+                    );
                 }
                 let dot = div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(theme.tone(tone).dot));
                 return self.toast_card(toast, dot.into_any_element(), summary, lines, visible, animate, theme, cx);
@@ -295,7 +304,7 @@ impl WorkspaceView {
                     .gap(theme.ui(6.))
                     .mt(theme.ui(2.))
                     .when(is_file, |row| row.child(button("toast-preview", "Preview", true, Click::Preview)))
-                    .when(shows_go_to(visible), |row| {
+                    .when(!is_file || shows_go_to(visible), |row| {
                         row.child(button("toast-go", "Go to session", !is_file, Click::GoToSession))
                     }),
             );

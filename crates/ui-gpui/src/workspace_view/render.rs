@@ -222,6 +222,8 @@ impl Render for WorkspaceView {
             .font_family(UI_FONT)
             .child(self.render_title_bar(window, cx))
             .child(body)
+            // Below the launcher, recents, setup, wizard, menus and dialog: they never cover or block those.
+            .children(self.render_toasts(&theme, cx))
             .when_some(self.launcher.as_ref().map(|(view, _)| view.clone()), |root, view| {
                 root.child(
                     div()
@@ -483,7 +485,6 @@ impl Render for WorkspaceView {
                     move |window, cx| dismiss(&(), window, cx),
                 ))
             })
-            .children(self.render_toasts(&theme, cx))
             // Last, so nothing above the workspace draws over its scrim.
             .when_some(self.dialog.as_ref().map(|open| open.view.clone()), |root, view| {
                 root.child(dialog_overlay(view, &theme, fade))

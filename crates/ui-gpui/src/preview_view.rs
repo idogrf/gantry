@@ -458,6 +458,8 @@ pub(crate) struct PreviewView {
     md_list: ListState,
     /// The document `md_list` was reset for.
     md_doc: Option<Arc<MdDoc>>,
+    /// The markdown rows still need their estimated height (set once the list's width and the look are known).
+    md_estimate_pending: bool,
     /// The code block whose Copy button shows `Copied`, with the timer that puts the label back.
     copied: Option<(usize, Task<()>)>,
     /// The Undo bar: its text, the number of the close it belongs to and the timer that hides it.
@@ -607,6 +609,7 @@ impl PreviewView {
             md_look: None,
             flipped: false,
             char_px_cache: None,
+            md_estimate_pending: false,
             wheel_acc: 0.0,
             frame_images: Vec::new(),
             md_width: 0.0,
@@ -656,13 +659,8 @@ impl PreviewView {
         {
             // A new parse of the same file (a live reload) keeps the place; another file starts at the top.
             let top = self.md_doc.is_some().then(|| self.md_list.logical_scroll_top());
-            // Rows not yet measured get an estimated height, so the scrollbar is about right from the first frame.
-            let (line_height, char_px) =
-                self.md_look.as_ref().map_or((20.0, 8.0), |look| (look.line_height, look.char_px));
-            let width = f32::from(self.md_list.viewport_bounds().size.width);
-            let width = if width > 0.0 { width } else { 600.0 };
-            let estimate = average_row_height(doc, line_height, width / char_px.max(1.0));
-            self.md_list.reset_with_uniform_height(doc.rows.len(), px(estimate));
+            self.md_list.reset(doc.rows.len());
+            self.md_estimate_pending = true;
             if let Some(top) = top.filter(|_| !doc.rows.is_empty()) {
                 let item_ix = top.item_ix.min(doc.rows.len() - 1);
                 self.md_list.scroll_to(ListOffset { item_ix, ..top });
@@ -804,6 +802,22 @@ impl PreviewView {
                 self.md_list.remeasure();
             }
             self.md_look = Some(look);
+        }
+        // Rows not yet measured get an estimated height, so the scrollbar is about right before they are seen.
+        if self.md_estimate_pending {
+            let width = f32::from(self.md_list.viewport_bounds().size.width);
+            if width <= 0.0 {
+                // The list has not been laid out yet: try again on the next frame.
+                window.request_animation_frame();
+                return;
+            }
+            self.md_estimate_pending = false;
+            let estimate = preview_markdown::average_row_height(doc, scaled.ui_scale, width, char_px);
+            let top = self.md_list.logical_scroll_top();
+            self.md_list.reset_with_uniform_height(doc.rows.len(), px(estimate));
+            if !doc.rows.is_empty() {
+                self.md_list.scroll_to(ListOffset { item_ix: top.item_ix.min(doc.rows.len() - 1), ..top });
+            }
         }
     }
 
@@ -2236,39 +2250,6 @@ impl Render for PreviewView {
     }
 }
 
-/// The average height of a markdown row before it is measured: each row's lines are guessed from its text (`per_line`
-/// characters a line), code rows count their lines, an image counts as 10 lines.
-fn average_row_height(doc: &preview_doc::markdown::MdDoc, line_height: f32, per_line: f32) -> f32 {
-    use preview_doc::markdown::RowKind;
-    if doc.rows.is_empty() {
-        return line_height;
-    }
-    let per_line = per_line.max(1.0);
-    let text_lines = |block: usize, per_line: f32| -> f32 {
-        doc.blocks.get(block).map_or(1.0, |b| {
-            b.text.split('\n').map(|line| (line.chars().count() as f32 / per_line).ceil().max(1.0)).sum()
-        })
-    };
-    let total: f32 = doc
-        .rows
-        .iter()
-        .map(|row| {
-            let lines = match &row.kind {
-                RowKind::Text { block } | RowKind::Item { block, .. } => text_lines(*block, per_line),
-                RowKind::Code { lines, .. } => lines.len().max(1) as f32,
-                RowKind::TableRow { cells, .. } => {
-                    let width = per_line / cells.len().max(1) as f32;
-                    cells.iter().map(|cell| text_lines(*cell, width)).fold(1.0, f32::max)
-                }
-                RowKind::Image { .. } => 10.0,
-                RowKind::Rule | RowKind::AlertTitle(_) => 1.0,
-            };
-            lines * line_height + row.space_above
-        })
-        .sum();
-    total / doc.rows.len() as f32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2431,20 +2412,5 @@ mod tests {
     fn a_wheel_line_pans_20_px_and_pixels_pass_through() {
         assert_eq!(wheel_pan(ScrollDelta::Lines(gpui::point(1.0, -2.0))), (20.0, -40.0));
         assert_eq!(wheel_pan(ScrollDelta::Pixels(gpui::point(px(3.), px(4.)))), (3.0, 4.0));
-    }
-
-    #[test]
-    fn a_row_estimate_counts_wrapped_and_code_lines() {
-        let line = "word ".repeat(40); // 200 characters: 4 lines at 50 a line
-        let doc = preview_doc::markdown::parse(&format!("{line}\n\n```\na\nb\nc\n```"), Path::new("/"));
-        let estimate = average_row_height(&doc, 10.0, 50.0);
-        let space: f32 = doc.rows.iter().map(|row| row.space_above).sum();
-        assert!((estimate - (4.0 * 10.0 + 3.0 * 10.0 + space) / 2.0).abs() < 0.01, "{estimate}");
-    }
-
-    #[test]
-    fn a_row_estimate_of_an_empty_doc_is_one_line() {
-        let doc = preview_doc::markdown::parse("", Path::new("/"));
-        assert_eq!(average_row_height(&doc, 18.0, 80.0), 18.0);
     }
 }

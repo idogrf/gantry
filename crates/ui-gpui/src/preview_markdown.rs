@@ -391,6 +391,48 @@ pub(crate) fn char_px(window: &gpui::Window, theme: &Theme) -> f32 {
     if count == 0 { f32::from(size) * 0.55 * 1.1 } else { sum / count as f32 * 1.1 }
 }
 
+/// The average height of a markdown row before it is measured, in px: each row's lines are guessed from its text at
+/// the list's `width` (`char_px` a body character), with the sizes rows are drawn at (`scale` = the preview's scale).
+pub(crate) fn average_row_height(doc: &MdDoc, scale: f32, width: f32, char_px: f32) -> f32 {
+    let body_line = BODY * BODY_LINE;
+    if doc.rows.is_empty() {
+        return body_line * scale;
+    }
+    let text_width = (width.min(MAX_WIDTH * scale) - 32.0 * scale).max(char_px.max(1.0));
+    let lines = |block: usize, chars_per_line: f32| -> f32 {
+        doc.blocks.get(block).map_or(1.0, |b| {
+            b.text.split('\n').map(|line| (line.chars().count() as f32 / chars_per_line.max(1.0)).ceil().max(1.0)).sum()
+        })
+    };
+    let total: f32 = doc
+        .rows
+        .iter()
+        .map(|row| {
+            let per_line = (text_width - INDENT * scale * f32::from(row.indent)).max(char_px) / char_px.max(1.0);
+            let base = match &row.kind {
+                RowKind::Text { block } => match doc.blocks.get(*block).map(|b| &b.kind) {
+                    Some(BlockKind::Heading { level }) => {
+                        let size = heading_size(*level);
+                        let rule = if *level <= 2 { size * 0.3 + 1.0 } else { 0.0 };
+                        lines(*block, per_line * BODY / size) * size * HEADING_LINE + rule
+                    }
+                    _ => lines(*block, per_line) * body_line,
+                },
+                RowKind::Item { block, .. } => lines(*block, per_line) * body_line,
+                RowKind::Code { lines: code, .. } => code.len().max(1) as f32 * CODE * 1.45 + 16.0,
+                RowKind::TableRow { cells, .. } => {
+                    let column = per_line / cells.len().max(1) as f32;
+                    cells.iter().map(|cell| lines(*cell, column)).fold(1.0, f32::max) * body_line + 12.0
+                }
+                RowKind::Image { .. } => 240.0,
+                RowKind::Rule | RowKind::AlertTitle(_) => body_line,
+            };
+            (base + row.space_above) * scale
+        })
+        .sum();
+    total / doc.rows.len() as f32
+}
+
 /// The text size of a heading in base px.
 fn heading_size(level: u8) -> f32 {
     match level {
@@ -1476,5 +1518,38 @@ mod tests {
         assert_eq!(image_box((2000., 1000.), 500.), (500., 250.));
         assert_eq!(image_box((100., 50.), 500.), (100., 50.));
         assert_eq!(image_box((100., 50.), 0.), (0., 0.));
+    }
+
+    #[test]
+    fn a_row_estimate_counts_wrapped_and_code_lines() {
+        // 200 characters at 10 px a character in a 532 px list (500 px of text): 4 body lines.
+        let line = "word ".repeat(40);
+        let doc = preview_doc::markdown::parse(&format!("{line}\n\n```\na\nb\nc\n```"), std::path::Path::new("/"));
+        let estimate = average_row_height(&doc, 1.0, 532.0, 10.0);
+        let space: f32 = doc.rows.iter().map(|row| row.space_above).sum();
+        let code_lines = doc
+            .rows
+            .iter()
+            .map(|row| match &row.kind {
+                RowKind::Code { lines, .. } => lines.len() as f32,
+                _ => 0.0,
+            })
+            .sum::<f32>();
+        let expected = (4.0 * BODY * BODY_LINE + code_lines * CODE * 1.45 + 16.0 + space) / 2.0;
+        assert!((estimate - expected).abs() < 0.01, "{estimate} vs {expected}");
+    }
+
+    #[test]
+    fn a_row_estimate_follows_the_scale() {
+        let doc = preview_doc::markdown::parse("# Title\n\nSome text.", std::path::Path::new("/"));
+        let one = average_row_height(&doc, 1.0, 800.0, 8.0);
+        let two = average_row_height(&doc, 2.0, 1600.0, 16.0);
+        assert!((two - 2.0 * one).abs() < 0.01, "{one} {two}");
+    }
+
+    #[test]
+    fn a_row_estimate_of_an_empty_doc_is_one_body_line() {
+        let doc = preview_doc::markdown::parse("", std::path::Path::new("/"));
+        assert_eq!(average_row_height(&doc, 1.0, 800.0, 8.0), BODY * BODY_LINE);
     }
 }

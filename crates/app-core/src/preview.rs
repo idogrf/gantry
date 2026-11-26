@@ -409,21 +409,48 @@ pub fn file_counts(
     counts
 }
 
-/// The sidebar file chip.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Chip {
-    /// Filled, with the number of unseen files.
-    New(usize),
-    /// Outlined, no count: every file is seen (or the badge is off).
-    Seen,
+/// Whether a session's sidebar file chip shows: only for a session that is not closed, while `badge` is on and it has
+/// files not seen yet.
+pub fn chip_shown(counts: FileCounts, closed: bool, badge: bool) -> bool {
+    !closed && badge && counts.new > 0
 }
 
-/// The chip for `counts`: none for a closed session or no files; `New` while `badge` is on and files are unseen.
-pub fn chip(counts: FileCounts, closed: bool, badge: bool) -> Option<Chip> {
-    if closed || counts.total == 0 {
+/// How the Items button (title bar and pane corner) looks for a Claude leaf.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ItemsButton {
+    /// Its preview is open: the button is lit and a click closes it.
+    pub lit: bool,
+    /// A dot at the icon's corner: the session has a new file and the badge is on.
+    pub dot: bool,
+    /// A click does something; dimmed and inert while closed and the session has sent no listed file.
+    pub enabled: bool,
+}
+
+/// The Items button for a Claude leaf: none when it cannot get a preview (`can_open` false) and none is open.
+pub fn items_button(can_open: bool, open: bool, counts: FileCounts, badge: bool) -> Option<ItemsButton> {
+    if !can_open && !open {
         return None;
     }
-    Some(if badge && counts.new > 0 { Chip::New(counts.new) } else { Chip::Seen })
+    Some(ItemsButton { lit: open, dot: !open && badge && counts.new > 0, enabled: open || counts.total > 0 })
+}
+
+/// The default preview text size, in percent.
+pub const TEXT_SIZE_DEFAULT: u16 = 100;
+/// The smallest preview text size, in percent.
+pub const TEXT_SIZE_MIN: u16 = 70;
+/// The largest preview text size, in percent.
+pub const TEXT_SIZE_MAX: u16 = 200;
+/// One step of the preview text size, in percent.
+pub const TEXT_SIZE_STEP: u16 = 10;
+
+/// The next text size in a direction: the next multiple of [`TEXT_SIZE_STEP`], clamped to the range.
+pub fn text_size_step(size: u16, larger: bool) -> u16 {
+    let next = if larger {
+        (size / TEXT_SIZE_STEP + 1) * TEXT_SIZE_STEP
+    } else {
+        size.div_ceil(TEXT_SIZE_STEP).saturating_sub(1) * TEXT_SIZE_STEP
+    };
+    next.clamp(TEXT_SIZE_MIN, TEXT_SIZE_MAX)
 }
 
 /// The hover card line: `Files: <new> new, <total> in all`.
@@ -717,13 +744,35 @@ mod tests {
     }
 
     #[test]
-    fn chip_rules() {
-        let two = FileCounts { new: 2, total: 3 };
-        assert_eq!(chip(two, true, true), None);
-        assert_eq!(chip(FileCounts::default(), false, true), None);
-        assert_eq!(chip(two, false, false), Some(Chip::Seen));
-        assert_eq!(chip(FileCounts { new: 0, total: 3 }, false, true), Some(Chip::Seen));
-        assert_eq!(chip(two, false, true), Some(Chip::New(2)));
+    fn chip_shows_only_for_new_files() {
+        let counts = |new, total| FileCounts { new, total };
+        assert!(chip_shown(counts(2, 3), false, true));
+        assert!(!chip_shown(counts(0, 3), false, true));
+        assert!(!chip_shown(counts(2, 3), true, true));
+        assert!(!chip_shown(counts(2, 3), false, false));
+        assert!(!chip_shown(counts(0, 0), false, true));
+    }
+
+    #[test]
+    fn items_button_states() {
+        let counts = |new, total| FileCounts { new, total };
+        let button = |lit, dot, enabled| Some(ItemsButton { lit, dot, enabled });
+        assert_eq!(items_button(false, false, counts(1, 2), true), None);
+        assert_eq!(items_button(true, false, counts(0, 0), true), button(false, false, false));
+        assert_eq!(items_button(true, false, counts(1, 2), true), button(false, true, true));
+        assert_eq!(items_button(true, false, counts(1, 2), false), button(false, false, true));
+        assert_eq!(items_button(false, true, counts(0, 0), true), button(true, false, true));
+    }
+
+    #[test]
+    fn text_size_steps_to_multiples_of_ten() {
+        assert_eq!(text_size_step(100, true), 110);
+        assert_eq!(text_size_step(100, false), 90);
+        assert_eq!(text_size_step(73, true), 80);
+        assert_eq!(text_size_step(73, false), 70);
+        assert_eq!(text_size_step(200, true), 200);
+        assert_eq!(text_size_step(70, false), 70);
+        assert_eq!(text_size_step(195, true), 200);
     }
 
     #[test]

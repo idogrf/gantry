@@ -1656,15 +1656,32 @@ impl Workspace {
             .map(|(id, _)| *id)
     }
 
+    /// Whether Claude leaf `claude` can get a preview: a live Claude pane on the host (not ended, not in a dev
+    /// container) in a tab, and not a preview.
+    pub fn can_open_preview(&self, claude: NodeId) -> bool {
+        self.leaves.get(&claude).is_some_and(|leaf| {
+            leaf.preview.is_none() && leaf.launch.is_claude() && leaf.pane.is_some() && leaf.launch.container.is_none()
+        }) && self.tab_of(claude).is_some()
+    }
+
+    /// The Claude leaf the preview buttons act on for `leaf`: a Claude leaf itself, a following preview its Claude
+    /// leaf; anything else (a shell, a holding preview) none.
+    pub fn preview_claude(&self, leaf: NodeId) -> Option<NodeId> {
+        let found = self.leaves.get(&leaf)?;
+        match &found.preview {
+            None => found.launch.is_claude().then_some(leaf),
+            Some(view) => view.follows,
+        }
+    }
+
     /// Open the preview of Claude leaf `claude`: focus its existing one, else split a new one to its right (a new tab
     /// when its tab is full). `None` unless `claude` is a live Claude pane on the host (not ended, not in a dev
     /// container) in a tab, and not a preview.
     pub fn open_preview(&mut self, claude: NodeId) -> Option<PreviewPlace> {
-        let leaf = self
-            .leaves
-            .get(&claude)
-            .filter(|leaf| leaf.preview.is_none() && leaf.launch.is_claude())
-            .filter(|leaf| leaf.pane.is_some() && leaf.launch.container.is_none())?;
+        if !self.can_open_preview(claude) {
+            return None;
+        }
+        let leaf = self.leaves.get(&claude)?;
         let (cwd, host, session, project) =
             (leaf.launch.cwd.clone(), leaf.host.clone(), leaf.session.clone(), leaf.project.clone());
         if let Some(existing) = self.preview_of(claude) {
@@ -4558,6 +4575,53 @@ mod tests {
         let Some(PreviewPlace::Split { leaf, .. }) = ws.open_preview(claude) else { panic!() };
         assert_eq!(ws.open_preview(leaf), None);
         assert_eq!(ws.open_preview(999), None);
+    }
+
+    #[test]
+    fn preview_claude_maps_previews_to_their_claude_leaf() {
+        let mut ws = Workspace::default();
+        let shell_leaf = ws.new_tab(shell("/a"));
+        let claude = claude_with(&mut ws, 1, "s1");
+        let Some(PreviewPlace::Split { leaf, .. }) = ws.open_preview(claude) else { panic!() };
+        assert_eq!(ws.preview_claude(claude), Some(claude));
+        assert_eq!(ws.preview_claude(leaf), Some(claude));
+        assert_eq!(ws.preview_claude(shell_leaf), None);
+        assert_eq!(ws.preview_claude(999), None);
+        let store = store_with("s1", &["a"]);
+        let file = drop_of(HostId::local(), Some("s1"), "a");
+        let held = ws.drop_file(&file, claude, DropZone::Edge(Direction::Right), &store).unwrap();
+        assert!(ws.is_holding(held));
+        assert_eq!(ws.preview_claude(held), None);
+    }
+
+    #[test]
+    fn can_open_preview_refuses_ended_and_container_panes() {
+        let mut ws = Workspace::default();
+        let live = claude_with(&mut ws, 1, "s1");
+        assert!(ws.can_open_preview(live));
+        let shell_leaf = ws.new_tab(shell("/a"));
+        assert!(!ws.can_open_preview(shell_leaf));
+        let Some(PreviewPlace::Split { leaf, .. }) = ws.open_preview(live) else { panic!() };
+        assert!(!ws.can_open_preview(leaf));
+        let ended = claude_with(&mut ws, 2, "s2");
+        ws.pane_exited(&PaneKey::local(2));
+        assert!(!ws.can_open_preview(ended));
+        let container = ws.new_tab(PaneLaunch::claude("/r".into()).in_container(Some("/r".into())));
+        ws.pane_started(container, 3, "/r".into());
+        assert!(!ws.can_open_preview(container));
+        assert!(!ws.can_open_preview(999));
+    }
+
+    #[test]
+    fn preview_of_finds_a_preview_in_another_tab() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        while ws.can_split() {
+            ws.split(Axis::Vertical, shell("/x")).unwrap();
+        }
+        let Some(PreviewPlace::NewTab(leaf)) = ws.open_preview(claude) else { panic!("expected a new tab") };
+        assert_ne!(ws.tab_of(leaf), ws.tab_of(claude));
+        assert_eq!(ws.preview_of(claude), Some(leaf));
     }
 
     #[test]

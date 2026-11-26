@@ -11,7 +11,7 @@ use app_core::gantry_project::{self, Assign, ProjectError};
 use app_core::host_state::{HostDot, hosts_summary};
 use app_core::hosts_fold::HostsFold;
 use app_core::menus::{self, MenuAction, MenuContext};
-use app_core::preview::{Chip, FileCounts, chip, files_line};
+use app_core::preview::{FileCounts, chip_shown, files_line};
 use app_core::session_tree::{
     self, Activation, ActiveInput, Arrivals, DragSource, DropAt, DropCue, GroupEdges, PaneEntry, ProjectItems,
     ProjectOrder, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, display_path, drop_cue, hover_at, labels,
@@ -1879,7 +1879,7 @@ impl SidebarView {
                 let colors = theme.tone(*tone);
                 let counts = self.file_counts.get(&(session.host.clone(), session.id.clone())).copied();
                 let file_chip = counts.zip(*leaf).and_then(|(counts, leaf)| {
-                    chip(counts, *tone == Tone::Closed, self.file_badge).map(|chip| (chip, leaf))
+                    chip_shown(counts, *tone == Tone::Closed, self.file_badge).then_some((counts.new, leaf))
                 });
                 let files = counts.filter(|counts| counts.total > 0).map(files_line);
                 let badge = dir_badge_for(
@@ -1905,11 +1905,10 @@ impl SidebarView {
                 let (container, remote) = (session.container.is_some(), !session.host.is_local());
                 let row_chip = file_chip
                     .filter(|_| close_slot_shown(amount))
-                    .map(|(chip, leaf)| file_chip_element(index, chip, leaf, colors, &theme, cx));
-                let bubble = file_chip.filter(|_| !close_slot_shown(amount)).and_then(|(chip, leaf)| match chip {
-                    Chip::New(count) => Some(file_bubble(index, count, leaf, colors, amount, &theme, cx)),
-                    Chip::Seen => None,
-                });
+                    .map(|(count, leaf)| file_chip_element(index, count, leaf, colors, &theme, cx));
+                let bubble = file_chip
+                    .filter(|_| !close_slot_shown(amount))
+                    .map(|(count, leaf)| file_bubble(index, count, leaf, colors, amount, &theme, cx));
                 let letter = tile_letter(session_title(session)).to_string();
                 base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
@@ -2891,14 +2890,13 @@ fn chip_colors(colors: ToneColors, surface: u32, new: bool) -> (Option<u32>, u32
 /// The file chip of a session row: filled with the unseen count, or an outlined glyph. A click opens its preview.
 fn file_chip_element(
     index: usize,
-    chip: Chip,
+    count: usize,
     leaf: NodeId,
     colors: ToneColors,
     theme: &Theme,
     cx: &mut Context<SidebarView>,
 ) -> gpui::Stateful<gpui::Div> {
-    let new = matches!(chip, Chip::New(_));
-    let (background, glyph) = chip_colors(colors, theme.tokens.surface, new);
+    let (background, glyph) = chip_colors(colors, theme.tokens.surface, true);
     div()
         .id(("file-chip", index))
         .flex_none()
@@ -2912,12 +2910,8 @@ fn file_chip_element(
         .text_color(rgb(glyph))
         .text_xs()
         .when_some(background, |chip, background| chip.bg(rgb(background)))
-        .when(!new, |chip| chip.border_1().border_color(rgb(colors.ink)))
         .child(svg().path(FILE_ICON).flex_none().size(theme.ui(11.)).text_color(rgb(glyph)))
-        .children(match chip {
-            Chip::New(count) => Some(count.to_string()),
-            Chip::Seen => None,
-        })
+        .child(count.to_string())
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |_, _: &MouseDownEvent, _, cx| {

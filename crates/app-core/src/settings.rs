@@ -291,6 +291,8 @@ pub struct LastPromptSettings {
 pub struct PreviewSettings {
     /// Give new Claude panes the preview tool; off also stops the extra arguments being sent to Claude.
     pub enabled: bool,
+    /// Text size of markdown and text files in a preview, in percent (70-200, default 100).
+    pub text_size: u16,
 }
 
 /// The `scrollbar` setting: which panes get a scrollbar. Shell panes always have one.
@@ -545,7 +547,7 @@ impl Default for Settings {
                 right_to_left: true,
             },
             last_prompt: LastPromptSettings { enabled: true, size: 18.0, color: None },
-            preview: PreviewSettings { enabled: true },
+            preview: PreviewSettings { enabled: true, text_size: 100 },
             scrollbar: ScrollbarSettings { claude: true },
             project_colors: ProjectColors::default(),
             animate_working: true,
@@ -1035,7 +1037,12 @@ impl Reader {
         };
 
         let map = self.object(raw, "", "preview");
-        let preview = PreviewSettings { enabled: self.bool(&map, "preview.", "enabled", defaults.preview.enabled) };
+        let preview = PreviewSettings {
+            enabled: self.bool(&map, "preview.", "enabled", defaults.preview.enabled),
+            text_size: self
+                .number(&map, "preview.", "textSize", f64::from(defaults.preview.text_size), (70.0, 200.0))
+                .round() as u16,
+        };
 
         let map = self.object(raw, "", "scrollbar");
         let scrollbar =
@@ -1218,6 +1225,11 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         last_prompt.color != base.color,
     );
     add(&["preview", "enabled"], settings.preview.enabled.into(), settings.preview.enabled != default.preview.enabled);
+    add(
+        &["preview", "textSize"],
+        settings.preview.text_size.into(),
+        settings.preview.text_size != default.preview.text_size,
+    );
     add(
         &["scrollbar", "claude"],
         settings.scrollbar.claude.into(),
@@ -1810,6 +1822,32 @@ mod tests {
         save(&path, &settings, &loaded.raw).unwrap();
         let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written["preview"]["enabled"], false);
+    }
+
+    #[test]
+    fn preview_text_size_defaults_clamps_and_falls_back() {
+        assert_eq!(parse("{}").settings.unwrap().preview.text_size, 100);
+        assert_eq!(parse(r#"{"preview": {"textSize": 73}}"#).settings.unwrap().preview.text_size, 73);
+        assert_eq!(parse(r#"{"preview": {"textSize": 500}}"#).settings.unwrap().preview.text_size, 200);
+        let bad = parse(r#"{"preview": {"textSize": "big"}}"#);
+        assert_eq!(bad.problems.len(), 1);
+        assert_eq!(bad.problems[0].key, "preview.textSize");
+        assert_eq!(bad.settings.unwrap().preview.text_size, 100);
+    }
+
+    #[test]
+    fn preview_text_size_written_only_when_changed() {
+        let loaded = parse("{}");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut settings = loaded.settings.unwrap();
+        save(&path, &settings, &loaded.raw).unwrap();
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(written.get("preview").is_none());
+        settings.preview.text_size = 120;
+        save(&path, &settings, &loaded.raw).unwrap();
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["preview"]["textSize"], 120);
     }
 
     #[test]

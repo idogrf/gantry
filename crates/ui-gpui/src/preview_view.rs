@@ -712,6 +712,13 @@ impl PreviewView {
         cx.notify();
     }
 
+    /// Hide the Undo bar without undoing (its files no longer belong to the pane's session).
+    pub(crate) fn hide_undo(&mut self, cx: &mut Context<Self>) {
+        if self.undo.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// Hide the Undo bar and ask the workspace to bring the files back.
     fn undo_close(&mut self, cx: &mut Context<Self>) {
         if self.undo.take().is_some() {
@@ -728,8 +735,8 @@ impl PreviewView {
                 .flex()
                 .items_center()
                 .gap(theme.ui(8.))
-                .pl(theme.ui(10.))
                 .p(theme.ui(3.))
+                .pl(theme.ui(10.))
                 .rounded(px(RADIUS_SMALL))
                 .bg(rgb(theme.tokens.raised))
                 .border_1()
@@ -1764,12 +1771,13 @@ impl PreviewView {
                         .child(div().flex_1().truncate().child(bidi_label(file, label_rtl)))
                         .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(age(now, *sent_ms)))
                 });
+                // The heading lines stay on top; the rows scroll below them, with room under the last one for the
+                // undo bar and the text size bar.
                 div()
                     .size_full()
                     .flex()
                     .flex_col()
                     .items_center()
-                    .justify_center()
                     .gap(theme.ui(8.))
                     .p(theme.ui(16.))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("No open files"))
@@ -1779,7 +1787,19 @@ impl PreviewView {
                             .text_color(rgb(theme.tokens.muted))
                             .child(closed_files_line(self.model.closed.len())),
                     )
-                    .child(div().w_full().max_w(theme.ui(360.)).flex().flex_col().children(rows))
+                    .child(
+                        div()
+                            .id("preview-closed-list")
+                            .w_full()
+                            .max_w(theme.ui(360.))
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .pb(theme.ui(BAR_ROOM + 12.))
+                            .children(rows),
+                    )
                     .into_any_element()
             }
             Content::Loading => div().size_full().into_any_element(),

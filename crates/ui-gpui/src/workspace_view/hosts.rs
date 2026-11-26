@@ -144,6 +144,7 @@ impl WorkspaceView {
             self.previews.remove(&leaf);
             self.preview_known.remove(&leaf);
             self.preview_rows.remove(&leaf);
+            self.preview_undo.remove(&leaf);
             self.unseen.remove(&leaf);
             self.pending.retain(|_, waiting| *waiting != leaf);
         }

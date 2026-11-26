@@ -698,8 +698,7 @@ pub(super) enum ItemsLook {
 }
 
 /// The Items button: the file icon, with the word `Files` for [`ItemsLook::Chip`]. Lit (accent border and tint)
-/// while the preview is open; a dot at the top right when
-/// `state.dot`. `on_down` runs on a left press.
+/// while the preview is open; a dot at the top right when `state.dot`. `on_down` runs on a left press.
 pub(super) fn items_button_element(
     id: impl Into<gpui::ElementId>,
     state: ItemsButton,

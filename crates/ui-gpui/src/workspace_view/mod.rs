@@ -342,8 +342,8 @@ pub struct WorkspaceView {
     previews: HashMap<NodeId, PreviewSlot>,
     /// The file ids each preview pane has seen listed, to tell a newly sent file from the first list.
     preview_known: HashMap<NodeId, HashSet<String>>,
-    /// The files each preview pane's last close hid, for its Undo bar (memory only, one close per pane).
-    preview_undo: HashMap<NodeId, Vec<protocol::message::SentFile>>,
+    /// The session and files each preview pane's last close hid, for its Undo bar (memory only, one close per pane).
+    preview_undo: HashMap<NodeId, (String, Vec<protocol::message::SentFile>)>,
     /// The sessions last sent to each host's daemon with `WatchSentFiles`.
     watch_sent: HashMap<HostId, Vec<String>>,
     /// Hosts whose session list just arrived: their daemon is told what to watch again, even an empty list.

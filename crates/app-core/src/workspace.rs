@@ -1843,6 +1843,21 @@ impl Workspace {
         changed
     }
 
+    /// [`Self::reopen_sent`] for files closed while the pane showed `closed_in`: false, and nothing changed, when the
+    /// pane shows another session now (`/clear`), so an old session's files never come back into a new one.
+    pub fn reopen_sent_in(
+        &mut self,
+        leaf: NodeId,
+        closed_in: &str,
+        files: &[SentFile],
+        sessions: &SessionStore,
+    ) -> bool {
+        if self.preview_session(leaf).is_none_or(|(_, session)| session != closed_in) {
+            return false;
+        }
+        self.reopen_sent(leaf, files, sessions)
+    }
+
     /// The files of a following preview pane's session that were hidden (not the linked tabs), newest first.
     pub fn closed_files<'a>(&'a self, leaf: NodeId, sessions: &'a SessionStore) -> Vec<&'a SentFile> {
         let Some((host, session)) = self.preview_session(leaf) else { return Vec::new() };
@@ -4796,6 +4811,21 @@ mod tests {
         // Already linked: not added twice.
         ws.reopen_sent(leaf, &removed, &store);
         assert_eq!(ws.leaves[&leaf].preview.as_ref().unwrap().linked.len(), 1);
+    }
+
+    #[test]
+    fn reopen_in_refuses_after_the_session_changed() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        let Some(PreviewPlace::Split { leaf, .. }) = ws.open_preview(claude) else { panic!() };
+        let store = store_with("s1", &["a"]);
+        let link = ws.open_link(leaf, Path::new("/r/x.md"), 10, &store).unwrap();
+        let removed = ws.remove_sent(leaf, &link, &store);
+        assert_eq!(removed.len(), 1);
+        assert!(ws.session_seen(&PaneKey::local(1), "s2"));
+        assert!(!ws.reopen_sent_in(leaf, "s1", &removed, &store), "another session now");
+        assert!(ws.leaves[&leaf].preview.as_ref().unwrap().linked.is_empty());
+        assert!(ws.reopen_sent_in(leaf, "s2", &removed, &store), "the same session still works");
     }
 
     #[test]

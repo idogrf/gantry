@@ -2809,6 +2809,7 @@ impl Render for SidebarView {
                     menu,
                     &theme,
                     cx.global::<SettingsStore>().settings(),
+                    window.viewport_size().height - gpui::px(16.),
                     move |action, window, cx| pick(action, window, cx),
                     move |window, cx| dismiss(&(), window, cx),
                 ))

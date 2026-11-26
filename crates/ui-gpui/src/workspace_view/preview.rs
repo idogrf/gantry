@@ -751,8 +751,9 @@ impl WorkspaceView {
         if closed.is_empty() {
             return;
         }
+        let Some((_, session)) = self.workspace.preview_session(leaf) else { return };
         let label = closed_label(&closed);
-        self.preview_undo.insert(leaf, closed);
+        self.preview_undo.insert(leaf, (session.to_string(), closed));
         if let Some(slot) = self.previews.get(&leaf) {
             slot.view.update(cx, |view, cx| view.show_undo(label, cx));
         }
@@ -760,8 +761,8 @@ impl WorkspaceView {
 
     /// Bring back the files the last close of preview `leaf` hid.
     fn undo_close(&mut self, leaf: NodeId, window: &Window, cx: &mut Context<Self>) {
-        let Some(files) = self.preview_undo.remove(&leaf) else { return };
-        if !self.workspace.reopen_sent(leaf, &files, self.sidebar.read(cx).sessions()) {
+        let Some((session, files)) = self.preview_undo.remove(&leaf) else { return };
+        if !self.workspace.reopen_sent_in(leaf, &session, &files, self.sidebar.read(cx).sessions()) {
             return;
         }
         self.save(cx);

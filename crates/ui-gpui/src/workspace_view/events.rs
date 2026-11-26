@@ -255,6 +255,20 @@ impl WorkspaceView {
             }
         }
         if changed {
+            let stale: Vec<NodeId> = self
+                .preview_undo
+                .iter()
+                .filter(|(leaf, (closed_in, _))| {
+                    self.workspace.preview_session(**leaf).is_none_or(|(_, session)| session != closed_in)
+                })
+                .map(|(leaf, _)| *leaf)
+                .collect();
+            for leaf in stale {
+                self.preview_undo.remove(&leaf);
+                if let Some(slot) = self.previews.get(&leaf) {
+                    slot.view.update(cx, |view, cx| view.hide_undo(cx));
+                }
+            }
             self.save(cx);
         }
     }

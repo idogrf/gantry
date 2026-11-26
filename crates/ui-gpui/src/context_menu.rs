@@ -78,12 +78,14 @@ fn shortcut_text(shortcut: Shortcut, settings: &Settings) -> String {
 }
 
 /// Draw `menu` floating above everything; a pick or a click outside calls back, `Esc` dismisses. A submenu opens beside
-/// its row on hover or `Right`, and closes on `Left` or `Esc`.
+/// its row on hover or `Right`, and closes on `Left` or `Esc`. A menu without submenus taller than `max_height`
+/// scrolls.
 pub(crate) fn render(
     id: &'static str,
     menu: &OpenMenu,
     theme: &Theme,
     settings: &Settings,
+    max_height: Pixels,
     on_pick: impl Fn(&MenuAction, &mut Window, &mut App) + 'static,
     on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -263,6 +265,8 @@ pub(crate) fn render(
         .border_color(rgb(theme.tokens.line))
         .rounded(px(RADIUS))
         .shadow_lg()
+        // A menu with submenus keeps its overflow visible, since a submenu is drawn outside the card.
+        .when(first_submenu.is_none(), |card| card.max_h(max_height).overflow_y_scroll())
         .children(rows);
     deferred(anchored().position(menu.position).snap_to_window().child(fade_in(
         card,

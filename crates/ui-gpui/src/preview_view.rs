@@ -1080,6 +1080,11 @@ impl PreviewView {
         let Some(thumb) = thumb else { return };
         let offset = px(-extent.offset_for(bar, along - grab, thumb.len, scale));
         match self.bar_target() {
+            // Rows measured during the drag can make the document taller than the list's frozen height, so a thumb
+            // dragged to the end of the track goes to the real end.
+            Some(BarTarget::Markdown) if -f32::from(offset) >= extent.contents.1 - extent.viewport.1 - 1.0 => {
+                self.md_list.scroll_to_end()
+            }
             Some(BarTarget::Markdown) => self.md_list.set_offset_from_scrollbar(point(px(0.), offset)),
             Some(BarTarget::Text) => {
                 let handle = self.scroll.0.borrow().base_handle.clone();

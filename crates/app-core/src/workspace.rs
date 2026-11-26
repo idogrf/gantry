@@ -750,6 +750,11 @@ struct TabHistory {
     at: usize,
 }
 
+/// The folder a dropped file sits in, on its own host.
+fn file_folder(file: &DropFile) -> PathBuf {
+    file.file.path.parent().map(Path::to_path_buf).unwrap_or_default()
+}
+
 impl Workspace {
     fn alloc(&mut self) -> NodeId {
         self.next_id += 1;
@@ -1310,8 +1315,8 @@ impl Workspace {
         }
     }
 
-    /// The folder a holding pane dropped beside `target` sits under in the sidebar: the target's session folder when
-    /// known, else the target's own, so it joins the target's project and not the file's folder.
+    /// The folder a holding pane dropped beside `target` (on the same host) sits under in the sidebar: the target's
+    /// session folder when known, else the target's own, so it joins the target's project and not the file's folder.
     fn drop_folder(&self, target: NodeId, sessions: &SessionStore) -> PathBuf {
         let Some(leaf) = self.leaves.get(&target) else { return PathBuf::new() };
         let session = leaf.session.as_deref().or_else(|| leaf.preview.as_ref().and_then(|v| v.session.as_deref()));
@@ -1336,7 +1341,8 @@ impl Workspace {
         }
         match zone {
             DropZone::Edge(side) => {
-                let folder = self.drop_folder(target, sessions);
+                let same_host = self.leaves.get(&target).is_some_and(|leaf| leaf.host == file.host);
+                let folder = if same_host { self.drop_folder(target, sessions) } else { file_folder(file) };
                 let project = self.leaves.get(&target).and_then(|leaf| leaf.project.clone());
                 let (split, id) = (self.alloc(), self.alloc());
                 let view = PreviewLeaf {
@@ -1361,7 +1367,11 @@ impl Workspace {
                 match leaf.preview.as_mut()?.held.as_mut() {
                     Some(held) => {
                         *held = file.file.clone();
-                        leaf.host = file.host.clone();
+                        if leaf.host != file.host {
+                            // The old folder is a path on the old host.
+                            leaf.launch.cwd = file_folder(file);
+                            leaf.host = file.host.clone();
+                        }
                     }
                     None => {
                         self.set_preview_active(target, &file.file.id);
@@ -4888,6 +4898,27 @@ mod tests {
         second.file.path = "/other/x.md".into();
         ws.drop_file(&second, held, DropZone::Center, &store).unwrap();
         assert_eq!(ws.leaves[&held].launch.cwd, PathBuf::from("/b"));
+    }
+
+    #[test]
+    fn a_file_from_another_host_keeps_its_own_folder() {
+        let mut ws = Workspace::default();
+        let target = ws.new_tab(shell("/b"));
+        let store = SessionStore::default();
+        let mut file = drop_of(HostId::named("box"), None, "a");
+        file.file.path = "/srv/doc.md".into();
+        let held = ws.drop_file(&file, target, right(), &store).unwrap();
+        assert_eq!(ws.leaves[&held].host, HostId::named("box"));
+        assert_eq!(ws.leaves[&held].launch.cwd, PathBuf::from("/srv"));
+        // The middle: another host switches the folder, the same host keeps it.
+        let mut back = drop_of(HostId::local(), None, "b");
+        back.file.path = "/loc/y.md".into();
+        ws.drop_file(&back, held, DropZone::Center, &store).unwrap();
+        assert_eq!(ws.leaves[&held].launch.cwd, PathBuf::from("/loc"));
+        let mut again = drop_of(HostId::local(), None, "c");
+        again.file.path = "/other/z.md".into();
+        ws.drop_file(&again, held, DropZone::Center, &store).unwrap();
+        assert_eq!(ws.leaves[&held].launch.cwd, PathBuf::from("/loc"));
     }
 
     #[test]

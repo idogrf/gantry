@@ -656,7 +656,13 @@ impl PreviewView {
         {
             // A new parse of the same file (a live reload) keeps the place; another file starts at the top.
             let top = self.md_doc.is_some().then(|| self.md_list.logical_scroll_top());
-            self.md_list.reset(doc.rows.len());
+            // Rows not yet measured get an estimated height, so the scrollbar is about right from the first frame.
+            let (line_height, char_px) =
+                self.md_look.as_ref().map_or((20.0, 8.0), |look| (look.line_height, look.char_px));
+            let width = f32::from(self.md_list.viewport_bounds().size.width);
+            let width = if width > 0.0 { width } else { 600.0 };
+            let estimate = average_row_height(doc, line_height, width / char_px.max(1.0));
+            self.md_list.reset_with_uniform_height(doc.rows.len(), px(estimate));
             if let Some(top) = top.filter(|_| !doc.rows.is_empty()) {
                 let item_ix = top.item_ix.min(doc.rows.len() - 1);
                 self.md_list.scroll_to(ListOffset { item_ix, ..top });
@@ -996,6 +1002,10 @@ impl PreviewView {
             bars.push(
                 div()
                     .id("preview-bar-v")
+                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                        this.wheel_on_bar(event, window, cx);
+                        cx.stop_propagation();
+                    }))
                     .absolute()
                     .top_0()
                     .right_0()
@@ -1016,8 +1026,12 @@ impl PreviewView {
             bars.push(
                 div()
                     .id("preview-bar-h")
+                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                        this.wheel_on_bar(event, window, cx);
+                        cx.stop_propagation();
+                    }))
                     .absolute()
-                    .top(px(extent.viewport.1))
+                    .bottom_0()
                     .left_0()
                     .h(px(corner))
                     .w(px(extent.viewport.0))
@@ -1084,6 +1098,31 @@ impl PreviewView {
         cx.notify();
     }
 
+    /// A wheel over a scrollbar scrolls the view it belongs to, as over the view itself.
+    fn wheel_on_bar(&mut self, event: &ScrollWheelEvent, window: &Window, cx: &mut Context<Self>) {
+        let Some(extent) = self.bar_extent() else { return };
+        let delta = event.delta.pixel_delta(window.line_height());
+        let clamp = |offset: f32, viewport: f32, contents: f32| offset.clamp(-(contents - viewport).max(0.0), 0.0);
+        match self.bar_target() {
+            Some(BarTarget::Markdown) => self.md_list.scroll_by(-delta.y),
+            Some(BarTarget::Text) => {
+                let handle = self.scroll.0.borrow().base_handle.clone();
+                let current = handle.offset();
+                handle.set_offset(point(
+                    px(clamp(f32::from(current.x + delta.x), extent.viewport.0, extent.contents.0)),
+                    px(clamp(f32::from(current.y + delta.y), extent.viewport.1, extent.contents.1)),
+                ));
+            }
+            Some(BarTarget::Closed) => {
+                let current = self.closed_scroll.offset();
+                let y = clamp(f32::from(current.y + delta.y), extent.viewport.1, extent.contents.1);
+                self.closed_scroll.set_offset(point(current.x, px(y)));
+            }
+            None => {}
+        }
+        cx.notify();
+    }
+
     /// The thumb is let go.
     fn release_bar(&mut self) {
         if self.bars.grab.take().is_some() {
@@ -1108,6 +1147,7 @@ impl PreviewView {
                 self.drag_bar(event.position, cx);
             } else {
                 self.release_bar();
+                cx.notify();
             }
             return;
         }
@@ -2155,8 +2195,20 @@ impl Render for PreviewView {
             .on_mouse_move(
                 cx.listener(|this, event: &MouseMoveEvent, window, cx| this.pointer_moved(event, window, cx)),
             )
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.end_drag()))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.end_drag();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.end_drag();
+                    cx.notify();
+                }),
+            )
             .on_mouse_up(MouseButton::Middle, cx.listener(|this, _: &MouseUpEvent, _, _| this.middle_pressed = None))
             .on_mouse_up_out(
                 MouseButton::Middle,
@@ -2177,6 +2229,39 @@ impl Render for PreviewView {
                     }),
             )
     }
+}
+
+/// The average height of a markdown row before it is measured: each row's lines are guessed from its text (`per_line`
+/// characters a line), code rows count their lines, an image counts as 10 lines.
+fn average_row_height(doc: &preview_doc::markdown::MdDoc, line_height: f32, per_line: f32) -> f32 {
+    use preview_doc::markdown::RowKind;
+    if doc.rows.is_empty() {
+        return line_height;
+    }
+    let per_line = per_line.max(1.0);
+    let text_lines = |block: usize, per_line: f32| -> f32 {
+        doc.blocks.get(block).map_or(1.0, |b| {
+            b.text.split('\n').map(|line| (line.chars().count() as f32 / per_line).ceil().max(1.0)).sum()
+        })
+    };
+    let total: f32 = doc
+        .rows
+        .iter()
+        .map(|row| {
+            let lines = match &row.kind {
+                RowKind::Text { block } | RowKind::Item { block, .. } => text_lines(*block, per_line),
+                RowKind::Code { lines, .. } => lines.len().max(1) as f32,
+                RowKind::TableRow { cells, .. } => {
+                    let width = per_line / cells.len().max(1) as f32;
+                    cells.iter().map(|cell| text_lines(*cell, width)).fold(1.0, f32::max)
+                }
+                RowKind::Image { .. } => 10.0,
+                RowKind::Rule | RowKind::AlertTitle(_) => 1.0,
+            };
+            lines * line_height + row.space_above
+        })
+        .sum();
+    total / doc.rows.len() as f32
 }
 
 #[cfg(test)]
@@ -2341,5 +2426,20 @@ mod tests {
     fn a_wheel_line_pans_20_px_and_pixels_pass_through() {
         assert_eq!(wheel_pan(ScrollDelta::Lines(gpui::point(1.0, -2.0))), (20.0, -40.0));
         assert_eq!(wheel_pan(ScrollDelta::Pixels(gpui::point(px(3.), px(4.)))), (3.0, 4.0));
+    }
+
+    #[test]
+    fn a_row_estimate_counts_wrapped_and_code_lines() {
+        let line = "word ".repeat(40); // 200 characters: 4 lines at 50 a line
+        let doc = preview_doc::markdown::parse(&format!("{line}\n\n```\na\nb\nc\n```"), Path::new("/"));
+        let estimate = average_row_height(&doc, 10.0, 50.0);
+        let space: f32 = doc.rows.iter().map(|row| row.space_above).sum();
+        assert!((estimate - (4.0 * 10.0 + 3.0 * 10.0 + space) / 2.0).abs() < 0.01, "{estimate}");
+    }
+
+    #[test]
+    fn a_row_estimate_of_an_empty_doc_is_one_line() {
+        let doc = preview_doc::markdown::parse("", Path::new("/"));
+        assert_eq!(average_row_height(&doc, 18.0, 80.0), 18.0);
     }
 }

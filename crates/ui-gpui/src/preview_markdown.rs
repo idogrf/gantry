@@ -35,6 +35,8 @@ pub(crate) struct RowState {
     pub rtl: bool,
     /// The document is laid out right to left (`doc_rtl`): gutters, bars and table columns mirror, text aligns right.
     pub mirror: bool,
+    /// The ⇄ toggle is on: the document's direction is flipped (list bullets stay on the flipped side).
+    pub flipped: bool,
     /// The code block whose Copy button shows `Copied`.
     pub copied: Option<usize>,
     /// The measured average width of a body text character in px, for table columns.
@@ -630,7 +632,19 @@ fn text_block(
             _ => &rtl.logical,
         };
         let interact = Interact { hit, selected };
-        return frame.child(rtl_text(doc, block_ix, rtl, words, &base, &code, theme, &interact, state.mirror, cx));
+        return frame.child(rtl_text(
+            doc,
+            block_ix,
+            rtl,
+            words,
+            &base,
+            &code,
+            theme,
+            &interact,
+            state.mirror,
+            state.flipped,
+            cx,
+        ));
     }
     let runs = text_runs(block, doc, &base, &code, theme, selected);
     let styled = StyledText::new(SharedString::from(block.text.clone())).with_runs(runs);
@@ -696,6 +710,7 @@ fn rtl_text(
     theme: &Theme,
     interact: &Interact,
     mirror: bool,
+    flipped: bool,
     cx: &mut Context<PreviewView>,
 ) -> Div {
     let Some(block) = doc.blocks.get(block_ix) else { return div() };
@@ -720,7 +735,7 @@ fn rtl_text(
     if words.rtl {
         flow = flow.flex_row_reverse();
     }
-    if packs_end(words.rtl, mirror) {
+    if packs_end(words.rtl, mirror, flipped) {
         flow = flow.justify_end();
     }
     let mut counter = 0;
@@ -736,10 +751,12 @@ fn rtl_text(
 }
 
 /// Whether a wrapping row of words needs `justify_end` to sit on the side the document reads from: a reversed row packs
-/// right by itself and a plain one left, while a mirrored document wants the right and a flipped one the left (next to
-/// its list bullets).
-fn packs_end(reversed: bool, mirror: bool) -> bool {
-    reversed != mirror
+/// right by itself, so it needs the push only when the row wants the left; a plain row needs it to sit right. A row
+/// wants the right in a mirrored document and for right-to-left text, except in a flipped document, where that text
+/// stays next to the list bullets on the left.
+fn packs_end(reversed: bool, mirror: bool, flipped: bool) -> bool {
+    let want_right = mirror || (reversed && !flipped);
+    want_right != reversed
 }
 
 /// One word of `rtl_text`.
@@ -1437,11 +1454,12 @@ mod tests {
     }
 
     #[test]
-    fn rows_of_words_pack_toward_the_side_the_document_reads_from() {
-        assert!(!packs_end(false, false), "left to right text in a left to right document");
-        assert!(!packs_end(true, true), "right to left text in a mirrored document");
-        assert!(packs_end(false, true), "English in a mirrored document packs right");
-        assert!(packs_end(true, false), "Hebrew in a flipped document packs left, by the bullet");
+    fn rows_pack_on_the_reading_side() {
+        assert!(!packs_end(false, false, false), "English in English");
+        assert!(!packs_end(true, false, false), "Hebrew in English: a reversed row sits right by itself");
+        assert!(!packs_end(true, true, false), "Hebrew in a mirrored document");
+        assert!(packs_end(false, true, false), "English in a mirrored document");
+        assert!(packs_end(true, false, true), "Hebrew in a flipped document packs left, by the bullet");
     }
 
     #[test]

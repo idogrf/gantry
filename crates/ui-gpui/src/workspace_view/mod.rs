@@ -292,7 +292,8 @@ enum UpdatePhase {
     Restarting,
 }
 
-/// A running update of one SSH host's daemon. The entry exists only while the update runs: a failure or a drop removes it.
+/// A running update of one SSH host's daemon. The entry exists only while the update runs: a failure or a drop
+/// removes it.
 struct HostUpdate {
     phase: UpdatePhase,
     /// Cancels the upload.
@@ -357,9 +358,11 @@ pub struct WorkspaceView {
     parse_counter: u64,
     /// The newest job of a file whose parse is still running; it starts when that one is done.
     parse_queued: HashMap<app_core::preview_reads::FileKey, preview::ParseJob>,
-    /// Images that were replaced or dropped, whose GPUI bitmap and atlas tile are freed at the next chance with a window.
+    /// Images that were replaced or dropped, whose GPUI bitmap and atlas tile are freed at the next chance with a
+    /// window.
     pending_release: Vec<Arc<gpui::Image>>,
-    /// Remote files an Open in system viewer waits for, with the sent file's id: the reply writes the copy and opens it.
+    /// Remote files an Open in system viewer waits for, with the sent file's id: the reply writes the copy and opens
+    /// it.
     open_after_read: HashMap<app_core::preview_reads::FileKey, String>,
     /// The timer that asks for the shown files again every `preview_reads::POLL`.
     preview_task: Option<Task<()>>,

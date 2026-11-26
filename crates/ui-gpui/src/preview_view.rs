@@ -374,6 +374,8 @@ pub(crate) struct PreviewView {
     copied: Option<(usize, Task<()>)>,
     /// The ⇄ toggle: the document's direction is flipped. Reset when the active file changes, kept on a reload.
     flipped: bool,
+    /// The measured `char_px` with what it was measured for (UI scale bits, font family, size bits).
+    char_px_cache: Option<((u32, SharedString, u32), f32)>,
     /// What the rows were last measured with; a change remeasures the list.
     md_look: Option<MdLook>,
     /// The image files of the rows laid out in the frame being drawn (cleared at its start).
@@ -382,6 +384,32 @@ pub(crate) struct PreviewView {
     md_width: f32,
     /// The image files of the rows drawn when `ImagesInView` was last sent.
     images_in_view: Vec<PathBuf>,
+}
+
+/// The characters of a label in the order they are drawn when it must not reach the shaper as one run: `None` for
+/// ASCII-only text; else display order (`bidi::display_line`) when `right_to_left` is on, logical order when off.
+fn label_parts(text: &str, right_to_left: bool) -> Option<Vec<char>> {
+    if text.is_ascii() {
+        return None;
+    }
+    if right_to_left && let Some(line) = app_core::bidi::display_line(text) {
+        return Some(line.into_iter().map(|(_, c)| c).collect());
+    }
+    Some(text.chars().collect())
+}
+
+/// A file or session name as an element: one plain string when it is ASCII, else one element per character in a row, so
+/// right-to-left letters never reach the shaper as one run.
+pub(crate) fn bidi_label(text: &str, right_to_left: bool) -> gpui::AnyElement {
+    match label_parts(text, right_to_left) {
+        None => text.to_string().into_any_element(),
+        Some(chars) => div()
+            .flex()
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .children(chars.into_iter().map(|c| div().flex_none().child(c.to_string())))
+            .into_any_element(),
+    }
 }
 
 /// The settings a markdown row's height depends on besides the width.
@@ -394,6 +422,8 @@ struct MdLook {
     rtl: bool,
     /// The document is laid out right to left (`doc_rtl`).
     mirror: bool,
+    /// The ⇄ toggle is on.
+    flipped: bool,
     /// The measured average width of a body text character, for table columns.
     char_px: f32,
 }
@@ -438,6 +468,7 @@ impl PreviewView {
             copied: None,
             md_look: None,
             flipped: false,
+            char_px_cache: None,
             frame_images: Vec::new(),
             md_width: 0.0,
             images_in_view: Vec::new(),
@@ -544,7 +575,17 @@ impl PreviewView {
     /// rows out of view do not go stale.
     fn sync_md(&mut self, window: &Window, cx: &App) {
         let Content::Markdown(doc) = &self.model.content else { return };
+        let mirror = doc_rtl(cx.global::<SettingsStore>().settings().window.right_to_left, doc.rtl, self.flipped);
         let metrics = Self::metrics(window, cx);
+        let key = (theme(cx).ui_scale.to_bits(), metrics.family.clone(), metrics.size.to_bits());
+        let char_px = match &self.char_px_cache {
+            Some((cached, px)) if *cached == key => *px,
+            _ => {
+                let px = preview_markdown::char_px(window, theme(cx));
+                self.char_px_cache = Some((key, px));
+                px
+            }
+        };
         let settings = cx.global::<SettingsStore>().settings();
         let look = MdLook {
             family: metrics.family,
@@ -552,8 +593,9 @@ impl PreviewView {
             line_height: metrics.row_height,
             ui_scale: theme(cx).ui_scale,
             rtl: settings.window.right_to_left,
-            mirror: doc_rtl(settings.window.right_to_left, doc.rtl, self.flipped),
-            char_px: preview_markdown::char_px(window, theme(cx)),
+            mirror,
+            flipped: self.flipped,
+            char_px,
         };
         if self.md_look.as_ref() != Some(&look) {
             if self.md_look.is_some() {
@@ -581,6 +623,7 @@ impl PreviewView {
             code_font: look.family.clone(),
             rtl: look.rtl,
             mirror: look.mirror,
+            flipped: look.flipped,
             copied: self.copied.as_ref().map(|(block, _)| *block),
             selection: self.md_selection,
             char_px: look.char_px,
@@ -1056,6 +1099,7 @@ impl PreviewView {
     }
 
     fn header(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let label_rtl = cx.global::<SettingsStore>().settings().window.right_to_left;
         let leaf = self.leaf;
         let title = if self.model.title.is_empty() {
             "Preview".to_string()
@@ -1096,7 +1140,7 @@ impl PreviewView {
             .bg(rgb(theme.tokens.raised))
             .text_color(rgb(theme.tokens.text))
             .child(svg().path(EYE_ICON).flex_none().size(theme.ui(14.)).text_color(rgb(theme.tokens.muted)))
-            .child(div().min_w_0().truncate().child(title))
+            .child(div().min_w_0().truncate().child(bidi_label(&title, label_rtl)))
             .child(
                 div()
                     .flex_none()
@@ -1170,6 +1214,7 @@ impl PreviewView {
     }
 
     fn tab_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let label_rtl = cx.global::<SettingsStore>().settings().window.right_to_left;
         let fit = self.tab_fit(theme);
         let view = cx.entity();
         let tabs = fit.shown.iter().filter_map(|&index| self.model.tabs.get(index).map(|tab| (index, tab)));
@@ -1235,7 +1280,7 @@ impl PreviewView {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .child(tab.name.clone()),
+                            .child(bidi_label(&tab.name, label_rtl)),
                     )
                     .when(tab.unseen, |row| {
                         row.child(div().flex_none().size(theme.ui(6.)).rounded_full().bg(rgb(theme.tokens.accent)))
@@ -1352,6 +1397,7 @@ impl PreviewView {
     }
 
     fn body(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let label_rtl = cx.global::<SettingsStore>().settings().window.right_to_left;
         let muted = |text: &'static str| div().text_sm().text_color(rgb(theme.tokens.muted)).child(text);
         let centered = |children: Vec<gpui::AnyElement>| {
             div()
@@ -1368,7 +1414,7 @@ impl PreviewView {
         let file_card = |lines: Vec<gpui::AnyElement>| {
             let mut all = vec![
                 svg().path(FILE_ICON).size(theme.ui(28.)).text_color(rgb(theme.tokens.muted)).into_any_element(),
-                div().font_weight(FontWeight::SEMIBOLD).child(name.clone()).into_any_element(),
+                div().font_weight(FontWeight::SEMIBOLD).child(bidi_label(&name, label_rtl)).into_any_element(),
             ];
             all.extend(lines);
             centered(all)
@@ -1545,6 +1591,15 @@ impl Render for PreviewView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn labels_with_hebrew_are_split_per_character() {
+        assert_eq!(label_parts("notes.md", true), None);
+        let text = "תוכנית.md";
+        let display: Vec<char> = app_core::bidi::display_line(text).unwrap().into_iter().map(|(_, c)| c).collect();
+        assert_eq!(label_parts(text, true), Some(display));
+        assert_eq!(label_parts(text, false), Some(text.chars().collect()));
+    }
 
     #[test]
     fn the_flip_resets_on_another_file_but_not_on_reload() {

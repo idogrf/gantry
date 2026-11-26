@@ -180,6 +180,16 @@ fn source_text(content: &Content) -> Option<&str> {
     }
 }
 
+/// Whether the cached bytes of a file of `kind` are text to copy: text or markdown, or an unknown type that is small
+/// enough and valid UTF-8 (a Makefile, a Dockerfile, a `.vue`).
+fn bytes_are_source(kind: FileKind, data: &[u8]) -> bool {
+    match kind {
+        FileKind::Text | FileKind::Markdown => std::str::from_utf8(data).is_ok(),
+        FileKind::Unknown => data.len() <= MAX_UNKNOWN_TEXT && std::str::from_utf8(data).is_ok(),
+        _ => false,
+    }
+}
+
 /// Whether a parse made from bytes modified at `mtime_ms` still matches what the cache holds.
 fn parse_is_current(shown: Option<&Shown>, mtime_ms: u64) -> bool {
     matches!(shown, Some(Shown::Bytes { mtime_ms: now, .. }) if *now == mtime_ms)
@@ -386,12 +396,18 @@ impl WorkspaceView {
         let Some(tab) = self.workspace.active_tab().filter(|tab| !tab.settings) else { return Vec::new() };
         let mut out = Vec::new();
         for leaf in tab.root.leaves() {
-            let Some(slot) = self.previews.get(&leaf) else { continue };
-            let Some(host) = self.workspace.leaves.get(&leaf).map(|entry| entry.host.clone()) else { continue };
             // Whatever the view reported stays until it reports again (see `keeps_images`).
-            out.extend(doc_image_keys(&host, slot.view.read(cx).images_in_view()));
+            out.extend(self.leaf_doc_images(leaf, cx));
         }
         out
+    }
+
+    /// The image files in view of one preview leaf's markdown document, as the view last reported: the one source for
+    /// "images in view" (what to read, what to keep decoded, what a model carries).
+    fn leaf_doc_images(&self, leaf: NodeId, cx: &App) -> Vec<FileKey> {
+        let Some(slot) = self.previews.get(&leaf) else { return Vec::new() };
+        let Some(host) = self.workspace.leaves.get(&leaf).map(|entry| entry.host.clone()) else { return Vec::new() };
+        doc_image_keys(&host, slot.view.read(cx).images_in_view())
     }
 
     fn send_read(&self, key: &FileKey, request: u64, known: Option<u64>) {
@@ -710,11 +726,29 @@ impl WorkspaceView {
             return Some(text.to_string());
         }
         match (kind_of(&key.path), self.reads.shown(&key)?) {
-            (FileKind::Text | FileKind::Markdown, Shown::Bytes { data, .. }) => {
+            (kind, Shown::Bytes { data, .. }) if bytes_are_source(kind, data) => {
                 let text = std::str::from_utf8(data).ok()?;
                 Some(text.strip_prefix('\u{feff}').unwrap_or(text).to_string())
             }
             _ => None,
+        }
+    }
+
+    /// Whether file `id` of preview `leaf` has text to copy, without building it (see `source_of`).
+    fn has_source(&self, leaf: NodeId, id: &str, cx: &App) -> bool {
+        let Some(host) = self.workspace.leaves.get(&leaf).map(|entry| entry.host.clone()) else { return false };
+        let Some(file) =
+            self.workspace.preview_files(leaf, self.sidebar.read(cx).sessions()).into_iter().find(|f| f.id == id)
+        else {
+            return false;
+        };
+        let key = FileKey { host, path: file.path.clone() };
+        if self.decoded.get(&key).and_then(source_text).is_some() {
+            return true;
+        }
+        match (kind_of(&key.path), self.reads.shown(&key)) {
+            (kind, Some(Shown::Bytes { data, .. })) => bytes_are_source(kind, data),
+            _ => false,
         }
     }
 
@@ -819,11 +853,8 @@ impl WorkspaceView {
             _ => Content::NoFiles,
         };
         let images = match (&host, &content) {
-            (Some(host), Content::Markdown(_)) => self
-                .previews
-                .get(&leaf)
-                .map(|slot| doc_image_keys(host, slot.view.read(cx).images_in_view()))
-                .unwrap_or_default()
+            (Some(_), Content::Markdown(_)) => self
+                .leaf_doc_images(leaf, cx)
                 .into_iter()
                 .filter_map(|key| Some((key.path.clone(), self.decoded.get(&key)?.clone())))
                 .collect(),
@@ -963,7 +994,7 @@ impl WorkspaceView {
             PreviewEvent::Menu { position, file } => {
                 let active = self.active_file(leaf, cx).map(|(_, id)| id);
                 let target = file.clone().or(active);
-                let copy = target.filter(|id| self.source_of(leaf, id, cx).is_some());
+                let copy = target.filter(|id| self.has_source(leaf, id, cx));
                 self.open_preview_menu(preview_menu(leaf, file.as_deref(), copy.as_deref()), *position, window, cx);
             }
             PreviewEvent::Hidden { position } => {
@@ -985,6 +1016,15 @@ impl WorkspaceView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_text_counts_as_source() {
+        assert!(bytes_are_source(FileKind::Unknown, b"all:\n"));
+        assert!(!bytes_are_source(FileKind::Unknown, &[0xff, 0xfe]));
+        assert!(!bytes_are_source(FileKind::Unknown, &vec![b'a'; MAX_UNKNOWN_TEXT + 1]));
+        assert!(!bytes_are_source(FileKind::Image(ImageType::Png), b"\x89PNG"));
+        assert!(bytes_are_source(FileKind::Markdown, b"# a"));
+    }
 
     fn host(name: &str) -> HostId {
         HostId::named(name)

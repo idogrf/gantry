@@ -135,6 +135,8 @@ impl Toasts {
                     toast.arm(now_ms, true);
                 }
             } else {
+                // A pointer that left with the window never reports its leave: forget the hover.
+                toast.hovered = false;
                 toast.pause(now_ms);
             }
         }
@@ -273,6 +275,17 @@ mod tests {
         assert_eq!(t.next_wake(52_000), None);
         t.set_running(true, 60_000);
         assert_eq!(t.next_wake(60_000), Some(4000));
+    }
+
+    #[test]
+    fn pausing_the_window_forgets_a_hover() {
+        let mut t = Toasts::default();
+        let a = push(&mut t, 1, "a", needs(), 0, true);
+        t.set_hovered(a, true, 1000);
+        t.set_running(false, 2000);
+        assert!(!t.shown()[0].hovered);
+        t.set_running(true, 3000);
+        assert!(t.next_wake(3000).is_some(), "the time runs again with no pointer leave");
     }
 
     #[test]

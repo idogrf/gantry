@@ -120,12 +120,12 @@ impl WorkspaceView {
     }
 
     /// The pop-up stack, bottom right: the newest card nearest the corner.
-    pub(super) fn render_toasts(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_toasts(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let shown = self.toasts.shown();
         if shown.is_empty() {
             return None;
         }
-        let animate = cx.global::<SettingsStore>().settings().animate_ui;
+        let animate = cx.global::<SettingsStore>().settings().animate_ui && window.is_window_active();
         Some(
             div()
                 .absolute()

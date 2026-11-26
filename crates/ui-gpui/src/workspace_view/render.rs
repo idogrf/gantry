@@ -199,7 +199,7 @@ impl Render for WorkspaceView {
                 }
             }))
             .on_mouse_move(cx.listener(Self::drag_sidebar))
-            // Only a pane drag reports here; a file dragged in from the OS is a drag too, but not this type.
+            // Each dragged type reports to its own handler (a pane, then a file chip or pop-up); an OS file drag is neither.
             .on_drag_move(cx.listener(|this, _: &DragMoveEvent<DraggedPane>, _, cx| {
                 if !std::mem::replace(&mut this.pane_dragging, true) {
                     cx.notify();
@@ -228,7 +228,7 @@ impl Render for WorkspaceView {
             .child(self.render_title_bar(window, cx))
             .child(body)
             // Below the launcher, recents, setup, wizard, menus and dialog: they never cover or block those.
-            .children(self.render_toasts(&theme, cx))
+            .children(self.render_toasts(&theme, window, cx))
             .when_some(self.launcher.as_ref().map(|(view, _)| view.clone()), |root, view| {
                 root.child(
                     div()

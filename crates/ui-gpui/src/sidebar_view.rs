@@ -1,7 +1,7 @@
 //! The sidebar: the Active list (every pane and every Claude session running outside Gantry, by project), colored
 //! by what each needs, with a fuzzy filter.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -11,6 +11,7 @@ use app_core::gantry_project::{self, Assign, ProjectError};
 use app_core::host_state::{HostDot, hosts_summary};
 use app_core::hosts_fold::HostsFold;
 use app_core::menus::{self, MenuAction, MenuContext};
+use app_core::preview::{Chip, FileCounts, chip, files_line};
 use app_core::session_tree::{
     self, Activation, ActiveInput, Arrivals, DragSource, DropAt, DropCue, GroupEdges, PaneEntry, ProjectItems,
     ProjectOrder, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, display_path, drop_cue, hover_at, labels,
@@ -31,7 +32,7 @@ use gpui::{
 use protocol::host::{HostId, split_project_key};
 use protocol::message::SessionInfo;
 
-use crate::assets::{CHEVRON_DOWN_ICON, CHEVRON_RIGHT_ICON, CLOSE_ICON, EYE_ICON, FOLDER_ICON, LAYERS_ICON};
+use crate::assets::{CHEVRON_DOWN_ICON, CHEVRON_RIGHT_ICON, CLOSE_ICON, EYE_ICON, FILE_ICON, FOLDER_ICON, LAYERS_ICON};
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::git_scrollbar::Extent;
@@ -246,6 +247,10 @@ pub struct SidebarView {
     middle_pressed: Option<Option<RowKey>>,
     /// How compact the sidebar is drawn: 0 = expanded, 1 = the compact column, between while it animates.
     amount: f32,
+    /// What the file chip counts for each session with sent files, by (host, session id).
+    file_counts: HashMap<(HostId, String), FileCounts>,
+    /// `alerts.fileSent.badge`: off keeps the chip outlined.
+    file_badge: bool,
     _refresh: Task<()>,
 }
 
@@ -296,6 +301,8 @@ impl SidebarView {
             rows: Vec::new(),
             selected: None,
             focused_leaf: None,
+            file_counts: HashMap::new(),
+            file_badge: true,
             menu: None,
             scroll: UniformListScrollHandle::new(),
             home: std::env::home_dir(),
@@ -366,6 +373,7 @@ impl SidebarView {
                 container: false,
                 host: None,
                 folder: None,
+                files: None,
             }))
             .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SidebarEvent::New { claude: false })))
     }
@@ -681,6 +689,20 @@ impl SidebarView {
             self.unseen = unseen;
             self.marked = marked;
             self.rebuild(cx);
+        }
+    }
+
+    /// The sent files of each session and whether the badge setting fills the chip; notifies only on change.
+    pub fn set_file_counts(
+        &mut self,
+        counts: HashMap<(HostId, String), FileCounts>,
+        badge: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if counts != self.file_counts || badge != self.file_badge {
+            self.file_counts = counts;
+            self.file_badge = badge;
+            cx.notify();
         }
     }
 
@@ -1853,8 +1875,13 @@ impl SidebarView {
                             ),
                     )
             }
-            RowKind::Session { session, tone, note, .. } => {
+            RowKind::Session { session, tone, note, leaf, .. } => {
                 let colors = theme.tone(*tone);
+                let counts = self.file_counts.get(&(session.host.clone(), session.id.clone())).copied();
+                let file_chip = counts.zip(*leaf).and_then(|(counts, leaf)| {
+                    chip(counts, *tone == Tone::Closed, self.file_badge).map(|chip| (chip, leaf))
+                });
+                let files = counts.filter(|counts| counts.total > 0).map(files_line);
                 let badge = dir_badge_for(
                     cx.global::<SettingsStore>().settings(),
                     session.claude_dir.as_deref(),
@@ -1873,8 +1900,16 @@ impl SidebarView {
                     container: session.container.is_some(),
                     host: session.host.remote_name().map(String::from),
                     folder: Some(display_path(&session.cwd, std::env::home_dir().as_deref())),
+                    files,
                 };
                 let (container, remote) = (session.container.is_some(), !session.host.is_local());
+                let row_chip = file_chip
+                    .filter(|_| close_slot_shown(amount))
+                    .map(|(chip, leaf)| file_chip_element(index, chip, leaf, colors, &theme, cx));
+                let bubble = file_chip.filter(|_| !close_slot_shown(amount)).and_then(|(chip, leaf)| match chip {
+                    Chip::New(count) => Some(file_bubble(index, count, leaf, colors, amount, &theme, cx)),
+                    Chip::Seen => None,
+                });
                 let letter = tile_letter(session_title(session)).to_string();
                 base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
@@ -1893,9 +1928,11 @@ impl SidebarView {
                                 )
                                 .when(container, |line| line.child(container_icon(colors.ink, &theme)))
                                 .when(remote, |line| line.child(ssh_icon(colors.ink, &theme)))
+                                .children(row_chip)
                                 .children(close)
                                 .children(project()),
                         )
+                        .children(bubble)
                         .when(amount > 0.0, |pill| {
                             pill.child(tile_glyph(letter.into_any_element(), amount, &theme)).child(corner_marks(
                                 lead_mark(*tone, &colors, &theme),
@@ -1917,6 +1954,7 @@ impl SidebarView {
                     container: false,
                     host: entry.host.remote_name().map(String::from),
                     folder: Some(display_path(&entry.cwd, std::env::home_dir().as_deref())),
+                    files: None,
                 }))
                 .child(
                     lined(pill(None))
@@ -1978,6 +2016,7 @@ impl SidebarView {
                     container: false,
                     host: entry.host.remote_name().map(String::from),
                     folder: Some(display_path(&entry.cwd, std::env::home_dir().as_deref())),
+                    files: None,
                 };
                 base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
@@ -2019,6 +2058,7 @@ impl SidebarView {
                         container: false,
                         host: None,
                         folder: None,
+                        files: None,
                     }))
                 })
                 .child(
@@ -2376,6 +2416,7 @@ impl Render for SidebarView {
                                 container: false,
                                 host: None,
                                 folder: None,
+                                files: None,
                             }))
                             .child(svg().path(LAYERS_ICON).size(theme.ui(18.)).text_color(rgb(theme.tokens.muted)))
                             .child(
@@ -2442,6 +2483,7 @@ impl Render for SidebarView {
                                         container: false,
                                         host: None,
                                         folder: None,
+                                        files: None,
                                     }))
                                 })
                                 .child("⚙")
@@ -2527,6 +2569,7 @@ impl Render for SidebarView {
                                         container: false,
                                         host: None,
                                         folder: None,
+                                        files: None,
                                     }))
                                 })
                                 .child("⎇")
@@ -2678,6 +2721,7 @@ impl Render for SidebarView {
                             container: false,
                             host: None,
                             folder: None,
+                            files: None,
                         }))
                     })
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::OpenRecents))),
@@ -2728,6 +2772,7 @@ impl Render for SidebarView {
                                             container: false,
                                             host: None,
                                             folder: None,
+                                            files: None,
                                         }))
                                     })
                                     .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
@@ -2832,6 +2877,94 @@ fn corner_marks(
         )
 }
 
+/// The number a compact tile's bubble shows: the count, `9+` above nine.
+fn bubble_text(count: usize) -> String {
+    if count > 9 { "9+".to_string() } else { count.to_string() }
+}
+
+/// The chip's background (none when outlined) and glyph color: a new-files chip takes the row's ink as background and
+/// its fill (else the `surface`) as text; a seen chip is outlined in the ink.
+fn chip_colors(colors: ToneColors, surface: u32, new: bool) -> (Option<u32>, u32) {
+    if new { (Some(colors.ink), colors.fill.unwrap_or(surface)) } else { (None, colors.ink) }
+}
+
+/// The file chip of a session row: filled with the unseen count, or an outlined glyph. A click opens its preview.
+fn file_chip_element(
+    index: usize,
+    chip: Chip,
+    leaf: NodeId,
+    colors: ToneColors,
+    theme: &Theme,
+    cx: &mut Context<SidebarView>,
+) -> gpui::Stateful<gpui::Div> {
+    let new = matches!(chip, Chip::New(_));
+    let (background, glyph) = chip_colors(colors, theme.tokens.surface, new);
+    div()
+        .id(("file-chip", index))
+        .flex_none()
+        .h(theme.ui(16.))
+        .px(theme.ui(4.))
+        .flex()
+        .items_center()
+        .gap(theme.ui(2.))
+        .rounded(px(5.))
+        .cursor_pointer()
+        .text_color(rgb(glyph))
+        .text_xs()
+        .when_some(background, |chip, background| chip.bg(rgb(background)))
+        .when(!new, |chip| chip.border_1().border_color(rgb(colors.ink)))
+        .child(svg().path(FILE_ICON).flex_none().size(theme.ui(11.)).text_color(rgb(glyph)))
+        .children(match chip {
+            Chip::New(count) => Some(count.to_string()),
+            Chip::Seen => None,
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                cx.emit(SidebarEvent::Menu(MenuAction::OpenPreview(leaf)));
+                cx.stop_propagation();
+            }),
+        )
+}
+
+/// A compact tile's bubble on its bottom-right corner: the unseen count; fades in with `amount`.
+fn file_bubble(
+    index: usize,
+    count: usize,
+    leaf: NodeId,
+    colors: ToneColors,
+    amount: f32,
+    theme: &Theme,
+    cx: &mut Context<SidebarView>,
+) -> gpui::Stateful<gpui::Div> {
+    let (background, glyph) = chip_colors(colors, theme.tokens.surface, true);
+    div()
+        .id(("file-bubble", index))
+        .absolute()
+        .bottom(theme.ui(1.))
+        .right(theme.ui(3.))
+        .min_w(theme.ui(14.))
+        .h(theme.ui(14.))
+        .px(theme.ui(3.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(7.))
+        .opacity(amount)
+        .when_some(background, |bubble, background| bubble.bg(rgb(background)))
+        .text_color(rgb(glyph))
+        .text_size(theme.ui(9.))
+        .font_weight(FontWeight::BOLD)
+        .child(bubble_text(count))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                cx.emit(SidebarEvent::Menu(MenuAction::OpenPreview(leaf)));
+                cx.stop_propagation();
+            }),
+        )
+}
+
 /// What a compact tile shows in its middle, centered: the title's letter, `>_` or the pane count. It fades in with
 /// `amount`.
 fn tile_glyph(content: AnyElement, amount: f32, theme: &Theme) -> gpui::Div {
@@ -2888,6 +3021,22 @@ mod tests {
         assert_eq!(with_opacity(0x112233, 0.0), 0x11223300);
         assert_eq!(with_opacity(0x112233, 0.5), 0x11223380);
         assert_eq!(lerp(10.0, 3.0, 0.5), 6.5);
+    }
+
+    #[test]
+    fn bubble_text_caps_at_nine() {
+        assert_eq!(bubble_text(3), "3");
+        assert_eq!(bubble_text(9), "9");
+        assert_eq!(bubble_text(10), "9+");
+    }
+
+    #[test]
+    fn chip_text_colors_follow_the_row() {
+        let colors = ToneColors { fill: Some(0x123456), ink: 0xffffff, dot: 0 };
+        assert_eq!(chip_colors(colors, 0x111111, true), (Some(0xffffff), 0x123456));
+        let bare = ToneColors { fill: None, ..colors };
+        assert_eq!(chip_colors(bare, 0x111111, true), (Some(0xffffff), 0x111111));
+        assert_eq!(chip_colors(colors, 0x111111, false), (None, 0xffffff));
     }
 
     #[test]

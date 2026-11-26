@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use app_core::menus::{hidden_tabs_menu, preview_menu};
 use app_core::preview::{
-    FileKind, ImageType, MAX_UNKNOWN_TEXT, TextDoc, file_name, image_size, image_too_large, is_link, is_read, kind_of,
-    newly_sent, row_title,
+    self, FileKind, ImageType, MAX_UNKNOWN_TEXT, TextDoc, file_name, image_size, image_too_large, is_link, is_read,
+    kind_of, newly_sent, row_title,
 };
 use app_core::preview_reads::{FileKey, POLL, Shown};
 use app_core::session_tree::session_title;
@@ -27,6 +27,7 @@ use crate::context_menu::OpenMenu;
 use crate::preview_view::{
     Content, MAX_IMAGES_IN_VIEW, PreviewEvent, PreviewModel, PreviewTab, PreviewView, same_content,
 };
+use crate::settings_store::SettingsStore;
 use crate::theme::theme;
 
 /// What to send each host's daemon with `WatchSentFiles`: the hosts (among `connected`) whose wanted session list
@@ -969,7 +970,29 @@ impl WorkspaceView {
         }
         // After the views have their models, so a replaced or switched-away image is no longer drawn.
         self.release_unlisted_previews(cx);
+        self.sync_file_chips(cx);
         rows_changed
+    }
+
+    /// Give the sidebar what its file chips count: every session with sent files, and the badge setting.
+    pub(super) fn sync_file_chips(&mut self, cx: &mut Context<Self>) {
+        let badge = cx.global::<SettingsStore>().settings().alerts.file_sent.badge;
+        let counts: HashMap<(HostId, String), preview::FileCounts> = self
+            .sidebar
+            .read(cx)
+            .sessions()
+            .all()
+            .filter(|session| !session.sent_files.is_empty())
+            .map(|session| {
+                let counts = preview::file_counts(
+                    &session.sent_files,
+                    self.workspace.sent_removed.get(&session.id),
+                    self.workspace.sent_seen.get(&session.id),
+                );
+                ((session.host.clone(), session.id.clone()), counts)
+            })
+            .collect();
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_file_counts(counts, badge, cx));
     }
 
     /// Send each connected host the sessions its preview panes follow, when that list changed.

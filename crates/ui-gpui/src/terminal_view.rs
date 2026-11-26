@@ -1124,6 +1124,7 @@ impl Render for TerminalView {
                             container: false,
                             host: None,
                             folder: None,
+                            files: None,
                         }))
                         .into_any_element(),
                     None => status.into_any_element(),

@@ -38,7 +38,7 @@ pub(crate) fn lead(tone: Tone) -> Lead {
 }
 
 /// The card's content.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct HoverCard {
     /// The row's title.
     pub title: String,
@@ -52,6 +52,8 @@ pub(crate) struct HoverCard {
     pub host: Option<String>,
     /// Its folder, `~`-shortened.
     pub folder: Option<String>,
+    /// The sent files line ("Files: 2 new, 3 in all"), under the status.
+    pub files: Option<String>,
 }
 
 /// The width of `text` on one line.
@@ -69,16 +71,23 @@ impl HoverCard {
         let rem = window.rem_size();
         let (small, extra_small) = (rem * 0.875, rem * 0.75);
         let mut widest = line_width(window, &self.title, small, FontWeight::SEMIBOLD);
-        let lines = self
-            .status
-            .iter()
-            .cloned()
-            .chain(self.dir.iter().map(|badge| format!("Config: {}", badge.name)))
-            .map(|text| (text, small));
-        for (text, size) in lines.chain(self.folder.iter().cloned().map(|text| (text, extra_small))) {
+        for (text, extra) in self.measured_lines() {
+            let size = if extra { extra_small } else { small };
             widest = widest.max(line_width(window, &text, size, FontWeight::NORMAL));
         }
         widest + ui(24.) + px(2.)
+    }
+
+    /// The lines that set the card's width besides the title, and whether each is drawn extra small.
+    fn measured_lines(&self) -> Vec<(String, bool)> {
+        self.status
+            .iter()
+            .cloned()
+            .chain(self.files.iter().cloned())
+            .chain(self.dir.iter().map(|badge| format!("Config: {}", badge.name)))
+            .map(|text| (text, false))
+            .chain(self.folder.iter().cloned().map(|text| (text, true)))
+            .collect()
     }
 }
 
@@ -107,6 +116,7 @@ impl Render for HoverCard {
             .text_color(rgb(theme.tokens.text))
             .child(div().font_weight(FontWeight::SEMIBOLD).child(self.title.clone()))
             .children(self.status.clone().map(|status| div().child(status)))
+            .children(self.files.clone().map(|files| div().child(files)))
             .children(self.dir.as_ref().map(|badge| {
                 div()
                     .flex()
@@ -213,5 +223,13 @@ mod tests {
         assert_eq!(lead(Tone::Closed), Lead::Ring);
         assert_eq!(lead(Tone::Elsewhere), Lead::Arrow);
         assert_eq!(lead(Tone::Unread), Lead::Pin);
+    }
+
+    #[test]
+    fn a_files_line_widens_the_card() {
+        let plain = HoverCard { title: "a".into(), ..HoverCard::default() };
+        let long = HoverCard { files: Some("Files: 2 new, 3 in all".into()), ..plain.clone() };
+        assert!(long.measured_lines().iter().any(|(text, _)| text == "Files: 2 new, 3 in all"));
+        assert!(plain.measured_lines().iter().all(|(text, _)| !text.starts_with("Files")));
     }
 }

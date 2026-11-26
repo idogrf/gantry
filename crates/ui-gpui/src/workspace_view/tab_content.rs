@@ -55,7 +55,8 @@ impl WorkspaceView {
                 None => label.to_string(),
             };
             let title = if can_split { title } else { format!("{title} ({MAX_PANES_PER_TAB} panes max)") };
-            let card = HoverCard { title, status: None, dir: None, container: false, host: None, folder: None };
+            let card =
+                HoverCard { title, status: None, dir: None, container: false, host: None, folder: None, files: None };
             div()
                 .id((label, index))
                 .flex_none()
@@ -90,8 +91,15 @@ impl WorkspaceView {
                 None => "Close pane".to_string(),
             }
         };
-        let close_card =
-            HoverCard { title: close_title, status: None, dir: None, container: false, host: None, folder: None };
+        let close_card = HoverCard {
+            title: close_title,
+            status: None,
+            dir: None,
+            container: false,
+            host: None,
+            folder: None,
+            files: None,
+        };
         let danger = theme.tokens.danger;
         div()
             .absolute()
@@ -585,6 +593,7 @@ fn pane_header(
         container,
         host: host.clone(),
         folder,
+        files: None,
     };
     div()
         .id(("pane-header", index))

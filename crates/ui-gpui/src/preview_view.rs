@@ -1287,6 +1287,7 @@ impl PreviewView {
                     container: false,
                     host: None,
                     folder: Some(tab.path.display().to_string()),
+                    files: None,
                 };
                 // A tab of a following preview drags its file out (a copy: the tab stays).
                 let dragged = self.model.host.clone().zip(self.model.session.clone()).map(|(host, session)| {
@@ -1567,7 +1568,15 @@ pub(crate) fn keep_flip(old_active: Option<&str>, new_active: Option<&str>) -> b
 
 /// A hover card with only a title.
 fn plain_card(title: &str) -> HoverCard {
-    HoverCard { title: title.to_string(), status: None, dir: None, container: false, host: None, folder: None }
+    HoverCard {
+        title: title.to_string(),
+        status: None,
+        dir: None,
+        container: false,
+        host: None,
+        folder: None,
+        files: None,
+    }
 }
 
 impl Render for PreviewView {

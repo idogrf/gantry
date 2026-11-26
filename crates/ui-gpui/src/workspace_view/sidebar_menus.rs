@@ -76,6 +76,7 @@ impl WorkspaceView {
                 container: false,
                 host: None,
                 folder: None,
+                files: None,
             }))
             .on_click(
                 cx.listener(|this, _, window, cx| {

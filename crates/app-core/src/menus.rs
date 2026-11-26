@@ -559,12 +559,16 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
 }
 
 /// The menu of a preview pane's file tab or body: `file` = the file's id when a tab was clicked, `copy` = the id of
-/// the file whose text can be copied (the clicked tab's, else the shown file's), if it is text.
-pub fn preview_menu(leaf: NodeId, file: Option<&str>, copy: Option<&str>) -> Vec<MenuItem> {
+/// the file whose text can be copied (the clicked tab's, else the shown file's), if it is text. A `holding` pane has
+/// no list to edit, so only Copy is offered.
+pub fn preview_menu(leaf: NodeId, file: Option<&str>, copy: Option<&str>, holding: bool) -> Vec<MenuItem> {
     let mut items = Vec::new();
     if let Some(id) = copy {
         items.push(entry("Copy file contents", MenuAction::CopyFileContents { leaf, id: id.to_string() }));
         items.push(MenuItem::Separator);
+    }
+    if holding {
+        return tidy(items);
     }
     if let Some(id) = file {
         items.push(entry("Remove from list", MenuAction::RemoveSentFile { leaf, id: id.to_string() }));
@@ -737,19 +741,25 @@ mod tests {
     #[test]
     fn preview_menu_offers_copy_only_for_text() {
         assert_eq!(
-            labels(&preview_menu(3, Some("f1"), Some("f1"))),
+            labels(&preview_menu(3, Some("f1"), Some("f1"), false)),
             ["Copy file contents", "│", "Remove from list", "Clear all files from this session"]
         );
-        assert_eq!(labels(&preview_menu(3, None, None)), ["Clear all files from this session"]);
+        assert_eq!(labels(&preview_menu(3, None, None, false)), ["Clear all files from this session"]);
         assert_eq!(
-            labels(&preview_menu(3, Some("f1"), None)),
+            labels(&preview_menu(3, Some("f1"), None, false)),
             ["Remove from list", "Clear all files from this session"]
         );
-        let items = preview_menu(3, Some("f2"), Some("f2"));
+        let items = preview_menu(3, Some("f2"), Some("f2"), false);
         assert!(matches!(
             &items[0],
             MenuItem::Entry(e) if e.action == MenuAction::CopyFileContents { leaf: 3, id: "f2".into() }
         ));
+    }
+
+    #[test]
+    fn holding_menus_have_no_list_entries() {
+        assert_eq!(labels(&preview_menu(3, Some("f1"), Some("f1"), true)), ["Copy file contents"]);
+        assert!(preview_menu(3, Some("f1"), None, true).is_empty());
     }
 
     #[test]

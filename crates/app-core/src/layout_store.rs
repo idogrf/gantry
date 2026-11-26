@@ -273,7 +273,8 @@ mod tests {
         let preview =
             workspace.split(crate::split_tree::Axis::Horizontal, PaneLaunch::preview("/repo".into())).unwrap();
         workspace.leaves.get_mut(&preview).unwrap().preview = Some(PreviewLeaf {
-            follows: claude,
+            follows: Some(claude),
+            held: None,
             session: Some("s1".into()),
             active: Some("t:0".into()),
             linked: Vec::new(),
@@ -302,7 +303,8 @@ mod tests {
             backlog: true,
         };
         workspace.leaves.get_mut(&preview).unwrap().preview = Some(PreviewLeaf {
-            follows: claude,
+            follows: Some(claude),
+            held: None,
             session: Some("s1".into()),
             active: Some(linked.id.clone()),
             linked: vec![linked],
@@ -319,9 +321,59 @@ mod tests {
         let path = dir.path().join("layout.json");
         let mut workspace = sample();
         let leaf = workspace.new_tab(PaneLaunch::preview("/repo".into()));
-        workspace.leaves.get_mut(&leaf).unwrap().preview =
-            Some(PreviewLeaf { follows: 999, session: Some("gone".into()), active: None, linked: Vec::new() });
+        workspace.leaves.get_mut(&leaf).unwrap().preview = Some(PreviewLeaf {
+            follows: Some(999),
+            held: None,
+            session: Some("gone".into()),
+            active: None,
+            linked: Vec::new(),
+        });
         save(&path, &workspace).unwrap();
+        assert_eq!(load(&path).unwrap(), Some(workspace));
+    }
+
+    #[test]
+    fn a_pr3_preview_layout_saves_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        let mut workspace = sample();
+        let claude = workspace.focused().unwrap();
+        let preview =
+            workspace.split(crate::split_tree::Axis::Horizontal, PaneLaunch::preview("/repo".into())).unwrap();
+        workspace.leaves.get_mut(&preview).unwrap().preview = Some(PreviewLeaf {
+            follows: Some(claude),
+            held: None,
+            session: Some("s1".into()),
+            active: None,
+            linked: Vec::new(),
+        });
+        save(&path, &workspace).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(before.contains(&format!("\"follows\": {claude}")), "{before}");
+        assert!(!before.contains("held") && !before.contains("Some"), "{before}");
+        let loaded = load(&path).unwrap().unwrap();
+        save(&path, &loaded).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_holding_pane_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        let mut workspace = sample();
+        let leaf = workspace.new_tab(PaneLaunch::preview("/repo".into()));
+        let held = protocol::message::SentFile {
+            id: "a".into(),
+            path: "/repo/a.md".into(),
+            sent_ms: 3,
+            caption: None,
+            backlog: true,
+        };
+        workspace.leaves.get_mut(&leaf).unwrap().preview =
+            Some(PreviewLeaf { follows: None, held: Some(held), session: None, active: None, linked: Vec::new() });
+        save(&path, &workspace).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("held") && !text.contains("follows"), "{text}");
         assert_eq!(load(&path).unwrap(), Some(workspace));
     }
 }

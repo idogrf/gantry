@@ -437,8 +437,12 @@ pub struct Leaf {
 /// What a preview pane follows and shows.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreviewLeaf {
-    /// The Claude leaf it follows.
-    pub follows: NodeId,
+    /// The Claude leaf it follows; `None` for a holding pane, which shows `held` and outlives every session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follows: Option<NodeId>,
+    /// The one file a holding pane shows (dropped on it); `None` for a following pane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<SentFile>,
     /// The session it shows: the followed leaf's. The model keeps it when that leaf closes; the window then closes the
     /// follower, so a preview does not outlive its Claude pane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -450,6 +454,17 @@ pub struct PreviewLeaf {
     /// `preview::MAX_LINKED`, cleared with the session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub linked: Vec<SentFile>,
+}
+
+/// A file dragged to a pane: where it lives and, when Claude sent it, the session it came from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DropFile {
+    /// The host the file is on.
+    pub host: HostId,
+    /// The session that sent it, if Claude did.
+    pub session: Option<String>,
+    /// The file.
+    pub file: SentFile,
 }
 
 /// Where `Workspace::open_preview` put the preview pane.
@@ -1038,6 +1053,37 @@ impl Workspace {
         }
     }
 
+    /// Close the previews a layout cannot make sense of: one following a leaf that is missing, is itself a preview or
+    /// is not a Claude launch, and one with neither a followed leaf nor a held file. One with both keeps `follows` and
+    /// loses `held`.
+    pub fn normalize_previews(&mut self) {
+        let mut bad = Vec::new();
+        let mut both = Vec::new();
+        for (id, leaf) in &self.leaves {
+            let Some(view) = &leaf.preview else { continue };
+            match view.follows {
+                Some(followed) => {
+                    let ok = self.leaves.get(&followed).is_some_and(|f| f.preview.is_none() && f.launch.is_claude());
+                    if !ok {
+                        bad.push(*id);
+                    } else if view.held.is_some() {
+                        both.push(*id);
+                    }
+                }
+                None if view.held.is_none() => bad.push(*id),
+                None => {}
+            }
+        }
+        for id in both {
+            if let Some(view) = self.leaves.get_mut(&id).and_then(|leaf| leaf.preview.as_mut()) {
+                view.held = None;
+            }
+        }
+        for id in bad {
+            self.close(id);
+        }
+    }
+
     /// The color the user gave a pane, if any.
     pub fn leaf_color(&self, leaf: NodeId) -> Option<Tint> {
         self.leaves.get(&leaf)?.color
@@ -1227,6 +1273,108 @@ impl Workspace {
         }
         self.tabs[self.active].focused = src;
         true
+    }
+
+    /// What dropping `file` on `zone` of leaf `target` would do. `Nothing` unless `target` is a pane of the visible,
+    /// non-Settings tab. An edge makes a new holding pane (`Full` at `MAX_PANES_PER_TAB`). The middle switches a
+    /// holding pane to the file (not when it holds it already) or a following pane of the same host and session to the
+    /// file, while that session still lists it; any other pane gets nothing.
+    pub fn file_drop_check(
+        &self,
+        file: &DropFile,
+        target: NodeId,
+        zone: DropZone,
+        sessions: &SessionStore,
+    ) -> DropCheck {
+        let Some(tab) = self.tab_of(target) else { return DropCheck::Nothing };
+        if tab != self.active || self.tabs[tab].settings {
+            return DropCheck::Nothing;
+        }
+        let Some(leaf) = self.leaves.get(&target) else { return DropCheck::Nothing };
+        match zone {
+            DropZone::Edge(_) if self.tabs[tab].root.leaves().len() >= MAX_PANES_PER_TAB => DropCheck::Full,
+            DropZone::Edge(_) => DropCheck::Allowed,
+            DropZone::Center => {
+                let Some(view) = &leaf.preview else { return DropCheck::Nothing };
+                let allowed = match &view.held {
+                    Some(held) => !(leaf.host == file.host && held.path == file.file.path),
+                    None => {
+                        leaf.host == file.host
+                            && file.session.is_some()
+                            && view.session == file.session
+                            && self.preview_files(target, sessions).iter().any(|listed| listed.id == file.file.id)
+                    }
+                };
+                if allowed { DropCheck::Allowed } else { DropCheck::Nothing }
+            }
+        }
+    }
+
+    /// Drop `file` on `zone` of leaf `target`. An edge makes a holding pane on the file's host beside `target`, in
+    /// `target`'s Gantry project, focused; the middle of a holding pane makes it hold the file and takes the file's
+    /// host, the middle of a following pane makes the file its active tab. Returns the pane that shows the file;
+    /// `None`, with nothing changed, unless `file_drop_check` allows it.
+    pub fn drop_file(
+        &mut self,
+        file: &DropFile,
+        target: NodeId,
+        zone: DropZone,
+        sessions: &SessionStore,
+    ) -> Option<NodeId> {
+        if self.file_drop_check(file, target, zone, sessions) != DropCheck::Allowed {
+            return None;
+        }
+        let folder = file.file.path.parent().map(Path::to_path_buf).unwrap_or_default();
+        match zone {
+            DropZone::Edge(side) => {
+                let project = self.leaves.get(&target).and_then(|leaf| leaf.project.clone());
+                let (split, id) = (self.alloc(), self.alloc());
+                let view = PreviewLeaf {
+                    follows: None,
+                    held: Some(file.file.clone()),
+                    session: None,
+                    active: None,
+                    linked: Vec::new(),
+                };
+                let leaf =
+                    Leaf { host: file.host.clone(), preview: Some(view), ..Leaf::new(PaneLaunch::preview(folder)) };
+                self.leaves.insert(id, leaf);
+                self.tabs[self.active].root.insert_beside(target, side, split, id);
+                self.tabs[self.active].focused = id;
+                if let Some(project) = project {
+                    self.set_leaf_project(id, Some(&project));
+                }
+                Some(id)
+            }
+            DropZone::Center => {
+                let leaf = self.leaves.get_mut(&target)?;
+                match leaf.preview.as_mut()?.held.as_mut() {
+                    Some(held) => {
+                        *held = file.file.clone();
+                        leaf.host = file.host.clone();
+                        leaf.launch.cwd = folder;
+                    }
+                    None => {
+                        self.set_preview_active(target, &file.file.id);
+                    }
+                }
+                Some(target)
+            }
+        }
+    }
+
+    /// Whether a following preview of `session` on `host` is a pane of the visible tab.
+    pub fn following_preview_in_view(&self, host: &HostId, session: &str) -> bool {
+        let Some(tab) = self.active_tab().filter(|tab| !tab.settings) else { return false };
+        tab.root.leaves().into_iter().any(|id| {
+            self.leaves.get(&id).is_some_and(|leaf| {
+                &leaf.host == host
+                    && leaf
+                        .preview
+                        .as_ref()
+                        .is_some_and(|view| view.follows.is_some() && view.session.as_deref() == Some(session))
+            })
+        })
     }
 
     /// The visible tab.
@@ -1459,13 +1607,19 @@ impl Workspace {
             self.session_projects.insert(session.into(), project);
         }
         let followed = self.leaf_for_pane(key).expect("the leaf was found above");
-        for view in self.leaves.values_mut().filter_map(|leaf| leaf.preview.as_mut()).filter(|v| v.follows == followed)
+        for view in
+            self.leaves.values_mut().filter_map(|leaf| leaf.preview.as_mut()).filter(|v| v.follows == Some(followed))
         {
             view.session = Some(session.into());
             view.active = None;
             view.linked.clear();
         }
         true
+    }
+
+    /// Whether `leaf` is a holding preview pane (it shows one dropped file and follows no session).
+    pub fn is_holding(&self, leaf: NodeId) -> bool {
+        self.leaves.get(&leaf).and_then(|leaf| leaf.preview.as_ref()).is_some_and(|view| view.follows.is_none())
     }
 
     /// Whether `leaf` is a preview pane.
@@ -1478,7 +1632,7 @@ impl Workspace {
         self.leaves
             .iter()
             .find(|(id, leaf)| {
-                leaf.preview.as_ref().is_some_and(|view| view.follows == claude) && self.tab_of(**id).is_some()
+                leaf.preview.as_ref().is_some_and(|view| view.follows == Some(claude)) && self.tab_of(**id).is_some()
             })
             .map(|(id, _)| *id)
     }
@@ -1513,7 +1667,7 @@ impl Workspace {
         };
         let (PreviewPlace::Split { leaf, .. } | PreviewPlace::NewTab(leaf) | PreviewPlace::Existing(leaf)) = place;
         self.leaves.get_mut(&leaf).expect("the leaf was just created").preview =
-            Some(PreviewLeaf { follows: claude, session, active: None, linked: Vec::new() });
+            Some(PreviewLeaf { follows: Some(claude), held: None, session, active: None, linked: Vec::new() });
         Some(place)
     }
 
@@ -1527,6 +1681,9 @@ impl Workspace {
     /// first; on equal times the session's first.
     pub fn preview_files<'a>(&'a self, leaf: NodeId, sessions: &'a SessionStore) -> Vec<&'a SentFile> {
         let Some(view) = self.leaves.get(&leaf).and_then(|leaf| leaf.preview.as_ref()) else { return Vec::new() };
+        if let Some(held) = &view.held {
+            return vec![held];
+        }
         let mut files = match self.preview_session(leaf) {
             Some((host, session)) => sessions
                 .get(host, session)
@@ -1541,8 +1698,12 @@ impl Workspace {
 
     /// The file a preview pane shows: its saved tab while listed, else the newest.
     pub fn preview_active<'a>(&'a self, leaf: NodeId, sessions: &'a SessionStore) -> Option<&'a SentFile> {
+        let view = self.leaves.get(&leaf)?.preview.as_ref()?;
+        if let Some(held) = &view.held {
+            return Some(held);
+        }
         let files = self.preview_files(leaf, sessions);
-        let saved = self.leaves.get(&leaf)?.preview.as_ref()?.active.as_deref();
+        let saved = view.active.as_deref();
         let id = preview::active_id(&files, saved)?;
         files.into_iter().find(|file| file.id == id)
     }
@@ -1550,7 +1711,7 @@ impl Workspace {
     /// Make `id` the active tab of a preview pane. True when that changed something.
     pub fn set_preview_active(&mut self, leaf: NodeId, id: &str) -> bool {
         let Some(view) = self.leaves.get_mut(&leaf).and_then(|leaf| leaf.preview.as_mut()) else { return false };
-        if view.active.as_deref() == Some(id) {
+        if view.held.is_some() || view.active.as_deref() == Some(id) {
             return false;
         }
         view.active = Some(id.into());
@@ -1560,7 +1721,7 @@ impl Workspace {
     /// Hide file `id` from a preview pane; a linked tab is dropped, a sent file is hidden in its session. When it was
     /// the active tab the newest other file becomes active. True when it was listed.
     pub fn remove_sent(&mut self, leaf: NodeId, id: &str, sessions: &SessionStore) -> bool {
-        if !self.is_preview(leaf) {
+        if !self.is_preview(leaf) || self.is_holding(leaf) {
             return false;
         }
         let files = self.preview_files(leaf, sessions);
@@ -1584,7 +1745,7 @@ impl Workspace {
 
     /// Hide every file a preview pane lists and drop its linked tabs. True when there was any.
     pub fn clear_sent(&mut self, leaf: NodeId, sessions: &SessionStore) -> bool {
-        if !self.is_preview(leaf) {
+        if !self.is_preview(leaf) || self.is_holding(leaf) {
             return false;
         }
         let files = self.preview_files(leaf, sessions);
@@ -1603,8 +1764,20 @@ impl Workspace {
 
     /// Open `path` as a tab of preview pane `leaf` (a link in a file): a listed file with that path becomes active,
     /// else a linked tab is added (the oldest dropped past `preview::MAX_LINKED`) and made active. Returns the active
-    /// tab's id; `None` unless `leaf` is a preview.
+    /// tab's id; `None` unless `leaf` is a preview. A holding pane switches its one file to `path` instead.
     pub fn open_link(&mut self, leaf: NodeId, path: &Path, now_ms: u64, sessions: &SessionStore) -> Option<String> {
+        if let Some(held) = self.leaves.get_mut(&leaf)?.preview.as_mut()?.held.as_mut() {
+            if held.path != path {
+                *held = SentFile {
+                    id: preview::link_id(path),
+                    path: path.to_path_buf(),
+                    sent_ms: now_ms,
+                    caption: None,
+                    backlog: true,
+                };
+            }
+            return Some(held.id.clone());
+        }
         let listed =
             self.preview_files(leaf, sessions).into_iter().find(|file| file.path == path).map(|f| f.id.clone());
         let view = self.leaves.get_mut(&leaf)?.preview.as_mut()?;
@@ -1639,7 +1812,8 @@ impl Workspace {
     pub fn watched_sessions(&self) -> BTreeMap<HostId, Vec<String>> {
         let mut by_host: BTreeMap<HostId, BTreeSet<&str>> = BTreeMap::new();
         for leaf in self.leaves.values() {
-            if let Some(session) = leaf.preview.as_ref().and_then(|view| view.session.as_deref()) {
+            let following = leaf.preview.as_ref().filter(|view| view.follows.is_some());
+            if let Some(session) = following.and_then(|view| view.session.as_deref()) {
                 by_host.entry(leaf.host.clone()).or_default().insert(session);
             }
         }
@@ -1776,6 +1950,7 @@ pub fn restore(
 ) -> Restored {
     let mut workspace = saved.unwrap_or_default();
     workspace.normalize_projects();
+    workspace.normalize_previews();
     // A host that is not connected keeps its leaves as saved (pane and instance): `reconcile` decides when it connects.
     let connected: HashSet<&HostId> = hosts.iter().map(|live| &live.host).collect();
     let mut attach = Vec::new();
@@ -1794,11 +1969,16 @@ pub fn restore(
         for leaf in dead {
             workspace.close(leaf);
         }
-        // A preview stays exactly when the Claude leaf it follows does.
+        // A following preview stays exactly when the Claude leaf it follows does; a holding pane stays.
         let orphans: Vec<NodeId> = workspace
             .leaves
             .iter()
-            .filter(|(_, leaf)| leaf.preview.as_ref().is_some_and(|view| !workspace.leaves.contains_key(&view.follows)))
+            .filter(|(_, leaf)| {
+                leaf.preview
+                    .as_ref()
+                    .and_then(|view| view.follows)
+                    .is_some_and(|id| !workspace.leaves.contains_key(&id))
+            })
             .map(|(id, _)| *id)
             .collect();
         for leaf in orphans {
@@ -4297,7 +4477,13 @@ mod tests {
         assert_eq!(preview.launch, PaneLaunch::preview("/r".into()));
         assert_eq!(
             preview.preview,
-            Some(PreviewLeaf { follows: claude, session: Some("s1".into()), active: None, linked: Vec::new() })
+            Some(PreviewLeaf {
+                follows: Some(claude),
+                held: None,
+                session: Some("s1".into()),
+                active: None,
+                linked: Vec::new()
+            })
         );
         assert!(ws.is_preview(leaf) && !ws.is_preview(claude));
         assert_eq!(ws.preview_of(claude), Some(leaf));
@@ -4328,7 +4514,7 @@ mod tests {
         assert_eq!(ws.tabs.len(), tabs + 1);
         assert_eq!(ws.focused(), Some(leaf));
         assert_eq!(ws.leaves[&leaf].project.as_deref(), Some("Billing"));
-        assert_eq!(ws.leaves[&leaf].preview.as_ref().unwrap().follows, claude);
+        assert_eq!(ws.leaves[&leaf].preview.as_ref().unwrap().follows, Some(claude));
         assert!(ws.is_consistent());
     }
 
@@ -4548,8 +4734,13 @@ mod tests {
         }
         // A second preview of the same session on this machine adds nothing.
         let twin = ws.new_tab(PaneLaunch::preview("/r".into()));
-        ws.leaves.get_mut(&twin).unwrap().preview =
-            Some(PreviewLeaf { follows: one, session: Some("s2".into()), active: None, linked: Vec::new() });
+        ws.leaves.get_mut(&twin).unwrap().preview = Some(PreviewLeaf {
+            follows: Some(one),
+            held: None,
+            session: Some("s2".into()),
+            active: None,
+            linked: Vec::new(),
+        });
         let watched = ws.watched_sessions();
         assert_eq!(watched[&HostId::local()], ["s1", "s2"]);
         assert_eq!(watched[&HostId::named("devbox")], ["r1"]);
@@ -4591,5 +4782,240 @@ mod tests {
         assert_eq!(ws.leaf_for_session(&HostId::local(), "s1"), Some(claude));
         ws.close(claude);
         assert_eq!(ws.leaf_for_session(&HostId::local(), "s1"), None);
+    }
+
+    fn drop_of(host: HostId, session: Option<&str>, id: &str) -> DropFile {
+        DropFile { host, session: session.map(String::from), file: sent(id, 5) }
+    }
+
+    fn right() -> DropZone {
+        DropZone::Edge(Direction::Right)
+    }
+
+    #[test]
+    fn a_file_dropped_on_an_edge_makes_a_holding_pane() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        ws.set_leaf_project(claude, Some("Billing"));
+        let store = store_with("s1", &["a"]);
+        let file = drop_of(HostId::local(), Some("s1"), "a");
+        assert_eq!(ws.file_drop_check(&file, claude, right(), &store), DropCheck::Allowed);
+        let leaf = ws.drop_file(&file, claude, right(), &store).unwrap();
+        assert!(ws.is_holding(leaf) && ws.is_consistent());
+        let made = &ws.leaves[&leaf];
+        let view = made.preview.as_ref().unwrap();
+        assert_eq!((view.follows, view.held.as_ref()), (None, Some(&file.file)));
+        assert_eq!((made.session.clone(), view.active.clone(), view.linked.len()), (None, None, 0));
+        assert_eq!(made.launch, PaneLaunch::preview("/r".into()));
+        assert_eq!(made.project.as_deref(), Some("Billing"));
+        assert_eq!(ws.focused(), Some(leaf));
+        let Node::Split { first, second, .. } = &ws.tabs[ws.active].root else { panic!("expected a split") };
+        assert_eq!((first.leaves(), second.leaves()), (vec![claude], vec![leaf]));
+        assert_eq!(ws.preview_files(leaf, &store), vec![&file.file]);
+        assert_eq!(ws.preview_active(leaf, &store), Some(&file.file));
+    }
+
+    #[test]
+    fn a_remote_file_makes_a_pane_on_its_host() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        let file = drop_of(HostId::named("build-box"), None, "a");
+        let leaf = ws.drop_file(&file, claude, right(), &SessionStore::default()).unwrap();
+        assert_eq!(ws.leaves[&leaf].host, HostId::named("build-box"));
+    }
+
+    #[test]
+    fn edge_drops_in_a_full_tab_are_refused() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        ws.open_preview(claude).unwrap();
+        ws.split(Axis::Vertical, shell("/r")).unwrap();
+        ws.split(Axis::Vertical, shell("/r")).unwrap();
+        assert_eq!(ws.tabs[ws.active].root.leaves().len(), MAX_PANES_PER_TAB);
+        let store = SessionStore::default();
+        let file = drop_of(HostId::local(), None, "a");
+        let before = ws.clone();
+        assert_eq!(ws.file_drop_check(&file, claude, right(), &store), DropCheck::Full);
+        assert_eq!(ws.drop_file(&file, claude, right(), &store), None);
+        assert_eq!(ws, before);
+    }
+
+    #[test]
+    fn the_middle_switches_only_its_own_following_pane() {
+        let mut ws = Workspace::default();
+        let leaf = preview_of_s1(&mut ws);
+        let store = store_with("s1", &["a", "b"]);
+        let mid = DropZone::Center;
+        let file = drop_of(HostId::local(), Some("s1"), "a");
+        assert_eq!(ws.file_drop_check(&file, leaf, mid, &store), DropCheck::Allowed);
+        ws.set_preview_active(leaf, "b");
+        assert_eq!(ws.drop_file(&file, leaf, mid, &store), Some(leaf));
+        assert_eq!(ws.preview_active(leaf, &store).unwrap().id, "a");
+        let other_session = drop_of(HostId::local(), Some("s2"), "a");
+        assert_eq!(ws.file_drop_check(&other_session, leaf, mid, &store), DropCheck::Nothing);
+        let other_host = drop_of(HostId::named("box"), Some("s1"), "a");
+        assert_eq!(ws.file_drop_check(&other_host, leaf, mid, &store), DropCheck::Nothing);
+        let unlisted = drop_of(HostId::local(), Some("s1"), "zz");
+        assert_eq!(ws.file_drop_check(&unlisted, leaf, mid, &store), DropCheck::Nothing);
+        ws.remove_sent(leaf, "a", &store);
+        assert_eq!(ws.file_drop_check(&file, leaf, mid, &store), DropCheck::Nothing, "a removed file");
+        let claude = ws.leaves[&leaf].preview.as_ref().unwrap().follows.unwrap();
+        let sent_to_terminal = drop_of(HostId::local(), Some("s1"), "b");
+        assert_eq!(ws.file_drop_check(&sent_to_terminal, claude, mid, &store), DropCheck::Nothing);
+        assert_eq!(ws.drop_file(&sent_to_terminal, claude, mid, &store), None);
+    }
+
+    #[test]
+    fn the_middle_of_a_holding_pane_takes_any_file() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        let store = SessionStore::default();
+        let first = drop_of(HostId::local(), Some("s1"), "a");
+        let leaf = ws.drop_file(&first, claude, right(), &store).unwrap();
+        let second = drop_of(HostId::named("box"), Some("s9"), "q");
+        assert_eq!(ws.file_drop_check(&second, leaf, DropZone::Center, &store), DropCheck::Allowed);
+        assert_eq!(ws.drop_file(&second, leaf, DropZone::Center, &store), Some(leaf));
+        assert_eq!(ws.leaves[&leaf].host, HostId::named("box"));
+        assert_eq!(ws.leaves[&leaf].launch.cwd, PathBuf::from("/r"));
+        assert_eq!(ws.preview_active(leaf, &store), Some(&second.file));
+        assert_eq!(ws.file_drop_check(&second, leaf, DropZone::Center, &store), DropCheck::Nothing, "already held");
+        let same_path_elsewhere = drop_of(HostId::local(), None, "q");
+        assert_eq!(ws.file_drop_check(&same_path_elsewhere, leaf, DropZone::Center, &store), DropCheck::Allowed);
+    }
+
+    #[test]
+    fn drops_outside_the_visible_tab_do_nothing() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        ws.new_tab(shell("/b"));
+        let store = SessionStore::default();
+        let file = drop_of(HostId::local(), None, "a");
+        assert_eq!(ws.file_drop_check(&file, claude, right(), &store), DropCheck::Nothing);
+        assert_eq!(ws.file_drop_check(&file, 999, right(), &store), DropCheck::Nothing);
+        ws.open_settings();
+        let settings_leaf = ws.tabs[ws.active].root.leaves().first().copied().unwrap_or(0);
+        assert_eq!(ws.file_drop_check(&file, settings_leaf, right(), &store), DropCheck::Nothing);
+    }
+
+    #[test]
+    fn holding_panes_outlive_their_session() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        let follower = ws.open_preview(claude).map(|p| match p {
+            PreviewPlace::Split { leaf, .. } | PreviewPlace::NewTab(leaf) | PreviewPlace::Existing(leaf) => leaf,
+        });
+        let follower = follower.unwrap();
+        let store = SessionStore::default();
+        let held = ws.drop_file(&drop_of(HostId::local(), None, "a"), claude, right(), &store).unwrap();
+        assert_eq!(ws.preview_of(claude), Some(follower));
+        ws.close(claude);
+        // The window closes the follower of a closed Claude pane (`preview_of` still names it); the holding pane stays.
+        assert_eq!(ws.preview_of(claude), Some(follower));
+        ws.close(follower);
+        assert_eq!(ws.preview_of(claude), None);
+        assert!(ws.leaves.contains_key(&held));
+        // A session change in the pane that is gone does nothing to a holding pane.
+        let other = claude_with(&mut ws, 2, "s2");
+        ws.session_seen(&PaneKey::local(2), "s3");
+        let view = ws.leaves[&held].preview.as_ref().unwrap();
+        assert!(view.held.is_some() && view.session.is_none());
+        let _ = other;
+    }
+
+    #[test]
+    fn holding_panes_ignore_tab_edits() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        let store = store_with("s1", &["a"]);
+        let leaf = ws.drop_file(&drop_of(HostId::local(), Some("s1"), "a"), claude, right(), &store).unwrap();
+        let before = ws.clone();
+        assert!(!ws.remove_sent(leaf, "a", &store));
+        assert!(!ws.clear_sent(leaf, &store));
+        assert!(!ws.set_preview_active(leaf, "other"));
+        assert_eq!(ws, before);
+    }
+
+    #[test]
+    fn a_link_in_a_holding_pane_switches_its_file() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        let store = SessionStore::default();
+        let leaf = ws.drop_file(&drop_of(HostId::local(), None, "a"), claude, right(), &store).unwrap();
+        let id = ws.open_link(leaf, Path::new("/r/x.md"), 10, &store).unwrap();
+        assert!(id.starts_with("link:"));
+        assert_eq!(ws.preview_files(leaf, &store).len(), 1);
+        assert_eq!(ws.preview_active(leaf, &store).unwrap().path, PathBuf::from("/r/x.md"));
+        assert_eq!(ws.open_link(leaf, Path::new("/r/x.md"), 20, &store), Some(id));
+        assert!(ws.leaves[&leaf].preview.as_ref().unwrap().linked.is_empty());
+    }
+
+    #[test]
+    fn holding_panes_are_not_watched() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        ws.drop_file(&drop_of(HostId::named("box"), Some("s1"), "a"), claude, right(), &SessionStore::default())
+            .unwrap();
+        assert!(ws.watched_sessions().is_empty());
+    }
+
+    #[test]
+    fn following_preview_in_view_checks_the_visible_tab() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        ws.open_preview(claude).unwrap();
+        let local = HostId::local();
+        assert!(ws.following_preview_in_view(&local, "s1"));
+        assert!(!ws.following_preview_in_view(&local, "s2"));
+        assert!(!ws.following_preview_in_view(&HostId::named("box"), "s1"));
+        ws.new_tab(shell("/b"));
+        assert!(!ws.following_preview_in_view(&local, "s1"));
+        // A holding pane of that file is not a following preview.
+        let mut other = Workspace::default();
+        let c = claude_with(&mut other, 1, "s1");
+        other.drop_file(&drop_of(local.clone(), Some("s1"), "a"), c, right(), &SessionStore::default()).unwrap();
+        assert!(!other.following_preview_in_view(&local, "s1"));
+    }
+
+    #[test]
+    fn running_only_keeps_holding_panes() {
+        let mut saved = workspace_on("i1");
+        let live = claude_with(&mut saved, 1, "s1");
+        let held =
+            saved.drop_file(&drop_of(HostId::local(), None, "a"), live, right(), &SessionStore::default()).unwrap();
+        let dead = claude_with(&mut saved, 2, "s2");
+        let Some(PreviewPlace::Split { leaf: dead_preview, .. }) = saved.open_preview(dead) else { panic!() };
+        let restored = restore_local(Some(saved), "i1", &[info(1, "claude", 5)], &launch(), false, &HashSet::new());
+        let ws = restored.workspace;
+        assert!(ws.leaves.contains_key(&held));
+        assert!(!ws.leaves.contains_key(&dead_preview));
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn bad_follows_are_dropped_on_load() {
+        let mut ws = Workspace::default();
+        let claude = claude_with(&mut ws, 1, "s1");
+        let shell_leaf = ws.new_tab(shell("/b"));
+        let file = sent("a", 1);
+        let mk = |ws: &mut Workspace, follows, held: Option<SentFile>| {
+            let leaf = ws.new_tab(PaneLaunch::preview("/r".into()));
+            ws.leaves.get_mut(&leaf).unwrap().preview =
+                Some(PreviewLeaf { follows, held, session: None, active: None, linked: Vec::new() });
+            leaf
+        };
+        let missing = mk(&mut ws, Some(999), None);
+        let on_shell = mk(&mut ws, Some(shell_leaf), None);
+        let neither = mk(&mut ws, None, None);
+        let both = mk(&mut ws, Some(claude), Some(file.clone()));
+        let on_preview = mk(&mut ws, Some(both), None);
+        let fine = mk(&mut ws, None, Some(file));
+        ws.normalize_previews();
+        for gone in [missing, on_shell, neither, on_preview] {
+            assert!(!ws.leaves.contains_key(&gone), "{gone}");
+        }
+        assert_eq!(ws.leaves[&both].preview.as_ref().unwrap().held, None);
+        assert_eq!(ws.leaves[&both].preview.as_ref().unwrap().follows, Some(claude));
+        assert!(ws.leaves.contains_key(&fine));
+        assert!(ws.is_consistent());
     }
 }

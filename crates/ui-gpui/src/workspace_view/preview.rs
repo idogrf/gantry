@@ -995,7 +995,12 @@ impl WorkspaceView {
                 let active = self.active_file(leaf, cx).map(|(_, id)| id);
                 let target = file.clone().or(active);
                 let copy = target.filter(|id| self.has_source(leaf, id, cx));
-                self.open_preview_menu(preview_menu(leaf, file.as_deref(), copy.as_deref()), *position, window, cx);
+                self.open_preview_menu(
+                    preview_menu(leaf, file.as_deref(), copy.as_deref(), self.workspace.is_holding(leaf)),
+                    *position,
+                    window,
+                    cx,
+                );
             }
             PreviewEvent::Hidden { position } => {
                 let Some(slot) = self.previews.get(&leaf) else { return };

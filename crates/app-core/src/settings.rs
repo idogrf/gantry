@@ -78,6 +78,10 @@ impl AlertTone {
     pub const FINISHED: [AlertTone; 4] =
         [AlertTone::ClassicBlip, AlertTone::GentleRise, AlertTone::SoftBloop, AlertTone::SoftDrop];
 
+    /// The tones offered for a file Claude sent, in the order the Settings list shows them.
+    pub const FILE_SENT: [AlertTone; 4] =
+        [AlertTone::SoftBloop, AlertTone::ClassicBlip, AlertTone::GentleRise, AlertTone::SoftDrop];
+
     /// The tones offered for a session that needs input, in the order the Settings list shows them.
     pub const NEEDS_INPUT: [AlertTone; 4] =
         [AlertTone::FallingBlip, AlertTone::SoftFall, AlertTone::SoftFlutter, AlertTone::WarmHum];
@@ -105,6 +109,8 @@ impl AlertTone {
 pub struct EventAlerts {
     /// Show the unseen badge.
     pub badge: bool,
+    /// Show an in-app pop-up.
+    pub popup: bool,
     /// Raise a native notification.
     pub notification: bool,
     /// Play the sound.
@@ -173,6 +179,8 @@ pub struct AlertSettings {
     pub needs_input: EventAlerts,
     /// Alerts for a session that finished.
     pub finished: EventAlerts,
+    /// Alerts for a file Claude sent to the preview; its badge is the sidebar file chip.
+    pub file_sent: EventAlerts,
     /// Seconds a session must be busy before finishing counts.
     pub finished_after_seconds: u32,
     /// Seconds a pane must be on screen in the active window before its alert counts as seen (0 = at once).
@@ -494,8 +502,27 @@ impl Default for Settings {
             terminal_font: TerminalFont { family: None, size: 14.0, line_height: 1.2 },
             ui_font_size: 14.0,
             alerts: AlertSettings {
-                needs_input: EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::FallingBlip },
-                finished: EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::ClassicBlip },
+                needs_input: EventAlerts {
+                    badge: true,
+                    popup: false,
+                    notification: true,
+                    sound: true,
+                    tone: AlertTone::FallingBlip,
+                },
+                finished: EventAlerts {
+                    badge: true,
+                    popup: false,
+                    notification: true,
+                    sound: true,
+                    tone: AlertTone::ClassicBlip,
+                },
+                file_sent: EventAlerts {
+                    badge: true,
+                    popup: true,
+                    notification: false,
+                    sound: false,
+                    tone: AlertTone::SoftBloop,
+                },
                 finished_after_seconds: 1,
                 read_after_seconds: 2,
                 when_visible: false,
@@ -893,6 +920,7 @@ impl Reader {
         let prefix = format!("alerts.{key}.");
         EventAlerts {
             badge: self.bool(&map, &prefix, "badge", default.badge),
+            popup: self.bool(&map, &prefix, "popup", default.popup),
             notification: self.bool(&map, &prefix, "notification", default.notification),
             sound: self.bool(&map, &prefix, "sound", default.sound),
             tone: self.choice(&map, &prefix, "tone", default.tone, AlertTone::from_name),
@@ -942,6 +970,7 @@ impl Reader {
         let alerts = AlertSettings {
             needs_input: self.event(&map, "needsInput", default.needs_input),
             finished: self.event(&map, "finished", default.finished),
+            file_sent: self.event(&map, "fileSent", default.file_sent),
             finished_after_seconds: self.number(&map, "alerts.", "finishedAfterSeconds", 1.0, (0.0, 600.0)).round()
                 as u32,
             read_after_seconds: self.number(&map, "alerts.", "readAfterSeconds", 2.0, (0.0, 60.0)).round() as u32,
@@ -1095,10 +1124,13 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
     );
     add(&["uiFontSize"], number(settings.ui_font_size), settings.ui_font_size != default.ui_font_size);
     let (alerts, base) = (&settings.alerts, &default.alerts);
-    for (key, event, base) in
-        [("needsInput", alerts.needs_input, base.needs_input), ("finished", alerts.finished, base.finished)]
-    {
+    for (key, event, base) in [
+        ("needsInput", alerts.needs_input, base.needs_input),
+        ("finished", alerts.finished, base.finished),
+        ("fileSent", alerts.file_sent, base.file_sent),
+    ] {
         add(&["alerts", key, "badge"], event.badge.into(), event.badge != base.badge);
+        add(&["alerts", key, "popup"], event.popup.into(), event.popup != base.popup);
         add(&["alerts", key, "notification"], event.notification.into(), event.notification != base.notification);
         add(&["alerts", key, "sound"], event.sound.into(), event.sound != base.sound);
         add(&["alerts", key, "tone"], event.tone.name().into(), event.tone != base.tone);
@@ -1495,6 +1527,78 @@ mod tests {
     }
 
     #[test]
+    fn file_sent_and_popup_defaults() {
+        let s = parse("{}").settings.unwrap();
+        assert_eq!(
+            s.alerts.file_sent,
+            EventAlerts { badge: true, popup: true, notification: false, sound: false, tone: AlertTone::SoftBloop }
+        );
+        assert!(!s.alerts.needs_input.popup);
+        assert!(!s.alerts.finished.popup);
+    }
+
+    #[test]
+    fn popup_and_file_sent_are_read() {
+        let loaded =
+            parse(r#"{"alerts": {"finished": {"popup": true}, "fileSent": {"badge": false, "tone": "gentle-rise"}}}"#);
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        let alerts = loaded.settings.unwrap().alerts;
+        let base = Settings::default().alerts.file_sent;
+        assert!(alerts.finished.popup);
+        assert!(!alerts.file_sent.badge);
+        assert_eq!(alerts.file_sent.tone, AlertTone::GentleRise);
+        assert_eq!(
+            (alerts.file_sent.popup, alerts.file_sent.notification, alerts.file_sent.sound),
+            (base.popup, base.notification, base.sound)
+        );
+    }
+
+    #[test]
+    fn bad_alert_values_fall_back_with_problems() {
+        let loaded = parse(r#"{"alerts": {"needsInput": {"popup": "yes"}, "fileSent": {"tone": "nope"}}}"#);
+        let keys: Vec<_> = loaded.problems.iter().map(|problem| problem.key.as_str()).collect();
+        assert_eq!(keys, ["alerts.needsInput.popup", "alerts.fileSent.tone"]);
+        let defaults = Settings::default().alerts;
+        let alerts = loaded.settings.unwrap().alerts;
+        assert_eq!(alerts.needs_input.popup, defaults.needs_input.popup);
+        assert_eq!(alerts.file_sent.tone, defaults.file_sent.tone);
+
+        let loaded = parse(r#"{"alerts": {"fileSent": 3}}"#);
+        assert_eq!(loaded.problems.len(), 1);
+        assert_eq!(loaded.problems[0].key, "alerts.fileSent");
+        assert_eq!(loaded.settings.unwrap().alerts.file_sent, defaults.file_sent);
+    }
+
+    #[test]
+    fn defaults_write_no_alert_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &Settings::default(), &Map::new()).unwrap();
+        assert!(read_json(&path).get("alerts").is_none());
+    }
+
+    #[test]
+    fn changed_popup_is_written_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut settings = Settings::default();
+        settings.alerts.finished.popup = true;
+        save(&path, &settings, &Map::new()).unwrap();
+        assert_eq!(read_json(&path)["alerts"]["finished"], serde_json::json!({"popup": true}));
+    }
+
+    #[test]
+    fn unknown_keys_under_file_sent_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let loaded = parse(r#"{"alerts": {"fileSent": {"x": 1}}}"#);
+        let mut settings = loaded.settings.unwrap();
+        settings.alerts.file_sent.sound = true;
+        save(&path, &settings, &loaded.raw).unwrap();
+        assert_eq!(read_json(&path)["alerts"]["fileSent"], serde_json::json!({"x": 1, "sound": true}));
+    }
+
+    #[test]
     fn broken_file_keeps_last_good() {
         let loaded = parse("{ \"theme\": ");
         assert!(loaded.settings.is_none());
@@ -1547,8 +1651,27 @@ mod tests {
             terminal_font: TerminalFont { family: Some("Fira Code".into()), size: 17.5, line_height: 1.45 },
             ui_font_size: 16.0,
             alerts: AlertSettings {
-                needs_input: EventAlerts { badge: false, notification: false, sound: false, tone: AlertTone::SoftFall },
-                finished: EventAlerts { badge: false, notification: true, sound: false, tone: AlertTone::SoftDrop },
+                needs_input: EventAlerts {
+                    badge: false,
+                    popup: true,
+                    notification: false,
+                    sound: false,
+                    tone: AlertTone::SoftFall,
+                },
+                finished: EventAlerts {
+                    badge: false,
+                    popup: false,
+                    notification: true,
+                    sound: false,
+                    tone: AlertTone::SoftDrop,
+                },
+                file_sent: EventAlerts {
+                    badge: false,
+                    popup: false,
+                    notification: true,
+                    sound: true,
+                    tone: AlertTone::GentleRise,
+                },
                 finished_after_seconds: 30,
                 read_after_seconds: 5,
                 when_visible: true,

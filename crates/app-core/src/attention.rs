@@ -377,13 +377,14 @@ mod tests {
     }
 
     fn all_on() -> EventAlerts {
-        EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::FallingBlip }
+        EventAlerts { badge: true, popup: false, notification: true, sound: true, tone: AlertTone::FallingBlip }
     }
 
     fn settings() -> AlertSettings {
         AlertSettings {
             needs_input: all_on(),
             finished: all_on(),
+            file_sent: all_on(),
             finished_after_seconds: 3,
             read_after_seconds: 2,
             when_visible: false,
@@ -433,8 +434,20 @@ mod tests {
     #[test]
     fn grid_cells_are_independent() {
         let alerts = AlertSettings {
-            needs_input: EventAlerts { badge: false, notification: false, sound: true, tone: AlertTone::FallingBlip },
-            finished: EventAlerts { badge: false, notification: true, sound: false, tone: AlertTone::ClassicBlip },
+            needs_input: EventAlerts {
+                badge: false,
+                popup: false,
+                notification: false,
+                sound: true,
+                tone: AlertTone::FallingBlip,
+            },
+            finished: EventAlerts {
+                badge: false,
+                popup: false,
+                notification: true,
+                sound: false,
+                tone: AlertTone::ClassicBlip,
+            },
             ..settings()
         };
         assert_eq!(
